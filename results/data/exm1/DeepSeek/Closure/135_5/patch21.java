@@ -1,0 +1,1 @@
+  boolean defineProperty(String name, JSType type,

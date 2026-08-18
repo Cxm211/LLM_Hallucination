@@ -1,0 +1,1 @@
+public boolean isEmpty(SerializerProvider prov, Object value) { Object delegateValue = convertValue(value); if (_delegateSerializer == null) { return prov.findValueSerializer(delegateValue.getClass(), null).isEmpty(prov, delegateValue); } return _delegateSerializer.isEmpty(prov, delegateValue); }

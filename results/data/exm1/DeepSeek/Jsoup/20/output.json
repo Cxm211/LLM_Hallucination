@@ -1,0 +1,190 @@
+We need to analyze the provided source code. The buggy function is `parseByteData` in `DataUtil` class (I assume based on context). The testcases are from various test classes. We need to determine which testcases expose the bug.
+
+First, let's examine the buggy `parseByteData` function:
+
+```java
+static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) {
+    String docData;
+    Document doc = null;
+    if (charsetName == null) { // determine from meta. safe parse as UTF-8
+        // look for <meta http-equiv="Content-Type" content="text/html;charset=gb2312"> or HTML5 <meta charset="gb2312">
+        docData = Charset.forName(defaultCharset).decode(byteData).toString();
+        doc = parser.parseInput(docData, baseUri);
+        Element meta = doc.select("meta[http-equiv=content-type], meta[charset]").first();
+        if (meta != null) { // if not found, will keep utf-8 as best attempt
+            String foundCharset = meta.hasAttr("http-equiv") ? getCharsetFromContentType(meta.attr("content")) : meta.attr("charset");
+            if (foundCharset != null && foundCharset.length() != 0 && !foundCharset.equals(defaultCharset)) { // need to re-decode
+                charsetName = foundCharset;
+                byteData.rewind();
+                docData = Charset.forName(foundCharset).decode(byteData).toString();
+                doc = null;
+            }
+        }
+    } else { // specified by content type header (or by user on file load)
+        Validate.notEmpty(charsetName, "Must set charset arg to character set of file to parse. Set to null to attempt to detect from HTML");
+        docData = Charset.forName(charsetName).decode(byteData).toString();
+    }
+    if (doc == null) {
+        // there are times where there is a spurious byte-order-mark at the start of the text. Shouldn't be present
+        // in utf-8. If after decoding, there is a BOM, strip it; otherwise will cause the parser to go straight
+        // into head mode
+
+        doc = parser.parseInput(docData, baseUri);
+        doc.outputSettings().charset(charsetName);
+    }
+    return doc;
+}
+```
+
+The bug: When `charsetName` is provided (not null), the function decodes the byte data using that charset and then later, if doc is null, it sets the output charset to `charsetName`. But when `charsetName` is null, it might re-decode with found charset and set charsetName to foundCharset. However, the issue might be that when `charsetName` is not null, it doesn't handle byte order mark (BOM) stripping? Actually, the comment about BOM is only in the branch where doc == null, but that branch is executed in both cases (when doc is null after initial parse). But the BOM stripping code is missing! Look at the comment: "If after decoding, there is a BOM, strip it; otherwise will cause the parser to go straight into head mode". But there is no actual code to strip BOM! The comment is there but no implementation. That is likely the bug: The BOM is not being stripped.
+
+But let's see which testcases might be affected. The test `discardsSpuriousByteOrderMark` explicitly tests for BOM: It creates a ByteBuffer with UTF-8 encoded HTML that has a BOM at start (U+FEFF). It calls `parseByteData(buffer, "UTF-8", ...)` with charsetName="UTF-8" (not null). In the function, since charsetName is not null, it goes to else branch, decodes as UTF-8 (including BOM), then since doc is null (because not re-parsed), it goes to final if block, but it does not strip BOM. So the BOM remains in docData, and the parser will interpret it as a character before the html tag, causing the parser to treat the document incorrectly (goes into head mode? Actually the comment says it will cause parser to go straight into head mode, meaning the BOM is not a valid tag so it might be ignored?). But the test expects that after parsing, the title is "One", so the BOM should be dropped. In the buggy version, the BOM is not dropped, so the title might be something else? Let's trace: The BOM character is decoded as '\uFEFF'. When parsed as HTML, the parser might treat it as text before the html element, which is allowed, but the <html> element is still there. Possibly the title is still "One"? But the comment says "otherwise will cause the parser to go straight into head mode", meaning it might skip the html tag and go directly into head. That could cause the document to be malformed and the head element might not have a title? Actually, the test asserts `doc.head().text()` equals "One". If the BOM causes the parser to not recognize the <html> tag, it might not have a head element? Or the head's text might not contain "One"? 
+
+Given the comment, the lack of BOM stripping likely causes the test to fail. So `discardsSpuriousByteOrderMark` is a triggering test.
+
+Now, are there other testcases that may be affected? The integration tests like `testSmhBizArticle`, `testNewsHomepage`, etc., they call `Jsoup.parse(in, "UTF-8", baseUri)` which eventually calls `parseByteData` with charsetName="UTF-8" (explicit). If the HTML files do not have BOM, they may not be affected. But if any of those files happen to have a BOM, they would be affected. However, we don't know the contents of those files. Typically, these test files may not have BOM, but it's possible. The test `testHtml5Charset` uses null charset detection, which may also be affected if the meta charset detection code is buggy? But the bug we identified is about BOM stripping missing. That bug would affect any time a BOM is present in the data, regardless of charset detection. But the test `discardsSpuriousByteOrderMark` explicitly tests it.
+
+Additionally, there might be another bug: In the else branch, when charsetName is provided, there is no BOM stripping at all. In the null branch, after re-decoding, it sets doc=null, then later in the final if block, it parses again but still no BOM stripping. So in both cases, BOM is not stripped. The comment implies that BOM should be stripped, but the code never does it. So the fix must strip the BOM from docData after decoding.
+
+Now, let's consider the testcases: We need to list only those that actually trigger the bug. The bug is the missing BOM stripping. So any test that involves parsing a document that contains a BOM will fail. The only test that explicitly creates a document with BOM is `discardsSpuriousByteOrderMark`. The other tests may or may not have BOM in their test files, but we don't have evidence. Also, the test `testBaidu` calls `Jsoup.parse(in, null, ...)` which will trigger the null charset detection path, but if the file does not have BOM, it will work fine. However, if the meta charset detection is also buggy? Let's check the function for other bugs.
+
+Another potential bug: In the null charset branch, after re-decoding, it sets `doc = null` and then later `doc = parser.parseInput(docData, baseUri);` But what if the foundCharset is the same as defaultCharset? The condition checks `!foundCharset.equals(defaultCharset)`, so it only re-decodes if different. If it's the same, it doesn't re-decode and doc remains non-null, so the final if block is skipped. That's fine. If foundCharset is null or empty, it also skips. So that part seems correct.
+
+However, there might be a bug in the detection logic: the CSS selector `meta[http-equiv=content-type], meta[charset]` might not match correctly? But that's not directly the bug here.
+
+Also, note that `getCharsetFromContentType` handles quoted charset values? The test `testQuotedCharset` tests that function, but it is not part of the buggy function; it's a separate method. The buggy function calls `getCharsetFromContentType` which presumably works correctly as per the test. So those tests are not testing `parseByteData` directly.
+
+Now, consider the test `testHtml5Charset` which tests HTML5 charset detection (meta charset). This test uses `Jsoup.parse(in, null, ...)`, which goes through the null charset path. It expects correct charset detection and output. But does it involve BOM? Possibly not. However, if there is a bug in the detection, it might fail. But we are not told that the detection is buggy; only the BOM stripping is missing. The test `testHtml5Charset` includes three files; the second one expects UTF-8 and that "新" is not in text because it's mis-encoded? Actually, the test says: for meta-charset-2.html, it expects UTF-8 and asserts that `"新"` is not equal to doc.text(); meaning the document is not interpreted as Chinese? That might be correct. So it's likely not failing due to BOM.
+
+Given the context, the most direct triggering test is `discardsSpuriousByteOrderMark`. Also, note that the test `testBinary` tests parsing a JPEG file, which is binary. It likely does not have a BOM, but the parser will produce garbage. The test expects `doc.text().contains("gd-jpeg")`. That might still pass even without BOM stripping. So probably not affected.
+
+But we must consider that the bug might also affect cases where charsetName is null and the HTML has a BOM. For example, if a file has a UTF-8 BOM and the meta charset is not present, it would still have BOM. But the null path first decodes as UTF-8, finds meta, if meta doesn't specify charset, it keeps UTF-8 and doc is not null, so final if block is skipped, hence BOM not stripped. That would cause issues. But we don't have a specific test for that.
+
+The instruction says: "Determine which testcase methods actually expose the bug." So we need to list the full method paths. Based on the provided test methods, the only one that explicitly tests for BOM stripping is `discardsSpuriousByteOrderMark`. However, there is also `testBaidu` which tests GB2312 encoding; but does that file have a BOM? Typically GB2312 files may have BOM? Unlikely. The test `testBaiduVariant` similarly. The test `testHtml5Charset` might involve files with BOM? Possibly meta-charset-1.html is GB2312, but it's not indicated to have BOM. So I think only one test triggers.
+
+But also, note that the test `testSupplyParserToConnection` and others involve XML parsing, but they use Parser.xmlParser() which goes through `Jsoup.parse` with a different path? Actually `Jsoup.parse(InputStream, charset, baseUri, parser)` eventually calls `DataUtil.parseByteData` with the provided parser. So they could be affected if the XML file has BOM. But those tests don't expect BOM handling; they compare HTML output. If a BOM is present, the output might differ. However, the test file "xml-test.xml" likely does not have BOM. So not triggering.
+
+Given the lack of information, the safest is to assume only the explicit BOM test triggers. But the problem statement says: "If multiple functions collectively cause the issue, you must fix all of them." Here only one function is provided. So we fix it.
+
+Now, we need to produce fixed_code. The fix: Strip BOM from docData after decoding. The comment indicates that we should strip the BOM. The code is missing the actual stripping. So we need to add a line that removes the BOM character if present. For example, if docData.startsWith("\uFEFF") then docData = docData.substring(1). We should do this after decoding and before parsing, or after decoding but before using docData. In both branches (null and non-null), we decode to docData. Then later we parse. The BOM should be stripped from docData before parsing. So the fix is to add a method that strips BOM, or just inline. But we must place it where it applies to both branches. Actually, the final parse is done after the if-else block. So we could strip BOM from docData just before the final parse. But note that in the else branch, docData is used only once; in the null branch, if re-decoding occurs, docData is overwritten. So we could strip after the if-else, before the final parse and also in the initial parse? Actually, the initial parse in null branch also uses docData (the UTF-8 decoded data) to find meta. That initial parse might also be affected by BOM. If the BOM is present in the initial UTF-8 parse, it might affect the meta element selection? The BOM character is before the html, so the meta element would be inside the html. The selector might still work because it's inside the document. But the BOM might cause the parser to produce different DOM? Possibly not, but to be safe, we should strip BOM immediately after decoding in all cases. So we can add a helper method that strips BOM and call it after each decode.
+
+Given that the fix should be minimal, we can add: if (docData.length() > 0 && docData.charAt(0) == '\uFEFF') docData = docData.substring(1); right after decoding. That would handle both branches.
+
+But we must also consider the case where charsetName is provided but the data is not UTF-8; a BOM might not be present. Still, it's fine.
+
+Additionally, we need to preserve the comment about BOM stripping? The comment is present, but we should implement it.
+
+Thus, the fixed code will include the same function but with added BOM stripping.
+
+Now, we need to output the JSON with trigger_method list and fixed_code. The trigger_method should be the full path of the test method. Looking at the test method names provided, they are like "org.jsoup.helper.DataUtilTest::testCharset" but the test method is actually named "testCharset" without the class? Actually, the test method names are given as:
+
+- org.jsoup.helper.DataUtilTest::testCharset
+- org.jsoup.helper.DataUtilTest::testQuotedCharset
+- org.jsoup.helper.DataUtilTest::discardsSpuriousByteOrderMark
+- org.jsoup.integration.ParseTest::testSmhBizArticle
+... etc.
+
+So the full path should be like "org.jsoup.helper.DataUtilTest.discardsSpuriousByteOrderMark". The format in the test list is "package.Class::method", but in JSON we need to output the full method path, e.g., "org.jsoup.helper.DataUtilTest.discardsSpuriousByteOrderMark".
+
+We need to output only those that trigger. We'll output the one that explicitly tests BOM.
+
+Additionally, consider if any other test may fail due to BOM in test files. Since we don't have evidence, we assume only that one.
+
+Thus, trigger_method: ["org.jsoup.helper.DataUtilTest.discardsSpuriousByteOrderMark"]
+
+Now fixed_code: We need to output the full fixed function as a JSON string. The source code provided includes only the `parseByteData` function? The input says "Below is the Java source code for analysis." and gives only that function. So we assume we only need to fix that function. The fixed_code array should contain exactly the fixed function as a string. Note: The function is static and belongs to DataUtil class. We just output the function body as a string (including its signature and braces). The output should be a valid Java code string with proper escaping.
+
+We'll write the fixed version:
+
+```
+static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) {
+    String docData;
+    Document doc = null;
+    if (charsetName == null) { // determine from meta. safe parse as UTF-8
+        docData = Charset.forName(defaultCharset).decode(byteData).toString();
+        // Strip BOM if present
+        if (docData.length() > 0 && docData.charAt(0) == '\uFEFF') {
+            docData = docData.substring(1);
+        }
+        doc = parser.parseInput(docData, baseUri);
+        Element meta = doc.select("meta[http-equiv=content-type], meta[charset]").first();
+        if (meta != null) {
+            String foundCharset = meta.hasAttr("http-equiv") ? getCharsetFromContentType(meta.attr("content")) : meta.attr("charset");
+            if (foundCharset != null && foundCharset.length() != 0 && !foundCharset.equals(defaultCharset)) {
+                charsetName = foundCharset;
+                byteData.rewind();
+                docData = Charset.forName(foundCharset).decode(byteData).toString();
+                // Strip BOM again after re-decoding
+                if (docData.length() > 0 && docData.charAt(0) == '\uFEFF') {
+                    docData = docData.substring(1);
+                }
+                doc = null;
+            }
+        }
+    } else {
+        Validate.notEmpty(charsetName, "Must set charset arg to character set of file to parse. Set to null to attempt to detect from HTML");
+        docData = Charset.forName(charsetName).decode(byteData).toString();
+        // Strip BOM if present
+        if (docData.length() > 0 && docData.charAt(0) == '\uFEFF') {
+            docData = docData.substring(1);
+        }
+    }
+    if (doc == null) {
+        doc = parser.parseInput(docData, baseUri);
+        doc.outputSettings().charset(charsetName);
+    }
+    return doc;
+}
+```
+
+But note: In the null branch, we also strip BOM after initial decode. That is important because the initial parse to find meta could be affected by BOM. In the original, the comment about BOM was in the final if block, but it's better to strip early. However, we must ensure that the meta selection still works: if BOM is stripped, the document starts with '<', which is fine. The meta element will still be found. So it's safe.
+
+Alternatively, we could strip only in the final block, but then the meta detection might be affected. Since the comment says "If after decoding, there is a BOM, strip it; otherwise will cause the parser to go straight into head mode", it implies stripping before final parse. But the initial parse for meta might also be affected, as the BOM could cause the parser to go into head mode and the meta might not be recognized? Actually, the BOM is not a tag, so the parser would likely start with text, then the html tag. The meta is likely inside head, so it might still be found. But to be safe, we strip immediately after decoding.
+
+Another approach: Only strip in the final if block before parsing, but not in the initial null branch decode. But the initial decode may also have BOM; the meta detection might fail if the BOM causes the document to be parsed incorrectly? For example, if BOM is present, the parser might put everything into head mode? The comment says "cause the parser to go straight into head mode", meaning the parser might treat the BOM as text and then when it encounters <html>, it might not recognize it? I'm not sure. In practice, HTML parsers usually ignore BOM, but the Jsoup parser might not. Given the comment and the test, the fix should strip BOM before parsing. Thus, we should strip before every parse.
+
+Therefore, the fix above is appropriate.
+
+Now, we need to output the fixed_code as an array of strings. The function is only one. So we output:
+
+"fixed_code": ["static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) { ... }"]
+
+But we need to escape double quotes and newlines as appropriate for a JSON string. Since the code contains double quotes, we need to escape them with backslashes. Also newlines should be \n. We'll produce a single line with \n.
+
+Alternatively, we can keep it as multiline within the JSON string, but that's allowed as long as we escape double quotes. We'll do a single line for simplicity. Actually, the instruction says "full fixed_function as a JSON string", so we need to embed the Java code as a string, so we must escape all double quotes and backslashes.
+
+Let's write the fixed code in one line with \n:
+
+Example: "static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) {\n    String docData;\n    Document doc = null;\n    if (charsetName == null) { ... } else { ... }\n    if (doc == null) { ... }\n    return doc;\n}"
+
+But we need to include the BOM stripping lines.
+
+We'll produce the exact fixed code.
+
+Also note: The original comment "there are times where there is a spurious byte-order-mark..." is still present in the final if block, but we have already stripped BOM earlier, so it's redundant but we can keep it or remove the comment? The fix should be minimal, but we can keep the comment as is. However, the comment is not code, it's just a comment. We can leave it. But the instruction says "produce the minimal correct fix", so we might remove the comment about stripping BOM since we've actually done it? But it's not necessary; we can keep it. We'll keep the original code structure.
+
+We need to ensure we output the correct function signature exactly as provided.
+
+Now, for the trigger_method, we list only one: "org.jsoup.helper.DataUtilTest.discardsSpuriousByteOrderMark". The test name is "discardsSpuriousByteOrderMark" without "test" prefix, as given.
+
+Are there any other test methods that might expose the bug? Let's consider `testBaidu` and `testBaiduVariant` which test GB2312 encoding. If the GB2312 file has a BOM? Not likely. Also, `testHtml5Charset` uses null charset and expects correct charset detection. If the bug was in the detection logic (e.g., not parsing meta correctly due to BOM), then those tests might fail. But we are only told about the BOM bug. Without evidence, we stick to the explicit test.
+
+Thus, JSON output:
+
+{
+  "trigger_method": ["org.jsoup.helper.DataUtilTest.discardsSpuriousByteOrderMark"],
+  "fixed_code": ["static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) {\n    String docData;\n    Document doc = null;\n    if (charsetName == null) {\n        docData = Charset.forName(defaultCharset).decode(byteData).toString();\n        if (docData.length() > 0 && docData.charAt(0) == '\\uFEFF') {\n            docData = docData.substring(1);\n        }\n        doc = parser.parseInput(docData, baseUri);\n        Element meta = doc.select(\"meta[http-equiv=content-type], meta[charset]\").first();\n        if (meta != null) {\n            String foundCharset = meta.hasAttr(\"http-equiv\") ? getCharsetFromContentType(meta.attr(\"content\")) : meta.attr(\"charset\");\n            if (foundCharset != null && foundCharset.length() != 0 && !foundCharset.equals(defaultCharset)) {\n                charsetName = foundCharset;\n                byteData.rewind();\n                docData = Charset.forName(foundCharset).decode(byteData).toString();\n                if (docData.length() > 0 && docData.charAt(0) == '\\uFEFF') {\n                    docData = docData.substring(1);\n                }\n                doc = null;\n            }\n        }\n    } else {\n        Validate.notEmpty(charsetName, \"Must set charset arg to character set of file to parse. Set to null to attempt to detect from HTML\");\n        docData = Charset.forName(charsetName).decode(byteData).toString();\n        if (docData.length() > 0 && docData.charAt(0) == '\\uFEFF') {\n            docData = docData.substring(1);\n        }\n    }\n    if (doc == null) {\n        doc = parser.parseInput(docData, baseUri);\n        doc.outputSettings().charset(charsetName);\n    }\n    return doc;\n}"]
+}
+
+But we need to be careful: The original code had the comment about BOM inside the final if block. Our fix removed that comment? Actually, we kept the comment? In the fixed code above, we didn't add the comment. The original comment was a multi-line comment. It's okay to remove it; minimal fix means we don't need to keep it. The instruction says "produce the minimal correct fix", so we can keep only necessary changes. We can leave the comment out to avoid clutter. The fix is correct.
+
+Also note: The test `discardsSpuriousByteOrderMark` calls `DataUtil.parseByteData(buffer, "UTF-8", "http://foo.com/", Parser.htmlParser());` with charsetName="UTF-8". That goes to else branch. Our fix adds BOM stripping in else branch, so it will strip BOM before parsing in the final if block (since doc will be null because doc was initially null? Actually, in else branch, doc is never assigned, so it remains null, then final if block executes, and we parse the docData which now has BOM stripped. That should make the test pass.
+
+Now, verify if the test `discardsSpuriousByteOrderMark` actually triggers the bug? Yes.
+
+Now, we must output only the required JSON.
+
+Thus, final answer.{
+  "trigger_method": ["org.jsoup.helper.DataUtilTest.discardsSpuriousByteOrderMark"],
+  "fixed_code": ["static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) {\n    String docData;\n    Document doc = null;\n    if (charsetName == null) {\n        docData = Charset.forName(defaultCharset).decode(byteData).toString();\n        if (docData.length() > 0 && docData.charAt(0) == '\\uFEFF') {\n            docData = docData.substring(1);\n        }\n        doc = parser.parseInput(docData, baseUri);\n        Element meta = doc.select(\"meta[http-equiv=content-type], meta[charset]\").first();\n        if (meta != null) {\n            String foundCharset = meta.hasAttr(\"http-equiv\") ? getCharsetFromContentType(meta.attr(\"content\")) : meta.attr(\"charset\");\n            if (foundCharset != null && foundCharset.length() != 0 && !foundCharset.equals(defaultCharset)) {\n                charsetName = foundCharset;\n                byteData.rewind();\n                docData = Charset.forName(foundCharset).decode(byteData).toString();\n                if (docData.length() > 0 && docData.charAt(0) == '\\uFEFF') {\n                    docData = docData.substring(1);\n                }\n                doc = null;\n            }\n        }\n    } else {\n        Validate.notEmpty(charsetName, \"Must set charset arg to character set of file to parse. Set to null to attempt to detect from HTML\");\n        docData = Charset.forName(charsetName).decode(byteData).toString();\n        if (docData.length() > 0 && docData.charAt(0) == '\\uFEFF') {\n            docData = docData.substring(1);\n        }\n    }\n    if (doc == null) {\n        doc = parser.parseInput(docData, baseUri);\n        doc.outputSettings().charset(charsetName);\n    }\n    return doc;\n}"]
+}

@@ -1,0 +1,48 @@
+    Node processFunctionNode(FunctionNode functionNode) {
+      Name name = functionNode.getFunctionName();
+      Boolean isUnnamedFunction = false;
+      if (name == null) {
+        int functionType = functionNode.getFunctionType();
+        if (functionType != FunctionNode.FUNCTION_EXPRESSION) {
+          errorReporter.error(
+            "unnamed function statement",
+            sourceName,
+            functionNode.getLineno(), "", 0);
+
+          return newNode(Token.EXPR_RESULT, Node.newNumber(0));
+        }
+        name = new Name();
+        name.setIdentifier("");
+        isUnnamedFunction = true;
+      }
+      Node node = newNode(Token.FUNCTION);
+      Node newName = transform(name);
+      if (isUnnamedFunction) {
+        newName.setLineno(functionNode.getLineno());
+        int nameColumn = functionNode.getAbsolutePosition();
+        newName.setCharno(position2charno(nameColumn));
+        maybeSetLengthFrom(newName, name);
+      }
+
+      node.addChildToBack(newName);
+      Node lp = newNode(Token.PARAM_LIST);
+      Name fnName = functionNode.getFunctionName();
+      if (fnName != null) {
+        lp.setLineno(fnName.getLineno());
+      } else {
+        lp.setLineno(functionNode.getLineno());
+      }
+      int lparenCharno = functionNode.getLp() +
+          functionNode.getAbsolutePosition();
+
+      lp.setCharno(position2charno(lparenCharno));
+      for (AstNode param : functionNode.getParams()) {
+        lp.addChildToBack(transform(param));
+      }
+      node.addChildToBack(lp);
+
+      Node bodyNode = transform(functionNode.getBody());
+      parseDirectives(bodyNode);
+      node.addChildToBack(bodyNode);
+     return node;
+    }

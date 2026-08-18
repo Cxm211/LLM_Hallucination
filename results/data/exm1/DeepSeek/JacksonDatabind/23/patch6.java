@@ -1,0 +1,1 @@
+public LongSerializer() { super(Long.class); }

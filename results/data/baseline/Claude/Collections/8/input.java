@@ -1,0 +1,20 @@
+// buggy code
+    private void writeObject(ObjectOutputStream out) throws IOException {
+        out.defaultWriteObject();
+        out.writeInt(size());
+        for (Iterator it = iterator(); it.hasNext();) {
+            out.writeObject(it.next());
+        }
+    }
+
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        int size = in.readInt();
+        buffer = new Object[size + 1];
+        for (int i = 0; i < size; i++) {
+            buffer[i] = in.readObject();
+        }
+        head = 0;
+        tail = size;
+    }
+

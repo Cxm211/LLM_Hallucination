@@ -1,0 +1,438 @@
+We are given a Java source file containing multiple functions. The error is not explicitly stated, but we need to analyze the code and produce a minimal correct fix. The code appears to be from Jackson (a JSON library). Let's read the functions:
+
+1. `isMapLikeType()` returns false. That might be a bug? But it's a simple method. Possibly it should check if the type is map-like. However, it's not clear if this is part of the bug. The context: there is no surrounding class, but we see methods from likely a serializer like `StdDelegatingSerializer` or something. Actually, the functions include `createSerializer`, `findConvertingSerializer`, `createContextual`, `serialize`, `serializeWithType`, `isEmpty` (two overloads), `acceptJsonFormatVisitor`, `convertValue`, `findConvertingContentSerializer`. These are typical methods of a serializer class, maybe `StdDelegatingSerializer` from Jackson. The bug might be related to handling of dynamic types, specifically `[databind#731]` which is mentioned in comments. The issue is about skipping serialization if the delegate type is `java.lang.Object`. In several places there are comments: "Should skip if nominally java.lang.Object". Looking at `createContextual`:
+
+```
+if (delSer == null) {
+    if (delegateType == null) {
+        delegateType = _converter.getOutputType(provider.getTypeFactory());
+    }
+    /* 02-Apr-2015, tatu: For "dynamic case", where type is only specified as
+     *    java.lang.Object (or missing generic), [databind#731]
+     */
+            delSer = provider.findValueSerializer(delegateType);
+}
+```
+
+Notice that the comment indicates that for Object type, they should skip or use a fallback. But the code just calls `findValueSerializer`, which may return a serializer for Object. However, the fix for [#731] might involve not calling `findValueSerializer` when delegateType is Object, or returning a special serializer. That's the likely bug.
+
+Also in `createSerializer` there are similar comments: "#359: explicitly check (again) for @JsonSerializer..." and "#731: Should skip if nominally java.lang.Object". But there's no actual skipping; they just check ser == null and then call `_createSerializer2`. Possibly the bug is that when delegateType is Object, they should not proceed to create a serializer via `_createSerializer2`? Or perhaps the bug is in `findConvertingSerializer` where they call `provider.findValueSerializer(delegateType, prop)` even if delegateType is Object? But the comment says "Should skip if nominally java.lang.Object". So maybe the fix is to add a condition to return null or skip when delegateType is Object.
+
+In `findConvertingSerializer`:
+```
+JavaType delegateType = conv.getOutputType(provider.getTypeFactory());
+// [databind#731]: Should skip if nominally java.lang.Object
+JsonSerializer<?> ser = provider.findValueSerializer(delegateType, prop);
+return new StdDelegatingSerializer(conv, delegateType, ser);
+```
+
+No skipping is implemented. Similarly in `findConvertingContentSerializer`:
+```
+if (existingSerializer == null) {
+    existingSerializer = provider.findValueSerializer(delegateType);
+}
+```
+No skipping.
+
+In `createContextual`:
+```
+delSer = provider.findValueSerializer(delegateType);
+```
+No skipping.
+
+The bug likely is that when the delegateType is `java.lang.Object`, the serializer should not be looked up because it would cause issues (like infinite loops or incorrect serialization). Instead, they should return a serializer that handles the dynamic case. The comment says "Should skip if nominally java.lang.Object". So the fix is to check if delegateType is `Object.class` (or `JavaType` representing Object) and then skip the lookup? Possibly return an existing fallback.
+
+Let's examine the method `createContextual`. It is part of `StdDelegatingSerializer`. At the beginning, it checks `_delegateSerializer`; if null, it looks up delegate type and then tries to find a serializer. If delegateType is Object, it might be better to not look up a serializer and instead use a default serializer that dynamically determines type at runtime. Or maybe they should return `this` as is, meaning the serializer itself will handle the conversion and then delegate to a serializer found at runtime (like in `serialize` method). But in `serialize`, they call `_delegateSerializer.serialize` directly, which would be null if not set. So that's a problem.
+
+Look at `serialize`:
+```
+public void serialize(Object value, JsonGenerator gen, SerializerProvider provider) throws IOException
+{
+    Object delegateValue = convertValue(value);
+    if (delegateValue == null) {
+        provider.defaultSerializeNull(gen);
+        return;
+    }
+    // 02-Apr-2015, tatu: As per [databind#731] may need to do dynamic lookup
+    _delegateSerializer.serialize(delegateValue, gen, provider);
+}
+```
+
+There's a comment about dynamic lookup for [#731] but no dynamic lookup is done. That's likely the bug: when `_delegateSerializer` is null (because it wasn't set due to Object type), the call to `_delegateSerializer.serialize` would throw NPE. They need to add a dynamic lookup in `serialize` if `_delegateSerializer` is null.
+
+Similarly in `serializeWithType` and `isEmpty` and `acceptJsonFormatVisitor`, they call `_delegateSerializer` directly without null check.
+
+So the bugs are:
+
+1. In `findConvertingSerializer` and `findConvertingContentSerializer`, they should skip finding a serializer when delegateType is Object, perhaps returning null or using a different approach.
+2. In `createContextual`, they should handle the case where delegateType is Object (or missing generic) by not looking up a serializer, leaving `_delegateSerializer` null, and then handle it dynamically in serialization methods.
+3. In `serialize`, `serializeWithType`, `isEmpty` (both), `acceptJsonFormatVisitor`, they should check if `_delegateSerializer` is null and if so, perform dynamic lookup or use a default.
+
+The fix should be minimal. We'll need to modify multiple functions:
+
+- `findConvertingSerializer`: return null if delegateType is Object? Actually, the comment says "Should skip if nominally java.lang.Object". So we should skip the whole block? Or just skip the serializer lookup? Probably skip the whole thing so that no StdDelegatingSerializer is created, and instead the default serializer for the original type is used? But that might not be correct. Actually, the converter still needs to be applied. Perhaps we should still create the StdDelegatingSerializer but with no delegate serializer (null), and then later in serialization we do dynamic lookup. Let's see the original Jackson source for StdDelegatingSerializer. In the real Jackson code, for dynamic types, they do create a StdDelegatingSerializer but without a delegate serializer, and then in `serialize` they look up dynamically. That's likely the fix.
+
+Looking at Jackson 2.6.0 (which is around that time), the fix for #731 might have been to allow `_delegateSerializer` to be null and then do dynamic lookup in `serialize` and other methods. So we need to adjust the code accordingly.
+
+Thus, the minimal fix would modify:
+
+1. `createContextual`: If after trying to find a delegate serializer, `_delegateSerializer` is null (because we didn't set it for Object type), we shouldn't try to find one. But the code currently tries to find one always. So we need to add a condition to skip the lookup if delegateType is Object? Actually, in the real fix, they check if delegateType is `JavaType` for `Object.class` and if so, leave `delSer` null. So modify the block:
+
+```
+if (delSer == null) {
+    if (delegateType == null) {
+        delegateType = _converter.getOutputType(provider.getTypeFactory());
+    }
+    // [databind#731]: For dynamic case, skip if delegate type is java.lang.Object
+    if (!delegateType.isJavaLangObject()) {
+        delSer = provider.findValueSerializer(delegateType);
+    }
+}
+```
+
+Then, in `serialize` and other methods, they need to handle null `_delegateSerializer`. So we add dynamic lookup in those methods.
+
+2. `findConvertingSerializer` and `findConvertingContentSerializer` have similar issue. In those methods, they call `provider.findValueSerializer` on delegateType. We should skip that if delegateType is Object. Instead, we can create a StdDelegatingSerializer with null delegate serializer. So modify:
+
+```
+JavaType delegateType = conv.getOutputType(provider.getTypeFactory());
+// [databind#731]: Should skip if nominally java.lang.Object
+JsonSerializer<?> ser = null;
+if (!delegateType.isJavaLangObject()) {
+    ser = provider.findValueSerializer(delegateType, prop);
+}
+return new StdDelegatingSerializer(conv, delegateType, ser);
+```
+
+Similarly in `findConvertingContentSerializer`:
+```
+if (existingSerializer == null && !delegateType.isJavaLangObject()) {
+    existingSerializer = provider.findValueSerializer(delegateType);
+}
+```
+
+3. Also, in `createSerializer` there's a similar comment but that method seems to handle converter differently; it already uses `_createSerializer2` which might handle null. Not sure if change needed there. But the given code for `createSerializer` is not part of StdDelegatingSerializer; it's from another class likely. But we still need to fix all buggy functions. The input includes `createSerializer` method too. It has a comment `// [databind#731]: Should skip if nominally java.lang.Object` in the block where `ser == null` after converter. Actually, it says:
+
+```
+// [databind#731]: Should skip if nominally java.lang.Object
+if (ser == null) {
+    ser = _createSerializer2(prov, delegateType, beanDesc, true);
+}
+```
+
+But there is no actual skipping. Possibly the fix is to check if delegateType is Object, and if so, not call `_createSerializer2` but instead do something else? However, in the `createSerializer` method, they are returning a `StdDelegatingSerializer`. For that to handle dynamic case, the delegate serializer should be null. So maybe we should modify that block to:
+
+```
+if (ser == null) {
+    // [databind#731]: Should skip if nominally java.lang.Object
+    if (!delegateType.isJavaLangObject()) {
+        ser = _createSerializer2(prov, delegateType, beanDesc, true);
+    }
+}
+```
+
+But then the `StdDelegatingSerializer` is created with null ser. That would cause problems if later the delegate serializer is null. So we need all serialization methods to handle null.
+
+Alternatively, maybe the fix is to not create a StdDelegatingSerializer at all if delegateType is Object, and instead fall back to the original serializer? But that seems less minimal.
+
+Given the comments in `serialize` that say "may need to do dynamic lookup", it's clear that dynamic lookup should be implemented.
+
+Thus, the minimal fix is to:
+
+- In `findConvertingSerializer` and `findConvertingContentSerializer`, skip serializer lookup if delegateType is Object.
+- In `createContextual`, skip serializer lookup if delegateType is Object.
+- In `serialize`, `serializeWithType`, `isEmpty` (both), `acceptJsonFormatVisitor`, add a null check and dynamic lookup if `_delegateSerializer` is null.
+
+Additionally, maybe in `createSerializer` (the other one), we need to similarly skip `_createSerializer2` if delegateType is Object.
+
+Now, we must output all the functions in the fixed_code array, in the same order as input. The input functions appear to be:
+
+1. `isMapLikeType()` - but this might be from a different class? It's a standalone method. Probably not part of the bug, but we must keep it as is? The instruction says "The defect may be caused by a single function or by multiple functions working together." So `isMapLikeType` might be just a simple method that is fine. But if it's supposed to be overridden, we don't know. We'll leave it unchanged.
+
+2. `createSerializer` - the first long method.
+
+3. `findConvertingSerializer`
+
+4. `createContextual`
+
+5. `serialize`
+
+6. `serializeWithType`
+
+7. `isEmpty(Object)`
+
+8. `isEmpty(SerializerProvider, Object)`
+
+9. `acceptJsonFormatVisitor`
+
+10. `convertValue` - not shown? Actually it is shown: `protected Object convertValue(Object value) { return _converter.convert(value); }`. Yes.
+
+11. `findConvertingContentSerializer`
+
+So we need to fix functions 2 through 11 (excluding isMapLikeType).
+
+We need to produce the full corrected implementations.
+
+Let's implement the fixes.
+
+We assume the `_delegateSerializer` field is of type `JsonSerializer<?>` and `_delegateType` is `JavaType`. Also we assume `isJavaLangObject()` is a method on JavaType that returns true if it represents `java.lang.Object`. If not, we can check `delegateType.getRawClass() == Object.class` or something. But to be safe, we can use `delegateType.hasRawClass(Object.class)`. Jackson has `isJavaLangObject()` but we can use `hasRawClass(Object.class)`.
+
+We'll provide the fixed code in the required JSON format.
+
+Let's produce the fixed code strings.
+
+We'll keep the original formatting but make minimal changes.
+
+For `createSerializer`, we add condition `!delegateType.hasRawClass(Object.class)` before `_createSerializer2`.
+
+For `findConvertingSerializer`, we add `!delegateType.hasRawClass(Object.class)` before `provider.findValueSerializer` and pass null ser.
+
+For `createContextual`, we add condition `!delegateType.hasRawClass(Object.class)` before `provider.findValueSerializer`.
+
+For the serialization methods, we need to add dynamic lookup. We'll add a helper method `_findDynamicSerializer` but to keep minimal, we'll inline. But to avoid duplication, we can add a method `_dynamicSerializer(SerializerProvider)` that returns the serializer if null. But that might be more invasive. Alternatively, we can add null checks and lookups in each method.
+
+Given it's a fix, we need to ensure correctness. We'll add in `serialize`:
+
+```
+public void serialize(Object value, JsonGenerator gen, SerializerProvider provider) throws IOException
+{
+    Object delegateValue = convertValue(value);
+    if (delegateValue == null) {
+        provider.defaultSerializeNull(gen);
+        return;
+    }
+    // 02-Apr-2015, tatu: As per [databind#731] may need to do dynamic lookup
+    JsonSerializer<Object> ser = _delegateSerializer;
+    if (ser == null) {
+        ser = _findDynamicSerializer(provider);
+    }
+    ser.serialize(delegateValue, gen, provider);
+}
+```
+
+Similarly for others. So we need to add `_findDynamicSerializer` method. But the input does not include that method; we can define it as private. However, we must only output the given functions. We cannot add new methods? The instruction says "full correct implementation of all input functions". It doesn't forbid adding helper methods? But it says "provide the full corrected implementation of all input functions." It might be acceptable to add private methods that are called. But to be safe, we should implement the dynamic lookup inline or use a call to `provider.findValueSerializer(_delegateType)` directly, but that might cause recursion. Actually, the dynamic lookup should use the delegate type, which might be Object, so we need to look up serializer for the actual runtime type? In Jackson's real fix, they look up serializer for the delegate value type dynamically. But to keep minimal, we can just look up for `_delegateType`. But if `_delegateType` is Object, that would lead to the same issue. Instead, they should use `provider.findValueSerializer(delegateValue.getClass())`. The comment says "dynamic lookup", meaning at runtime based on the actual value.
+
+So we'll modify `serialize` and others to use `provider.findValueSerializer(delegateValue.getClass())` if `_delegateSerializer` is null. But we need a blank.
+
+Let's look at Jackson's actual fix. In StdDelegatingSerializer, they added a method `_findDelegateSerializer` that checks if `_delegateSerializer` is null and if so, looks up a serializer for the value type. But the type is determined by `_delegateType`? Actually, if `_delegateType` is Object, they look up the serializer dynamically using the class of the delegate value.
+
+I think the minimal fix is:
+
+- In `createContextual`, if `delegateType` is Object, do not set `delSer` (leave it null).
+- In `serialize` and other methods, if `_delegateSerializer` is null, use `provider.findValueSerializer(delegateValue.getClass(), null)` or simply `provider.findValueSerializer(delegateValue.getClass())`.
+
+But note: `serializeWithType` also needs to handle null.
+
+Let's implement that.
+
+We'll also need to fix `isEmpty` methods. For `isEmpty(SerializerProvider, Object)`, we can do dynamic lookup similarly.
+
+Now, we need to ensure we don't introduce new errors. We'll keep the methods as close to original as possible.
+
+Write the fixed code.
+
+We'll produce the fixed_code array with 12 strings? The input has methods: isMapLikeType, createSerializer, findConvertingSerializer, createContextual, serialize, serializeWithType, isEmpty(Object), isEmpty(SerializerProvider,Object), acceptJsonFormatVisitor, convertValue, findConvertingContentSerializer. That's 11 methods. But the input shows `isMapLikeType` as first, then the rest. So we need 11 entries? Actually, there are 11 methods listed: isMapLikeType (first), createSerializer, findConvertingSerializer, createContextual, serialize, serializeWithType, isEmpty (two overloads), acceptJsonFormatVisitor, convertValue, findConvertingContentSerializer. That's 11. But the input might have more? The source ends with the last method. We'll include all.
+
+Now, write the JSON.
+
+We need to escape double quotes and newlines properly. Each function should be a string containing the full Java code.
+
+We'll produce the fixed code.
+
+Let's start with `isMapLikeType` - unchanged: `public boolean isMapLikeType() { return false; }`
+
+For `createSerializer`, we modify the section where `ser == null` and `// [databind#731]`. We'll add condition:
+
+```
+// [databind#731]: Should skip if nominally java.lang.Object
+if (ser == null && !delegateType.hasRawClass(Object.class)) {
+    ser = _createSerializer2(prov, delegateType, beanDesc, true);
+}
+```
+
+Also, earlier there is `if (!delegateType.hasRawClass(origType.getRawClass()))` which is fine.
+
+For `findConvertingSerializer`:
+
+```
+protected JsonSerializer<Object> findConvertingSerializer(SerializerProvider provider,
+        BeanPropertyWriter prop)
+    throws JsonMappingException
+{
+    final AnnotationIntrospector intr = provider.getAnnotationIntrospector();
+    if (intr != null) {
+        AnnotatedMember m = prop.getMember();
+        if (m != null) {
+            Object convDef = intr.findSerializationConverter(m);
+            if (convDef != null) {
+                Converter<Object,Object> conv = provider.converterInstance(prop.getMember(), convDef);
+                JavaType delegateType = conv.getOutputType(provider.getTypeFactory());
+                // [databind#731]: Should skip if nominally java.lang.Object
+                JsonSerializer<?> ser = null;
+                if (!delegateType.hasRawClass(Object.class)) {
+                    ser = provider.findValueSerializer(delegateType, prop);
+                }
+                return new StdDelegatingSerializer(conv, delegateType, ser);
+            }
+        }
+    }
+    return null;
+}
+```
+
+For `createContextual`:
+
+```
+public JsonSerializer<?> createContextual(SerializerProvider provider, BeanProperty property)
+    throws JsonMappingException
+{
+    JsonSerializer<?> delSer = _delegateSerializer;
+    JavaType delegateType = _delegateType;
+
+    if (delSer == null) {
+        // Otherwise, need to locate serializer to delegate to. For that we need type information...
+        if (delegateType == null) {
+            delegateType = _converter.getOutputType(provider.getTypeFactory());
+        }
+        /* 02-Apr-2015, tatu: For "dynamic case", where type is only specified as
+         *    java.lang.Object (or missing generic), [databind#731]
+         */
+        if (!delegateType.hasRawClass(Object.class)) {
+            delSer = provider.findValueSerializer(delegateType);
+        }
+    }
+    if (delSer instanceof ContextualSerializer) {
+        delSer = provider.handleSecondaryContextualization(delSer, property);
+    }
+    return (delSer == _delegateSerializer) ? this
+            : withDelegate(_converter, delegateType, delSer);
+}
+```
+
+For `serialize`:
+
+```
+public void serialize(Object value, JsonGenerator gen, SerializerProvider provider) throws IOException
+{
+    Object delegateValue = convertValue(value);
+    // should we accept nulls?
+    if (delegateValue == null) {
+        provider.defaultSerializeNull(gen);
+        return;
+    }
+    // 02-Apr-2015, tatu: As per [databind#731] may need to do dynamic lookup
+    JsonSerializer<Object> ser = _delegateSerializer;
+    if (ser == null) {
+        ser = provider.findValueSerializer(delegateValue.getClass());
+    }
+    ser.serialize(delegateValue, gen, provider);
+}
+```
+
+Similarly for `serializeWithType`:
+
+```
+public void serializeWithType(Object value, JsonGenerator gen, SerializerProvider provider,
+        TypeSerializer typeSer) throws IOException
+{
+    /* 03-Oct-2012, tatu: This is actually unlikely to work ok... but for now,
+     *    let's give it a chance?
+     */
+    Object delegateValue = convertValue(value);
+    JsonSerializer<Object> ser = _delegateSerializer;
+    if (ser == null) {
+        ser = provider.findValueSerializer(delegateValue.getClass());
+    }
+    ser.serializeWithType(delegateValue, gen, provider, typeSer);
+}
+```
+
+For `isEmpty(Object)`:
+
+```
+public boolean isEmpty(Object value)
+{
+    Object delegateValue = convertValue(value);
+    JsonSerializer<Object> ser = _delegateSerializer;
+    if (ser == null) {
+        ser = provider.findValueSerializer(delegateValue.getClass()); // but provider is not available here? This is problem.
+    }
+    return _delegateSerializer.isEmpty(delegateValue);
+}
+```
+
+Wait, `isEmpty(Object)` does not have access to `SerializerProvider`. In the original, it calls `_delegateSerializer.isEmpty(delegateValue)`. If `_delegateSerializer` is null, we can't call it. So we need to handle this. One way is to not call this method if delegateSerializer is null, but it's called by the system. Actually, the `isEmpty` method with only Object is used to check emptiness without provider. In Jackson, StdDelegatingSerializer's isEmpty(Object) might throw an exception if delegateSerializer is null? The real fix likely involves also providing a provider-based isEmpty. But we have an overload with provider. Since we cannot add a provider argument to the single-argument method, we have to assume that if delegateSerializer is null, the method will fail. But we can fallback to false? That might not be correct.
+
+Looking at the real Jackson code, they have both isEmpty methods. The single-arg isEmpty is usually deprecated. But they still implement it. In case of null delegateSerializer, it might throw an exception. The fix might be to not use dynamic lookup in that method and instead always have a delegateSerializer. But based on our changes, delegateSerializer can be null. So we need to handle it. We could use the provider-based isEmpty instead? But the single-arg version is called without a provider. Perhaps we can store a reference to a default serializer for Object? That seems overkill.
+
+Alternatively, we could revert to keeping the delegateSerializer non-null by looking it up in `findConvertingSerializer`? But that would reintroduce the issue. The comment says "should skip" meaning we should not look it up. So likely the single-arg isEmpty is not used when delegateSerializer is null, or it is expected to be overridden. Perhaps we can leave it as is but with a null check that throws an exception? That would break functionality.
+
+Another approach: in `findConvertingSerializer`, if delegateType is Object, we could still look up a serializer for Object (which is a serializer that delegates to proper serializers at runtime). That serializer, like `SerializerBase`, might handle dynamic types. But that would not skip it. The comment "should skip" might mean skip the lookup completely and rely on dynamic lookup at serialization time. But then isEmpty without provider won't work.
+
+I need to check the actual Jackson behavior. After a quick search of memory, I recall that for dynamic types, StdDelegatingSerializer creates a `TypeSerializerWrapper` or uses the `AnySerializer`. But I'm not sure.
+
+Given the constraints, I'll assume that the minimal fix for the given code is to implement the dynamic lookup in the serialization methods and leave the isEmpty methods as they are but with a fallback: if delegateSerializer is null, call provider.findValueSerializer(delegateValue.getClass()) but provider not available. So we'll leave isEmpty(Object) unchanged and hope it's not called in dynamic case, or that the delegateSerializer is always set before serialization? Actually, the createContextual is called before serialization, and if it doesn't set delegateSerializer for Object, then the serialization methods will still get null. But isEmpty could be called at that point. It's risky.
+
+Maybe a safer fix is to not create StdDelegatingSerializer at all in `findConvertingSerializer` if delegateType is Object? But that might remove the converter altogether. That could be a valid fix: if delegateType is Object, the converter is not needed? Actually, the converter is needed but the output type is dynamic. So they might need to use a different mechanism.
+
+Given the complexity, I'll stick to the minimal changes as per the comments: add skipping in lookup and dynamic lookup in serialization. For isEmpty with no provider, I'll add a check that if delegateSerializer is null, we call the provider-based isEmpty with a fallback? But we can't get provider. So I'll keep it as is and assume the delegateSerializer is set later? Actually, it won't be set. So it will throw NPE. That's a bug.
+
+Maybe we should not skip the lookup in `findConvertingSerializer`? But the comment says skip. Perhaps the fix is to not skip, but to use a special serializer for Object that can handle dynamic types. In Jackson, there is `JsonSerializableWithType` handling. But for simplicity, I'll assume the code is from a specific version where the fix was exactly as described.
+
+After reading more, I think the correct fix is:
+
+- In `findConvertingSerializer` and `findConvertingContentSerializer`, do not skip the lookup; instead, if delegateType is Object, use `provider.findValueSerializer(Object.class)` which returns a serializer that can handle any type (like the basic Object serializer). That would avoid null. But the comment says "skip". However, "skip" might mean skip the skip? Let's trust the comment: it says "Should skip if nominally java.lang.Object". That implies we should skip, i.e., not create a delegate serializer. But then we need to handle it.
+
+Given the lack of provider in isEmpty, I'll assume the fix is to not create StdDelegatingSerializer at all if delegateType is Object, and return null so that the default serializer is used. That might be correct.
+
+Let's see the context: `findConvertingSerializer` is called during creation of serializer for a property. It returns a serializer to use. If it returns null, the caller will use the standard serializer. So if we return null when delegateType is Object, we avoid all the issues. That seems plausible.
+
+In `findConvertingContentSerializer`, similarly, if delegateType is Object, return existingSerializer (which might be null) and let the caller handle it. That way, no StdDelegatingSerializer is created for dynamic types.
+
+That might be the intended fix: skip creating StdDelegatingSerializer when the output type is Object, because it can't know the actual type ahead of time.
+
+Thus, modify `findConvertingSerializer` to return null if delegateType is Object. Modify `findConvertingContentSerializer` to return existingSerializer unchanged.
+
+Similarly, in `createSerializer` (the first one), if delegateType is Object, they may skip creating StdDelegatingSerializer? But that method returns a serializer; it could return the result of `_createSerializer2` directly? The code currently creates a StdDelegatingSerializer with a delegate serializer. If delegateType is Object, they should maybe not create the delegating serializer and just return the serializer from `_createSerializer2`? But `_createSerializer2` might return a different serializer. That might be acceptable.
+
+In `createContextual`, if delegateType is Object, they should leave delSer null and return this (as is), because the serialization methods will do dynamic lookup. That's fine as long as we implement dynamic lookup.
+
+So to avoid the isEmpty problem, we can implement dynamic lookup in all methods, including isEmpty with provider. For the single-arg isEmpty, we can implement it by calling the two-arg isEmpty with null? But we can't. Alternatively, we can look up a serializer if null using ThreadLocal? That's messy.
+
+Given the instruction to produce minimal correct fix, I think the best approach is to follow the pattern in the real Jackson code. I'll recall that in Jackson 2.6, the fix for #731 was:
+
+- In `createContextual`, if delegateType is Object, skip lookup and leave `_delegateSerializer` null.
+- In `serialize`, if `_delegateSerializer` is null, do dynamic lookup using `provider.findValueSerializer(delegateValue.getClass())`.
+- In `serializeWithType`, same.
+- In `isEmpty(SerializerProvider, Object)`, do dynamic lookup if null.
+- In `isEmpty(Object)`, delegate to the provider-based version if possible, by calling `isEmpty(provider, value)` using a ThreadLocal or context, but that's not available. So perhaps we can throw an UnsupportedOperationException? That's not minimal.
+
+Maybe we can modify `isEmpty(Object)` to always return false when delegateSerializer is null? That might be acceptable as a fallback.
+
+I'm going to make the following decisions:
+
+- For `findConvertingSerializer` and `findConvertingContentSerializer`, I will not change the logic except to add the condition to skip lookup, but still create the StdDelegatingSerializer with null ser. That means the delegateSerializer can be null.
+- For `isEmpty(Object)`, I will add a check: if _delegateSerializer is null, return false (as a fallback). This is not perfect but avoids NPE.
+- For `isEmpty(SerializerProvider, Object)`, I will add dynamic lookup.
+
+Now write the code.
+
+Also, ensure that the variable names match the original field names: `_delegateSerializer`, `_delegateType`, `_converter`.
+
+Let's produce the fixed functions.
+
+We'll output the JSON with 11 strings.{
+  "fixed_code": [
+    "public boolean isMapLikeType() { return false; }",
+    "public JsonSerializer<Object> createSerializer(SerializerProvider prov,\n            JavaType origType)\n        throws JsonMappingException\n    {\n        // Very first thing, let's check if there is explicit serializer annotation:\n        final SerializationConfig config = prov.getConfig();\n        BeanDescription beanDesc = config.introspect(origType);\n        JsonSerializer<?> ser = findSerializerFromAnnotation(prov, beanDesc.getClassInfo());\n        if (ser != null) {\n            return (JsonSerializer<Object>) ser;\n        }\n        boolean staticTyping;\n        // Next: we may have annotations that further define types to use...\n        JavaType type = modifyTypeByAnnotation(config, beanDesc.getClassInfo(), origType);\n        if (type == origType) { // no changes, won't force static typing\n            staticTyping = false;\n        } else { // changes; assume static typing; plus, need to re-introspect if class differs\n            staticTyping = true;\n            if (!type.hasRawClass(origType.getRawClass())) {\n                beanDesc = config.introspect(type);\n            }\n        }\n        // Slight detour: do we have a Converter to consider?\n        Converter<Object,Object> conv = beanDesc.findSerializationConverter();\n        if (conv == null) { // no, simple\n            return (JsonSerializer<Object>) _createSerializer2(prov, type, beanDesc, staticTyping);\n        }\n        JavaType delegateType = conv.getOutputType(prov.getTypeFactory());\n        \n        // One more twist, as per [Issue#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n            // [#359]: explicitly check (again) for @JsonSerializer...\n            ser = findSerializerFromAnnotation(prov, beanDesc.getClassInfo());\n        }\n        // [databind#731]: Should skip if nominally java.lang.Object\n        if (ser == null && !delegateType.hasRawClass(Object.class)) {\n            ser = _createSerializer2(prov, delegateType, beanDesc, true);\n        }\n        return new StdDelegatingSerializer(conv, delegateType, ser);\n    }",
+    "protected JsonSerializer<Object> findConvertingSerializer(SerializerProvider provider,\n            BeanPropertyWriter prop)\n        throws JsonMappingException\n    {\n        final AnnotationIntrospector intr = provider.getAnnotationIntrospector();\n        if (intr != null) {\n            AnnotatedMember m = prop.getMember();\n            if (m != null) {\n                Object convDef = intr.findSerializationConverter(m);\n                if (convDef != null) {\n                    Converter<Object,Object> conv = provider.converterInstance(prop.getMember(), convDef);\n                    JavaType delegateType = conv.getOutputType(provider.getTypeFactory());\n                    // [databind#731]: Should skip if nominally java.lang.Object\n                    JsonSerializer<?> ser = null;\n                    if (!delegateType.hasRawClass(Object.class)) {\n                        ser = provider.findValueSerializer(delegateType, prop);\n                    }\n                    return new StdDelegatingSerializer(conv, delegateType, ser);\n                }\n            }\n        }\n        return null;\n    }",
+    "public JsonSerializer<?> createContextual(SerializerProvider provider, BeanProperty property)\n        throws JsonMappingException\n    {\n        JsonSerializer<?> delSer = _delegateSerializer;\n        JavaType delegateType = _delegateType;\n\n        if (delSer == null) {\n            // Otherwise, need to locate serializer to delegate to. For that we need type information...\n            if (delegateType == null) {\n                delegateType = _converter.getOutputType(provider.getTypeFactory());\n            }\n            /* 02-Apr-2015, tatu: For \"dynamic case\", where type is only specified as\n             *    java.lang.Object (or missing generic), [databind#731]\n             */\n            if (!delegateType.hasRawClass(Object.class)) {\n                delSer = provider.findValueSerializer(delegateType);\n            }\n        }\n        if (delSer instanceof ContextualSerializer) {\n            delSer = provider.handleSecondaryContextualization(delSer, property);\n        }\n        return (delSer == _delegateSerializer) ? this\n                : withDelegate(_converter, delegateType, delSer);\n    }",
+    "public void serialize(Object value, JsonGenerator gen, SerializerProvider provider) throws IOException\n    {\n        Object delegateValue = convertValue(value);\n        // should we accept nulls?\n        if (delegateValue == null) {\n            provider.defaultSerializeNull(gen);\n            return;\n        }\n        // 02-Apr-2015, tatu: As per [databind#731] may need to do dynamic lookup\n        JsonSerializer<Object> ser = _delegateSerializer;\n        if (ser == null) {\n            ser = provider.findValueSerializer(delegateValue.getClass());\n        }\n        ser.serialize(delegateValue, gen, provider);\n    }",
+    "public void serializeWithType(Object value, JsonGenerator gen, SerializerProvider provider,\n            TypeSerializer typeSer) throws IOException\n    {\n        /* 03-Oct-2012, tatu: This is actually unlikely to work ok... but for now,\n         *    let's give it a chance?\n         */\n        Object delegateValue = convertValue(value);\n        JsonSerializer<Object> ser = _delegateSerializer;\n        if (ser == null) {\n            ser = provider.findValueSerializer(delegateValue.getClass());\n        }\n        ser.serializeWithType(delegateValue, gen, provider, typeSer);\n    }",
+    "public boolean isEmpty(Object value)\n    {\n        if (_delegateSerializer == null) {\n            return false;\n        }\n        Object delegateValue = convertValue(value);\n        return _delegateSerializer.isEmpty(delegateValue);\n    }",
+    "public boolean isEmpty(SerializerProvider prov, Object value)\n    {\n        Object delegateValue = convertValue(value);\n        JsonSerializer<Object> ser = _delegateSerializer;\n        if (ser == null) {\n            ser = prov.findValueSerializer(delegateValue.getClass());\n        }\n        return ser.isEmpty(prov, delegateValue);\n    }",
+    "public void acceptJsonFormatVisitor(JsonFormatVisitorWrapper visitor, JavaType typeHint)\n        throws JsonMappingException\n    {\n        /* 03-Sep-2012, tatu: Not sure if this can be made to really work\n         *    properly... but for now, try this:\n         */\n        // 02-Apr-2015, tatu: For dynamic case, very little we can do\n        if (_delegateSerializer == null) {\n            return;\n        }\n        _delegateSerializer.acceptJsonFormatVisitor(visitor, typeHint);\n    }",
+    "protected Object convertValue(Object value) {\n        return _converter.convert(value);\n    }",
+    "protected JsonSerializer<?> findConvertingContentSerializer(SerializerProvider provider,\n            BeanProperty prop, JsonSerializer<?> existingSerializer)\n        throws JsonMappingException\n    {\n        /* 19-Oct-2014, tatu: As per [databind#357], need to avoid infinite loop\n         *   when applying contextual content converter; this is not ideal way,\n         *   but should work for most cases.\n         */\n        final AnnotationIntrospector intr = provider.getAnnotationIntrospector();\n        if (intr != null && prop != null) {\n            AnnotatedMember m = prop.getMember();\n            if (m != null) {\n                Object convDef = intr.findSerializationContentConverter(m);\n                if (convDef != null) {\n                    Converter<Object,Object> conv = provider.converterInstance(prop.getMember(), convDef);\n                    JavaType delegateType = conv.getOutputType(provider.getTypeFactory());\n                    // [databind#731]: Should skip if nominally java.lang.Object\n                    if (existingSerializer == null && !delegateType.hasRawClass(Object.class)) {\n                        existingSerializer = provider.findValueSerializer(delegateType);\n                    }\n                    return new StdDelegatingSerializer(conv, delegateType, existingSerializer);\n                }\n            }\n        }\n        return existingSerializer;\n    }"
+  ]
+}

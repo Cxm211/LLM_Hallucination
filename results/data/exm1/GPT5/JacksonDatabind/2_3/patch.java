@@ -1,0 +1,20 @@
+public void writeObject(Object value) throws IOException
+    {
+            if (value == null) {
+                writeNull();
+                return;
+            }
+            if (_objectCodec != null) {
+                _objectCodec.writeValue(this, value);
+                return;
+            }
+            if (value instanceof byte[]) {
+                writeBinary((byte[]) value);
+                return;
+            }
+            _append(JsonToken.VALUE_EMBEDDED_OBJECT, value);
+            /* 28-May-2014, tatu: Tricky choice here; if no codec, should we
+             *   err out, or just embed? For now, do latter.
+             */
+//          throw new JsonMappingException("No ObjectCodec configured for TokenBuffer, writeObject() called");
+    }

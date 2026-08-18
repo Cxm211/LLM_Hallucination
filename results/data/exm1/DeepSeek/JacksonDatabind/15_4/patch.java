@@ -1,0 +1,1 @@
+public boolean isMapLikeType() { return Map.class.isAssignableFrom(getRawClass()); }

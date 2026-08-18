@@ -1,0 +1,59 @@
+public void validate(final WriteableCommandLine commandLine)
+        throws OptionException {
+    // number of options found
+    int present = 0;
+
+    // reference to first unexpected option
+    Option unexpected = null;
+
+    for (final Iterator i = options.iterator(); i.hasNext();) {
+        final Option option = (Option) i.next();
+
+        // needs validation?
+        boolean validate = option.isRequired() || option instanceof Group;
+        if (validate) {
+            option.validate(commandLine);
+        }
+
+        // Count and validate present options, handling groups
+        if (option instanceof Group) {
+            Group group = (Group) option;
+            for (final Iterator j = group.getOptions().iterator(); j.hasNext();) {
+                Option child = (Option) j.next();
+                if (commandLine.hasOption(child)) {
+                    if (++present > maximum) {
+                        unexpected = child;
+                        break;
+                    }
+                    child.validate(commandLine);
+                }
+            }
+            if (unexpected != null) break;
+        } else {
+            if (commandLine.hasOption(option)) {
+                if (++present > maximum) {
+                    unexpected = option;
+                    break;
+                }
+                option.validate(commandLine);
+            }
+        }
+    }
+
+    // too many options
+    if (unexpected != null) {
+        throw new OptionException(this, ResourceConstants.UNEXPECTED_TOKEN,
+                                  unexpected.getPreferredName());
+    }
+
+    // too few option
+    if (present < minimum) {
+        throw new OptionException(this, ResourceConstants.MISSING_OPTION);
+    }
+
+    // validate each anonymous argument
+    for (final Iterator i = anonymous.iterator(); i.hasNext();) {
+        final Option option = (Option) i.next();
+        option.validate(commandLine);
+    }
+}

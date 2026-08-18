@@ -1,0 +1,3955 @@
+// buggy code
+    public int compareTo(DurationField durationField) {
+        return 0;
+    }
+
+    public Partial(DateTimeFieldType[] types, int[] values, Chronology chronology) {
+        super();
+        chronology = DateTimeUtils.getChronology(chronology).withUTC();
+        iChronology = chronology;
+        if (types == null) {
+            throw new IllegalArgumentException("Types array must not be null");
+        }
+        if (values == null) {
+            throw new IllegalArgumentException("Values array must not be null");
+        }
+        if (values.length != types.length) {
+            throw new IllegalArgumentException("Values array must be the same length as the types array");
+        }
+        if (types.length == 0) {
+            iTypes = types;
+            iValues = values;
+            return;
+        }
+        for (int i = 0; i < types.length; i++) {
+            if (types[i] == null) {
+                throw new IllegalArgumentException("Types array must not contain null: index " + i);
+            }
+        }
+        DurationField lastUnitField = null;
+        for (int i = 0; i < types.length; i++) {
+            DateTimeFieldType loopType = types[i];
+            DurationField loopUnitField = loopType.getDurationType().getField(iChronology);
+            if (i > 0) {
+                int compare = lastUnitField.compareTo(loopUnitField);
+                if (compare < 0 || (compare != 0 && loopUnitField.isSupported() == false)) {
+                    throw new IllegalArgumentException("Types array must be in order largest-smallest: " +
+                            types[i - 1].getName() + " < " + loopType.getName());
+                } else if (compare == 0) {
+                    if (types[i - 1].getRangeDurationType() == null) {
+                        if (loopType.getRangeDurationType() == null) {
+                            throw new IllegalArgumentException("Types array must not contain duplicate: " +
+                                            types[i - 1].getName() + " and " + loopType.getName());
+                        }
+                    } else {
+                        if (loopType.getRangeDurationType() == null) {
+                            throw new IllegalArgumentException("Types array must be in order largest-smallest: " +
+                                    types[i - 1].getName() + " < " + loopType.getName());
+                        }
+                        DurationField lastRangeField = types[i - 1].getRangeDurationType().getField(iChronology);
+                        DurationField loopRangeField = loopType.getRangeDurationType().getField(iChronology);
+                        if (lastRangeField.compareTo(loopRangeField) < 0) {
+                            throw new IllegalArgumentException("Types array must be in order largest-smallest: " +
+                                    types[i - 1].getName() + " < " + loopType.getName());
+                        }
+                        if (lastRangeField.compareTo(loopRangeField) == 0) {
+                            throw new IllegalArgumentException("Types array must not contain duplicate: " +
+                                            types[i - 1].getName() + " and " + loopType.getName());
+                        }
+                    }
+                }
+            }
+            lastUnitField = loopUnitField;
+        }
+        
+        iTypes = (DateTimeFieldType[]) types.clone();
+        chronology.validate(this, values);
+        iValues = (int[]) values.clone();
+    }
+
+    public Partial with(DateTimeFieldType fieldType, int value) {
+        if (fieldType == null) {
+            throw new IllegalArgumentException("The field type must not be null");
+        }
+        int index = indexOf(fieldType);
+        if (index == -1) {
+            DateTimeFieldType[] newTypes = new DateTimeFieldType[iTypes.length + 1];
+            int[] newValues = new int[newTypes.length];
+            
+            // find correct insertion point to keep largest-smallest order
+            int i = 0;
+            DurationField unitField = fieldType.getDurationType().getField(iChronology);
+            if (unitField.isSupported()) {
+                for (; i < iTypes.length; i++) {
+                    DateTimeFieldType loopType = iTypes[i];
+                    DurationField loopUnitField = loopType.getDurationType().getField(iChronology);
+                    if (loopUnitField.isSupported()) {
+                        int compare = unitField.compareTo(loopUnitField);
+                        if (compare > 0) {
+                            break;
+                        } else if (compare == 0) {
+                            DurationField rangeField = fieldType.getRangeDurationType().getField(iChronology);
+                            DurationField loopRangeField = loopType.getRangeDurationType().getField(iChronology);
+                            if (rangeField.compareTo(loopRangeField) > 0) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            System.arraycopy(iTypes, 0, newTypes, 0, i);
+            System.arraycopy(iValues, 0, newValues, 0, i);
+            newTypes[i] = fieldType;
+            newValues[i] = value;
+            System.arraycopy(iTypes, i, newTypes, i + 1, newTypes.length - i - 1);
+            System.arraycopy(iValues, i, newValues, i + 1, newValues.length - i - 1);
+            // use public constructor to ensure full validation
+            // this isn't overly efficient, but is safe
+            Partial newPartial = new Partial(newTypes, newValues, iChronology);
+            iChronology.validate(newPartial, newValues);
+            return newPartial;
+        }
+        if (value == getValue(index)) {
+            return this;
+        }
+        int[] newValues = getValues();
+        newValues = getField(index).set(this, index, newValues, value);
+        return new Partial(this, newValues);
+    }
+
+// relevant test
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP5
+    public void testConstructor_RP_RP5() throws Throwable {
+        YearMonthDay dt1 = null;
+        YearMonthDay dt2 = null;
+        try {
+            new Period(dt1, dt2);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP6
+    public void testConstructor_RP_RP6() throws Throwable {
+        YearMonthDay dt1 = new YearMonthDay(2005, 7, 17);
+        TimeOfDay dt2 = new TimeOfDay(10, 20, 30, 40);
+        try {
+            new Period(dt1, dt2);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP7
+    public void testConstructor_RP_RP7() throws Throwable {
+        Partial dt1 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.monthOfYear(), 12);
+        Partial dt2 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.hourOfDay(), 14);
+        try {
+            new Period(dt1, dt2);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP8
+    public void testConstructor_RP_RP8() throws Throwable {
+        Partial dt1 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.hourOfDay(), 12);
+        Partial dt2 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.hourOfDay(), 14);
+        try {
+            new Period(dt1, dt2);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType1
+    public void testConstructor_RP_RP_PeriodType1() throws Throwable {
+        YearMonthDay dt1 = new YearMonthDay(2004, 6, 9);
+        YearMonthDay dt2 = new YearMonthDay(2005, 7, 10);
+        Period test = new Period(dt1, dt2, PeriodType.standard());
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(1, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(1, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType2
+    public void testConstructor_RP_RP_PeriodType2() throws Throwable {
+        YearMonthDay dt1 = new YearMonthDay(2004, 6, 9);
+        YearMonthDay dt2 = new YearMonthDay(2005, 5, 17);
+        Period test = new Period(dt1, dt2, PeriodType.yearMonthDay());
+        assertEquals(PeriodType.yearMonthDay(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(11, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(8, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType2Local
+    public void testConstructor_RP_RP_PeriodType2Local() throws Throwable {
+        LocalDate dt1 = new LocalDate(2004, 6, 9);
+        LocalDate dt2 = new LocalDate(2005, 5, 17);
+        Period test = new Period(dt1, dt2, PeriodType.yearMonthDay());
+        assertEquals(PeriodType.yearMonthDay(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(11, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(8, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType3
+    public void testConstructor_RP_RP_PeriodType3() throws Throwable {
+        YearMonthDay dt1 = null;
+        YearMonthDay dt2 = new YearMonthDay(2005, 7, 17);
+        try {
+            new Period(dt1, dt2, PeriodType.standard());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType4
+    public void testConstructor_RP_RP_PeriodType4() throws Throwable {
+        YearMonthDay dt1 = new YearMonthDay(2005, 7, 17);
+        YearMonthDay dt2 = null;
+        try {
+            new Period(dt1, dt2);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType5
+    public void testConstructor_RP_RP_PeriodType5() throws Throwable {
+        YearMonthDay dt1 = null;
+        YearMonthDay dt2 = null;
+        try {
+            new Period(dt1, dt2, PeriodType.standard());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType6
+    public void testConstructor_RP_RP_PeriodType6() throws Throwable {
+        YearMonthDay dt1 = new YearMonthDay(2005, 7, 17);
+        TimeOfDay dt2 = new TimeOfDay(10, 20, 30, 40);
+        try {
+            new Period(dt1, dt2, PeriodType.standard());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType7
+    public void testConstructor_RP_RP_PeriodType7() throws Throwable {
+        Partial dt1 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.monthOfYear(), 12);
+        Partial dt2 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.hourOfDay(), 14);
+        try {
+            new Period(dt1, dt2, PeriodType.standard());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RP_RP_PeriodType8
+    public void testConstructor_RP_RP_PeriodType8() throws Throwable {
+        Partial dt1 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.hourOfDay(), 12);
+        Partial dt2 = new Partial().with(DateTimeFieldType.year(), 2005).with(DateTimeFieldType.hourOfDay(), 14);
+        try {
+            new Period(dt1, dt2, PeriodType.standard());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RI_RD1
+    public void testConstructor_RI_RD1() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        DateTime dt2 = new DateTime(2005, 7, 10, 1, 1, 1, 1);
+        Duration dur = new Interval(dt1, dt2).toDuration();
+        Period test = new Period(dt1, dur);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(1, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(1, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(1, test.getMinutes());
+        assertEquals(1, test.getSeconds());
+        assertEquals(1, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RI_RD2
+    public void testConstructor_RI_RD2() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        Duration dur = null;
+        Period test = new Period(dt1, dur);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RI_RD_PeriodType1
+    public void testConstructor_RI_RD_PeriodType1() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        DateTime dt2 = new DateTime(2005, 7, 10, 1, 1, 1, 1);
+        Duration dur = new Interval(dt1, dt2).toDuration();
+        Period test = new Period(dt1, dur, PeriodType.yearDayTime());
+        assertEquals(PeriodType.yearDayTime(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(31, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(1, test.getMinutes());
+        assertEquals(1, test.getSeconds());
+        assertEquals(1, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RI_RD_PeriodType2
+    public void testConstructor_RI_RD_PeriodType2() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        Duration dur = null;
+        Period test = new Period(dt1, dur, (PeriodType) null);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RD_RI1
+    public void testConstructor_RD_RI1() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        DateTime dt2 = new DateTime(2005, 7, 10, 1, 1, 1, 1);
+        Duration dur = new Interval(dt1, dt2).toDuration();
+        Period test = new Period(dur, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(1, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(1, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(1, test.getMinutes());
+        assertEquals(1, test.getSeconds());
+        assertEquals(1, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RD_RI2
+    public void testConstructor_RD_RI2() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        Duration dur = null;
+        Period test = new Period(dur, dt1);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RD_RI_PeriodType1
+    public void testConstructor_RD_RI_PeriodType1() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        DateTime dt2 = new DateTime(2005, 7, 10, 1, 1, 1, 1);
+        Duration dur = new Interval(dt1, dt2).toDuration();
+        Period test = new Period(dur, dt2, PeriodType.yearDayTime());
+        assertEquals(PeriodType.yearDayTime(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(31, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(1, test.getMinutes());
+        assertEquals(1, test.getSeconds());
+        assertEquals(1, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_RD_RI_PeriodType2
+    public void testConstructor_RD_RI_PeriodType2() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 6, 9, 0, 0, 0, 0);
+        Duration dur = null;
+        Period test = new Period(dur, dt1, (PeriodType) null);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object1
+    public void testConstructor_Object1() throws Throwable {
+        Period test = new Period("P1Y2M3D");
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(2, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(3, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object2
+    public void testConstructor_Object2() throws Throwable {
+        Period test = new Period((Object) null);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object3
+    public void testConstructor_Object3() throws Throwable {
+        Period test = new Period(new Period(0, 0, 0, 0, 1, 2, 3, 4, PeriodType.dayTime()));
+        assertEquals(PeriodType.dayTime(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(2, test.getMinutes());
+        assertEquals(3, test.getSeconds());
+        assertEquals(4, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object4
+    public void testConstructor_Object4() throws Throwable {
+        Period base = new Period(1, 1, 0, 1, 1, 1, 1, 1, PeriodType.standard());
+        Period test = new Period(base);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(1, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(1, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(1, test.getMinutes());
+        assertEquals(1, test.getSeconds());
+        assertEquals(1, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object_PeriodType1
+    public void testConstructor_Object_PeriodType1() throws Throwable {
+        Period test = new Period("P1Y2M3D", PeriodType.yearMonthDayTime());
+        assertEquals(PeriodType.yearMonthDayTime(), test.getPeriodType());
+        assertEquals(1, test.getYears());
+        assertEquals(2, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(3, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object_PeriodType2
+    public void testConstructor_Object_PeriodType2() throws Throwable {
+        Period test = new Period((Object) null, PeriodType.yearMonthDayTime());
+        assertEquals(PeriodType.yearMonthDayTime(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object_PeriodType3
+    public void testConstructor_Object_PeriodType3() throws Throwable {
+        Period test = new Period(new Period(0, 0, 0, 0, 1, 2, 3, 4, PeriodType.dayTime()), PeriodType.yearMonthDayTime());
+        assertEquals(PeriodType.yearMonthDayTime(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(2, test.getMinutes());
+        assertEquals(3, test.getSeconds());
+        assertEquals(4, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_Object_PeriodType4
+    public void testConstructor_Object_PeriodType4() throws Throwable {
+        Period test = new Period(new Period(0, 0, 0, 0, 1, 2, 3, 4, PeriodType.dayTime()), (PeriodType) null);
+        assertEquals(PeriodType.dayTime(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(1, test.getHours());
+        assertEquals(2, test.getMinutes());
+        assertEquals(3, test.getSeconds());
+        assertEquals(4, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryYears
+    public void testFactoryYears() throws Throwable {
+        Period test = Period.years(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(6, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryMonths
+    public void testFactoryMonths() throws Throwable {
+        Period test = Period.months(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(6, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryWeeks
+    public void testFactoryWeeks() throws Throwable {
+        Period test = Period.weeks(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(6, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryDays
+    public void testFactoryDays() throws Throwable {
+        Period test = Period.days(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(6, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryHours
+    public void testFactoryHours() throws Throwable {
+        Period test = Period.hours(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(6, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryMinutes
+    public void testFactoryMinutes() throws Throwable {
+        Period test = Period.minutes(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(6, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactorySeconds
+    public void testFactorySeconds() throws Throwable {
+        Period test = Period.seconds(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(6, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryMillis
+    public void testFactoryMillis() throws Throwable {
+        Period test = Period.millis(6);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(0, test.getYears());
+        assertEquals(0, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(0, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(6, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toFeb_standardYear
+    public void testConstructor_trickyDifferences_RI_RI_toFeb_standardYear() throws Throwable {
+        DateTime dt1 = new DateTime(2011, 1, 1, 0, 0);
+        DateTime dt2 = new DateTime(2011, 2, 28, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 1, 3, 6, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toFeb_leapYear
+    public void testConstructor_trickyDifferences_RI_RI_toFeb_leapYear() throws Throwable {
+        DateTime dt1 = new DateTime(2012, 1, 1, 0, 0);
+        DateTime dt2 = new DateTime(2012, 2, 29, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 1, 4, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toFeb_exactMonths
+    public void testConstructor_trickyDifferences_RI_RI_toFeb_exactMonths() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 12, 28, 0, 0);
+        DateTime dt2 = new DateTime(2005, 2, 28, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toFeb_endOfMonth1
+    public void testConstructor_trickyDifferences_RI_RI_toFeb_endOfMonth1() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 12, 29, 0, 0);
+        DateTime dt2 = new DateTime(2005, 2, 28, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toFeb_endOfMonth2
+    public void testConstructor_trickyDifferences_RI_RI_toFeb_endOfMonth2() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 12, 30, 0, 0);
+        DateTime dt2 = new DateTime(2005, 2, 28, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toFeb_endOfMonth3
+    public void testConstructor_trickyDifferences_RI_RI_toFeb_endOfMonth3() throws Throwable {
+        DateTime dt1 = new DateTime(2004, 12, 31, 0, 0);
+        DateTime dt2 = new DateTime(2005, 2, 28, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toMar_endOfMonth1
+    public void testConstructor_trickyDifferences_RI_RI_toMar_endOfMonth1() throws Throwable {
+        DateTime dt1 = new DateTime(2013, 1, 31, 0, 0);
+        DateTime dt2 = new DateTime(2013, 3, 30, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 1, 4, 2, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_RI_RI_toMar_endOfMonth2
+    public void testConstructor_trickyDifferences_RI_RI_toMar_endOfMonth2() throws Throwable {
+        DateTime dt1 = new DateTime(2013, 1, 31, 0, 0);
+        DateTime dt2 = new DateTime(2013, 3, 31, 0, 0);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toFeb_standardYear
+    public void testConstructor_trickyDifferences_LD_LD_toFeb_standardYear() throws Throwable {
+        LocalDate dt1 = new LocalDate(2011, 1, 1);
+        LocalDate dt2 = new LocalDate(2011, 2, 28);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 1, 3, 6, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toFeb_leapYear
+    public void testConstructor_trickyDifferences_LD_LD_toFeb_leapYear() throws Throwable {
+        LocalDate dt1 = new LocalDate(2012, 1, 1);
+        LocalDate dt2 = new LocalDate(2012, 2, 29);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 1, 4, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toFeb_exactMonths
+    public void testConstructor_trickyDifferences_LD_LD_toFeb_exactMonths() throws Throwable {
+        LocalDate dt1 = new LocalDate(2004, 12, 28);
+        LocalDate dt2 = new LocalDate(2005, 2, 28);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toFeb_endOfMonth1
+    public void testConstructor_trickyDifferences_LD_LD_toFeb_endOfMonth1() throws Throwable {
+        LocalDate dt1 = new LocalDate(2004, 12, 29);
+        LocalDate dt2 = new LocalDate(2005, 2, 28);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toFeb_endOfMonth2
+    public void testConstructor_trickyDifferences_LD_LD_toFeb_endOfMonth2() throws Throwable {
+        LocalDate dt1 = new LocalDate(2004, 12, 30);
+        LocalDate dt2 = new LocalDate(2005, 2, 28);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toFeb_endOfMonth3
+    public void testConstructor_trickyDifferences_LD_LD_toFeb_endOfMonth3() throws Throwable {
+        LocalDate dt1 = new LocalDate(2004, 12, 31);
+        LocalDate dt2 = new LocalDate(2005, 2, 28);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toMar_endOfMonth1
+    public void testConstructor_trickyDifferences_LD_LD_toMar_endOfMonth1() throws Throwable {
+        LocalDate dt1 = new LocalDate(2013, 1, 31);
+        LocalDate dt2 = new LocalDate(2013, 3, 30);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 1, 4, 2, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testConstructor_trickyDifferences_LD_LD_toMar_endOfMonth2
+    public void testConstructor_trickyDifferences_LD_LD_toMar_endOfMonth2() throws Throwable {
+        LocalDate dt1 = new LocalDate(2013, 1, 31);
+        LocalDate dt2 = new LocalDate(2013, 3, 31);
+        Period test = new Period(dt1, dt2);
+        assertEquals(PeriodType.standard(), test.getPeriodType());
+        assertEquals(new Period(0, 2, 0, 0, 0, 0, 0, 0), test);
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryFieldDifference1
+    public void testFactoryFieldDifference1() throws Throwable {
+        YearMonthDay start = new YearMonthDay(2005, 4, 9);
+        DateTimeFieldType[] types = new DateTimeFieldType[] {
+            DateTimeFieldType.year(),
+            DateTimeFieldType.monthOfYear(),
+            DateTimeFieldType.dayOfMonth(),
+        };
+        Partial end = new Partial(types, new int[] {2004, 6, 7});
+        Period test = Period.fieldDifference(start, end);
+        assertEquals(PeriodType.yearMonthDay(), test.getPeriodType());
+        assertEquals(-1, test.getYears());
+        assertEquals(2, test.getMonths());
+        assertEquals(0, test.getWeeks());
+        assertEquals(-2, test.getDays());
+        assertEquals(0, test.getHours());
+        assertEquals(0, test.getMinutes());
+        assertEquals(0, test.getSeconds());
+        assertEquals(0, test.getMillis());
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryFieldDifference2
+    public void testFactoryFieldDifference2() throws Throwable {
+        YearMonthDay ymd = new YearMonthDay(2005, 4, 9);
+        try {
+            Period.fieldDifference(ymd, (ReadablePartial) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            Period.fieldDifference((ReadablePartial) null, ymd);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryFieldDifference3
+    public void testFactoryFieldDifference3() throws Throwable {
+        YearMonthDay start = new YearMonthDay(2005, 4, 9);
+        TimeOfDay endTime = new TimeOfDay(12, 30, 40, 0);
+        try {
+            Period.fieldDifference(start, endTime);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryFieldDifference4
+    public void testFactoryFieldDifference4() throws Throwable {
+        DateTimeFieldType[] types = new DateTimeFieldType[] {
+            DateTimeFieldType.year(),
+            DateTimeFieldType.monthOfYear(),
+            DateTimeFieldType.dayOfWeek(),
+        };
+        YearMonthDay start = new YearMonthDay(2005, 4, 9);
+        Partial end = new Partial(types, new int[] {1, 2, 3});
+        try {
+            Period.fieldDifference(start, end);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestPeriod_Constructors::testFactoryFieldDifference5
+    public void testFactoryFieldDifference5() throws Throwable {
+        DateTimeFieldType[] types = new DateTimeFieldType[] {
+            DateTimeFieldType.year(),
+            DateTimeFieldType.dayOfMonth(),
+            DateTimeFieldType.dayOfWeek(),
+        };
+        Partial start = new Partial(types, new int[] {1, 2, 3});
+        Partial end = new Partial(types, new int[] {1, 2, 3});
+        try {
+            Period.fieldDifference(start, end);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestSeconds::testConstants
+    public void testConstants() {
+        assertEquals(0, Seconds.ZERO.getSeconds());
+        assertEquals(1, Seconds.ONE.getSeconds());
+        assertEquals(2, Seconds.TWO.getSeconds());
+        assertEquals(3, Seconds.THREE.getSeconds());
+        assertEquals(Integer.MAX_VALUE, Seconds.MAX_VALUE.getSeconds());
+        assertEquals(Integer.MIN_VALUE, Seconds.MIN_VALUE.getSeconds());
+    }
+
+// org.joda.time.TestSeconds::testFactory_seconds_int
+    public void testFactory_seconds_int() {
+        assertSame(Seconds.ZERO, Seconds.seconds(0));
+        assertSame(Seconds.ONE, Seconds.seconds(1));
+        assertSame(Seconds.TWO, Seconds.seconds(2));
+        assertSame(Seconds.THREE, Seconds.seconds(3));
+        assertSame(Seconds.MAX_VALUE, Seconds.seconds(Integer.MAX_VALUE));
+        assertSame(Seconds.MIN_VALUE, Seconds.seconds(Integer.MIN_VALUE));
+        assertEquals(-1, Seconds.seconds(-1).getSeconds());
+        assertEquals(4, Seconds.seconds(4).getSeconds());
+    }
+
+// org.joda.time.TestSeconds::testFactory_secondsBetween_RInstant
+    public void testFactory_secondsBetween_RInstant() {
+        DateTime start = new DateTime(2006, 6, 9, 12, 0, 3, 0, PARIS);
+        DateTime end1 = new DateTime(2006, 6, 9, 12, 0, 6, 0, PARIS);
+        DateTime end2 = new DateTime(2006, 6, 9, 12, 0, 9, 0, PARIS);
+        
+        assertEquals(3, Seconds.secondsBetween(start, end1).getSeconds());
+        assertEquals(0, Seconds.secondsBetween(start, start).getSeconds());
+        assertEquals(0, Seconds.secondsBetween(end1, end1).getSeconds());
+        assertEquals(-3, Seconds.secondsBetween(end1, start).getSeconds());
+        assertEquals(6, Seconds.secondsBetween(start, end2).getSeconds());
+    }
+
+// org.joda.time.TestSeconds::testFactory_secondsBetween_RPartial
+    public void testFactory_secondsBetween_RPartial() {
+        LocalTime start = new LocalTime(12, 0, 3);
+        LocalTime end1 = new LocalTime(12, 0, 6);
+        @SuppressWarnings("deprecation")
+        TimeOfDay end2 = new TimeOfDay(12, 0, 9);
+        
+        assertEquals(3, Seconds.secondsBetween(start, end1).getSeconds());
+        assertEquals(0, Seconds.secondsBetween(start, start).getSeconds());
+        assertEquals(0, Seconds.secondsBetween(end1, end1).getSeconds());
+        assertEquals(-3, Seconds.secondsBetween(end1, start).getSeconds());
+        assertEquals(6, Seconds.secondsBetween(start, end2).getSeconds());
+    }
+
+// org.joda.time.TestSeconds::testFactory_secondsIn_RInterval
+    public void testFactory_secondsIn_RInterval() {
+        DateTime start = new DateTime(2006, 6, 9, 12, 0, 3, 0, PARIS);
+        DateTime end1 = new DateTime(2006, 6, 9, 12, 0, 6, 0, PARIS);
+        DateTime end2 = new DateTime(2006, 6, 9, 12, 0, 9, 0, PARIS);
+        
+        assertEquals(0, Seconds.secondsIn((ReadableInterval) null).getSeconds());
+        assertEquals(3, Seconds.secondsIn(new Interval(start, end1)).getSeconds());
+        assertEquals(0, Seconds.secondsIn(new Interval(start, start)).getSeconds());
+        assertEquals(0, Seconds.secondsIn(new Interval(end1, end1)).getSeconds());
+        assertEquals(6, Seconds.secondsIn(new Interval(start, end2)).getSeconds());
+    }
+
+// org.joda.time.TestSeconds::testFactory_standardSecondsIn_RPeriod
+    public void testFactory_standardSecondsIn_RPeriod() {
+        assertEquals(0, Seconds.standardSecondsIn((ReadablePeriod) null).getSeconds());
+        assertEquals(0, Seconds.standardSecondsIn(Period.ZERO).getSeconds());
+        assertEquals(1, Seconds.standardSecondsIn(new Period(0, 0, 0, 0, 0, 0, 1, 0)).getSeconds());
+        assertEquals(123, Seconds.standardSecondsIn(Period.seconds(123)).getSeconds());
+        assertEquals(-987, Seconds.standardSecondsIn(Period.seconds(-987)).getSeconds());
+        assertEquals(2 * 24 * 60 * 60, Seconds.standardSecondsIn(Period.days(2)).getSeconds());
+        try {
+            Seconds.standardSecondsIn(Period.months(1));
+            fail();
+        } catch (IllegalArgumentException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testFactory_parseSeconds_String
+    public void testFactory_parseSeconds_String() {
+        assertEquals(0, Seconds.parseSeconds((String) null).getSeconds());
+        assertEquals(0, Seconds.parseSeconds("PT0S").getSeconds());
+        assertEquals(1, Seconds.parseSeconds("PT1S").getSeconds());
+        assertEquals(-3, Seconds.parseSeconds("PT-3S").getSeconds());
+        assertEquals(2, Seconds.parseSeconds("P0Y0M0DT2S").getSeconds());
+        assertEquals(2, Seconds.parseSeconds("PT0H2S").getSeconds());
+        try {
+            Seconds.parseSeconds("P1Y1D");
+            fail();
+        } catch (IllegalArgumentException ex) {
+            
+        }
+        try {
+            Seconds.parseSeconds("P1DT1S");
+            fail();
+        } catch (IllegalArgumentException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testGetMethods
+    public void testGetMethods() {
+        Seconds test = Seconds.seconds(20);
+        assertEquals(20, test.getSeconds());
+    }
+
+// org.joda.time.TestSeconds::testGetFieldType
+    public void testGetFieldType() {
+        Seconds test = Seconds.seconds(20);
+        assertEquals(DurationFieldType.seconds(), test.getFieldType());
+    }
+
+// org.joda.time.TestSeconds::testGetPeriodType
+    public void testGetPeriodType() {
+        Seconds test = Seconds.seconds(20);
+        assertEquals(PeriodType.seconds(), test.getPeriodType());
+    }
+
+// org.joda.time.TestSeconds::testIsGreaterThan
+    public void testIsGreaterThan() {
+        assertEquals(true, Seconds.THREE.isGreaterThan(Seconds.TWO));
+        assertEquals(false, Seconds.THREE.isGreaterThan(Seconds.THREE));
+        assertEquals(false, Seconds.TWO.isGreaterThan(Seconds.THREE));
+        assertEquals(true, Seconds.ONE.isGreaterThan(null));
+        assertEquals(false, Seconds.seconds(-1).isGreaterThan(null));
+    }
+
+// org.joda.time.TestSeconds::testIsLessThan
+    public void testIsLessThan() {
+        assertEquals(false, Seconds.THREE.isLessThan(Seconds.TWO));
+        assertEquals(false, Seconds.THREE.isLessThan(Seconds.THREE));
+        assertEquals(true, Seconds.TWO.isLessThan(Seconds.THREE));
+        assertEquals(false, Seconds.ONE.isLessThan(null));
+        assertEquals(true, Seconds.seconds(-1).isLessThan(null));
+    }
+
+// org.joda.time.TestSeconds::testToString
+    public void testToString() {
+        Seconds test = Seconds.seconds(20);
+        assertEquals("PT20S", test.toString());
+        
+        test = Seconds.seconds(-20);
+        assertEquals("PT-20S", test.toString());
+    }
+
+// org.joda.time.TestSeconds::testSerialization
+    public void testSerialization() throws Exception {
+        Seconds test = Seconds.THREE;
+        
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ObjectOutputStream oos = new ObjectOutputStream(baos);
+        oos.writeObject(test);
+        byte[] bytes = baos.toByteArray();
+        oos.close();
+        
+        ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+        ObjectInputStream ois = new ObjectInputStream(bais);
+        Seconds result = (Seconds) ois.readObject();
+        ois.close();
+        
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestSeconds::testToStandardWeeks
+    public void testToStandardWeeks() {
+        Seconds test = Seconds.seconds(60 * 60 * 24 * 7 * 2);
+        Weeks expected = Weeks.weeks(2);
+        assertEquals(expected, test.toStandardWeeks());
+    }
+
+// org.joda.time.TestSeconds::testToStandardDays
+    public void testToStandardDays() {
+        Seconds test = Seconds.seconds(60 * 60 * 24 * 2);
+        Days expected = Days.days(2);
+        assertEquals(expected, test.toStandardDays());
+    }
+
+// org.joda.time.TestSeconds::testToStandardHours
+    public void testToStandardHours() {
+        Seconds test = Seconds.seconds(60 * 60 * 2);
+        Hours expected = Hours.hours(2);
+        assertEquals(expected, test.toStandardHours());
+    }
+
+// org.joda.time.TestSeconds::testToStandardMinutes
+    public void testToStandardMinutes() {
+        Seconds test = Seconds.seconds(60 * 2);
+        Minutes expected = Minutes.minutes(2);
+        assertEquals(expected, test.toStandardMinutes());
+    }
+
+// org.joda.time.TestSeconds::testToStandardDuration
+    public void testToStandardDuration() {
+        Seconds test = Seconds.seconds(20);
+        Duration expected = new Duration(20L * DateTimeConstants.MILLIS_PER_SECOND);
+        assertEquals(expected, test.toStandardDuration());
+        
+        expected = new Duration(((long) Integer.MAX_VALUE) * DateTimeConstants.MILLIS_PER_SECOND);
+        assertEquals(expected, Seconds.MAX_VALUE.toStandardDuration());
+    }
+
+// org.joda.time.TestSeconds::testPlus_int
+    public void testPlus_int() {
+        Seconds test2 = Seconds.seconds(2);
+        Seconds result = test2.plus(3);
+        assertEquals(2, test2.getSeconds());
+        assertEquals(5, result.getSeconds());
+        
+        assertEquals(1, Seconds.ONE.plus(0).getSeconds());
+        
+        try {
+            Seconds.MAX_VALUE.plus(1);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testPlus_Seconds
+    public void testPlus_Seconds() {
+        Seconds test2 = Seconds.seconds(2);
+        Seconds test3 = Seconds.seconds(3);
+        Seconds result = test2.plus(test3);
+        assertEquals(2, test2.getSeconds());
+        assertEquals(3, test3.getSeconds());
+        assertEquals(5, result.getSeconds());
+        
+        assertEquals(1, Seconds.ONE.plus(Seconds.ZERO).getSeconds());
+        assertEquals(1, Seconds.ONE.plus((Seconds) null).getSeconds());
+        
+        try {
+            Seconds.MAX_VALUE.plus(Seconds.ONE);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testMinus_int
+    public void testMinus_int() {
+        Seconds test2 = Seconds.seconds(2);
+        Seconds result = test2.minus(3);
+        assertEquals(2, test2.getSeconds());
+        assertEquals(-1, result.getSeconds());
+        
+        assertEquals(1, Seconds.ONE.minus(0).getSeconds());
+        
+        try {
+            Seconds.MIN_VALUE.minus(1);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testMinus_Seconds
+    public void testMinus_Seconds() {
+        Seconds test2 = Seconds.seconds(2);
+        Seconds test3 = Seconds.seconds(3);
+        Seconds result = test2.minus(test3);
+        assertEquals(2, test2.getSeconds());
+        assertEquals(3, test3.getSeconds());
+        assertEquals(-1, result.getSeconds());
+        
+        assertEquals(1, Seconds.ONE.minus(Seconds.ZERO).getSeconds());
+        assertEquals(1, Seconds.ONE.minus((Seconds) null).getSeconds());
+        
+        try {
+            Seconds.MIN_VALUE.minus(Seconds.ONE);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testMultipliedBy_int
+    public void testMultipliedBy_int() {
+        Seconds test = Seconds.seconds(2);
+        assertEquals(6, test.multipliedBy(3).getSeconds());
+        assertEquals(2, test.getSeconds());
+        assertEquals(-6, test.multipliedBy(-3).getSeconds());
+        assertSame(test, test.multipliedBy(1));
+        
+        Seconds halfMax = Seconds.seconds(Integer.MAX_VALUE / 2 + 1);
+        try {
+            halfMax.multipliedBy(2);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testDividedBy_int
+    public void testDividedBy_int() {
+        Seconds test = Seconds.seconds(12);
+        assertEquals(6, test.dividedBy(2).getSeconds());
+        assertEquals(12, test.getSeconds());
+        assertEquals(4, test.dividedBy(3).getSeconds());
+        assertEquals(3, test.dividedBy(4).getSeconds());
+        assertEquals(2, test.dividedBy(5).getSeconds());
+        assertEquals(2, test.dividedBy(6).getSeconds());
+        assertSame(test, test.dividedBy(1));
+        
+        try {
+            Seconds.ONE.dividedBy(0);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testNegated
+    public void testNegated() {
+        Seconds test = Seconds.seconds(12);
+        assertEquals(-12, test.negated().getSeconds());
+        assertEquals(12, test.getSeconds());
+        
+        try {
+            Seconds.MIN_VALUE.negated();
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestSeconds::testAddToLocalDate
+    public void testAddToLocalDate() {
+        Seconds test = Seconds.seconds(26);
+        LocalDateTime date = new LocalDateTime(2006, 6, 1, 0, 0, 0, 0);
+        LocalDateTime expected = new LocalDateTime(2006, 6, 1, 0, 0, 26, 0);
+        assertEquals(expected, date.plus(test));
+    }
+
+// org.joda.time.TestSerialization::testTest
+    public void testTest() {
+        assertEquals("2002-06-09T00:00:00.000Z", new Instant(TEST_TIME_NOW).toString());
+        assertEquals("2002-04-05T12:24:00.000Z", new Instant(TEST_TIME1).toString());
+        assertEquals("2003-05-06T14:28:00.000Z", new Instant(TEST_TIME2).toString());
+    }
+
+// org.joda.time.TestSerialization::testSerializedInstant
+    public void testSerializedInstant() throws Exception {
+        Instant test = new Instant();
+        loadAndCompare(test, "Instant", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateTime
+    public void testSerializedDateTime() throws Exception {
+        DateTime test = new DateTime();
+        loadAndCompare(test, "DateTime", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateTimeProperty
+    public void testSerializedDateTimeProperty() throws Exception {
+        DateTime.Property test = new DateTime().hourOfDay();
+        loadAndCompare(test, "DateTimeProperty", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedMutableDateTime
+    public void testSerializedMutableDateTime() throws Exception {
+        MutableDateTime test = new MutableDateTime();
+        loadAndCompare(test, "MutableDateTime", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedMutableDateTimeProperty
+    public void testSerializedMutableDateTimeProperty() throws Exception {
+        MutableDateTime.Property test = new MutableDateTime().hourOfDay();
+        loadAndCompare(test, "MutableDateTimeProperty", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateMidnight
+    public void testSerializedDateMidnight() throws Exception {
+        DateMidnight test = new DateMidnight();
+        loadAndCompare(test, "DateMidnight", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateMidnightProperty
+    public void testSerializedDateMidnightProperty() throws Exception {
+        DateMidnight.Property test = new DateMidnight().monthOfYear();
+        loadAndCompare(test, "DateMidnightProperty", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedLocalDate
+    public void testSerializedLocalDate() throws Exception {
+        LocalDate test = new LocalDate();
+        loadAndCompare(test, "LocalDate", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedLocalDateBuddhist
+    public void testSerializedLocalDateBuddhist() throws Exception {
+        LocalDate test = new LocalDate(BuddhistChronology.getInstanceUTC());
+        loadAndCompare(test, "LocalDateBuddhist", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedLocalTime
+    public void testSerializedLocalTime() throws Exception {
+        LocalTime test = new LocalTime();
+        loadAndCompare(test, "LocalTime", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedLocalDateTime
+    public void testSerializedLocalDateTime() throws Exception {
+        LocalDateTime test = new LocalDateTime();
+        loadAndCompare(test, "LocalDateTime", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedYearMonthDay
+    public void testSerializedYearMonthDay() throws Exception {
+        YearMonthDay test = new YearMonthDay();
+        loadAndCompare(test, "YearMonthDay", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedTimeOfDay
+    public void testSerializedTimeOfDay() throws Exception {
+        TimeOfDay test = new TimeOfDay();
+        loadAndCompare(test, "TimeOfDay", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateTimeZoneUTC
+    public void testSerializedDateTimeZoneUTC() throws Exception {
+        DateTimeZone test = DateTimeZone.UTC;
+        loadAndCompare(test, "DateTimeZoneUTC", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateTimeZone
+    public void testSerializedDateTimeZone() throws Exception {
+        
+        
+        DateTimeZone test = DateTimeZone.forID("Europe/Paris");
+        loadAndCompare(test, "DateTimeZone", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testDuration
+    public void testDuration() throws Exception {
+        Duration test = Duration.millis(12345);
+        loadAndCompare(test, "Duration", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedCopticChronology
+    public void testSerializedCopticChronology() throws Exception {
+        CopticChronology test = CopticChronology.getInstance(LONDON);
+        loadAndCompare(test, "CopticChronology", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedISOChronology
+    public void testSerializedISOChronology() throws Exception {
+        ISOChronology test = ISOChronology.getInstance(PARIS);
+        loadAndCompare(test, "ISOChronology", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedGJChronology
+    public void testSerializedGJChronology() throws Exception {
+        GJChronology test = GJChronology.getInstance(TOKYO);
+        loadAndCompare(test, "GJChronology", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedGJChronologyChangedInternals
+    public void testSerializedGJChronologyChangedInternals() throws Exception {
+        GJChronology test = GJChronology.getInstance(PARIS, 123L, 2);
+        loadAndCompare(test, "GJChronologyChangedInternals", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedGregorianChronology
+    public void testSerializedGregorianChronology() throws Exception {
+        GregorianChronology test = GregorianChronology.getInstance(PARIS);
+        loadAndCompare(test, "GregorianChronology", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedJulianChronology
+    public void testSerializedJulianChronology() throws Exception {
+        JulianChronology test = JulianChronology.getInstance(PARIS);
+        loadAndCompare(test, "JulianChronology", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedBuddhistChronology
+    public void testSerializedBuddhistChronology() throws Exception {
+        BuddhistChronology test = BuddhistChronology.getInstance(PARIS);
+        loadAndCompare(test, "BuddhistChronology", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedPeriodType
+    public void testSerializedPeriodType() throws Exception {
+        PeriodType test = PeriodType.dayTime();
+        loadAndCompare(test, "PeriodType", false);
+        inlineCompare(test, false);
+    }
+
+// org.joda.time.TestSerialization::testSerializedDateTimeFieldType
+    public void testSerializedDateTimeFieldType() throws Exception {
+        DateTimeFieldType test = DateTimeFieldType.clockhourOfDay();
+        loadAndCompare(test, "DateTimeFieldType", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestSerialization::testSerializedUnsupportedDateTimeField
+    public void testSerializedUnsupportedDateTimeField() throws Exception {
+        UnsupportedDateTimeField test = UnsupportedDateTimeField.getInstance(
+                DateTimeFieldType.year(),
+                UnsupportedDurationField.getInstance(DurationFieldType.years()));
+        loadAndCompare(test, "UnsupportedDateTimeField", true);
+        inlineCompare(test, true);
+    }
+
+// org.joda.time.TestStringConvert::testDateMidnight
+    public void testDateMidnight() {
+        DateMidnight test = new DateMidnight(2010, 6, 30, ISOChronology.getInstance(ZONE));
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("2010-06-30T00:00:00.000+02:00", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(DateMidnight.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testDateTime
+    public void testDateTime() {
+        DateTime test = new DateTime(2010, 6, 30, 2, 30, 50, 678, ISOChronology.getInstance(ZONE));
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("2010-06-30T02:30:50.678+02:00", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(DateTime.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testMutableDateTime
+    public void testMutableDateTime() {
+        MutableDateTime test = new MutableDateTime(2010, 6, 30, 2, 30, 50, 678, ISOChronology.getInstance(ZONE));
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("2010-06-30T02:30:50.678+02:00", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(MutableDateTime.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testLocalDateTime
+    public void testLocalDateTime() {
+        LocalDateTime test = new LocalDateTime(2010, 6, 30, 2, 30);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("2010-06-30T02:30:00.000", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(LocalDateTime.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testLocalDate
+    public void testLocalDate() {
+        LocalDate test = new LocalDate(2010, 6, 30);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("2010-06-30", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(LocalDate.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testLocalTime
+    public void testLocalTime() {
+        LocalTime test = new LocalTime(2, 30, 50, 678);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("02:30:50.678", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(LocalTime.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testYearMonth
+    public void testYearMonth() {
+        YearMonth test = new YearMonth(2010, 6);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("2010-06", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(YearMonth.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testMonthDay
+    public void testMonthDay() {
+        MonthDay test = new MonthDay(6, 30);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("--06-30", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(MonthDay.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testMonthDay_leapDay
+    public void testMonthDay_leapDay() {
+        MonthDay test = new MonthDay(2, 29);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("--02-29", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(MonthDay.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testTimeZone
+    public void testTimeZone() {
+        DateTimeZone test = DateTimeZone.forID("Europe/Paris");
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("Europe/Paris", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(DateTimeZone.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testDuration
+    public void testDuration() {
+        Duration test = new Duration(12345678L);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("PT12345.678S", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Duration.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testPeriod
+    public void testPeriod() {
+        Period test = new Period(1, 2, 3, 4, 5, 6, 7, 8);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("P1Y2M3W4DT5H6M7.008S", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Period.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testMutablePeriod
+    public void testMutablePeriod() {
+        MutablePeriod test = new MutablePeriod(1, 2, 3, 4, 5, 6, 7, 8);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("P1Y2M3W4DT5H6M7.008S", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(MutablePeriod.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testYears
+    public void testYears() {
+        Years test = Years.years(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("P5Y", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Years.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testMonths
+    public void testMonths() {
+        Months test = Months.months(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("P5M", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Months.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testWeeks
+    public void testWeeks() {
+        Weeks test = Weeks.weeks(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("P5W", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Weeks.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testDays
+    public void testDays() {
+        Days test = Days.days(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("P5D", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Days.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testHours
+    public void testHours() {
+        Hours test = Hours.hours(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("PT5H", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Hours.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testMinutes
+    public void testMinutes() {
+        Minutes test = Minutes.minutes(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("PT5M", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Minutes.class, str));
+    }
+
+// org.joda.time.TestStringConvert::testSeconds
+    public void testSeconds() {
+        Seconds test = Seconds.seconds(5);
+        String str = StringConvert.INSTANCE.convertToString(test);
+        assertEquals("PT5S", str);
+        assertEquals(test, StringConvert.INSTANCE.convertFromString(Seconds.class, str));
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGet
+    public void testGet() {
+        TimeOfDay test = new TimeOfDay();
+        assertEquals(10 + OFFSET, test.get(DateTimeFieldType.hourOfDay()));
+        assertEquals(20, test.get(DateTimeFieldType.minuteOfHour()));
+        assertEquals(30, test.get(DateTimeFieldType.secondOfMinute()));
+        assertEquals(40, test.get(DateTimeFieldType.millisOfSecond()));
+        try {
+            test.get(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.get(DateTimeFieldType.dayOfMonth());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testSize
+    public void testSize() {
+        TimeOfDay test = new TimeOfDay();
+        assertEquals(4, test.size());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGetFieldType
+    public void testGetFieldType() {
+        TimeOfDay test = new TimeOfDay(COPTIC_PARIS);
+        assertSame(DateTimeFieldType.hourOfDay(), test.getFieldType(0));
+        assertSame(DateTimeFieldType.minuteOfHour(), test.getFieldType(1));
+        assertSame(DateTimeFieldType.secondOfMinute(), test.getFieldType(2));
+        assertSame(DateTimeFieldType.millisOfSecond(), test.getFieldType(3));
+        try {
+            test.getFieldType(-1);
+        } catch (IndexOutOfBoundsException ex) {}
+        try {
+            test.getFieldType(5);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGetFieldTypes
+    public void testGetFieldTypes() {
+        TimeOfDay test = new TimeOfDay(COPTIC_PARIS);
+        DateTimeFieldType[] fields = test.getFieldTypes();
+        assertSame(DateTimeFieldType.hourOfDay(), fields[0]);
+        assertSame(DateTimeFieldType.minuteOfHour(), fields[1]);
+        assertSame(DateTimeFieldType.secondOfMinute(), fields[2]);
+        assertSame(DateTimeFieldType.millisOfSecond(), fields[3]);
+        assertNotSame(test.getFieldTypes(), test.getFieldTypes());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGetField
+    public void testGetField() {
+        TimeOfDay test = new TimeOfDay(COPTIC_PARIS);
+        assertSame(CopticChronology.getInstanceUTC().hourOfDay(), test.getField(0));
+        assertSame(CopticChronology.getInstanceUTC().minuteOfHour(), test.getField(1));
+        assertSame(CopticChronology.getInstanceUTC().secondOfMinute(), test.getField(2));
+        assertSame(CopticChronology.getInstanceUTC().millisOfSecond(), test.getField(3));
+        try {
+            test.getField(-1);
+        } catch (IndexOutOfBoundsException ex) {}
+        try {
+            test.getField(5);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGetFields
+    public void testGetFields() {
+        TimeOfDay test = new TimeOfDay(COPTIC_PARIS);
+        DateTimeField[] fields = test.getFields();
+        assertSame(CopticChronology.getInstanceUTC().hourOfDay(), fields[0]);
+        assertSame(CopticChronology.getInstanceUTC().minuteOfHour(), fields[1]);
+        assertSame(CopticChronology.getInstanceUTC().secondOfMinute(), fields[2]);
+        assertSame(CopticChronology.getInstanceUTC().millisOfSecond(), fields[3]);
+        assertNotSame(test.getFields(), test.getFields());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGetValue
+    public void testGetValue() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        assertEquals(10, test.getValue(0));
+        assertEquals(20, test.getValue(1));
+        assertEquals(30, test.getValue(2));
+        assertEquals(40, test.getValue(3));
+        try {
+            test.getValue(-1);
+        } catch (IndexOutOfBoundsException ex) {}
+        try {
+            test.getValue(5);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testGetValues
+    public void testGetValues() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        int[] values = test.getValues();
+        assertEquals(10, values[0]);
+        assertEquals(20, values[1]);
+        assertEquals(30, values[2]);
+        assertEquals(40, values[3]);
+        assertNotSame(test.getValues(), test.getValues());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testIsSupported
+    public void testIsSupported() {
+        TimeOfDay test = new TimeOfDay(COPTIC_PARIS);
+        assertEquals(true, test.isSupported(DateTimeFieldType.hourOfDay()));
+        assertEquals(true, test.isSupported(DateTimeFieldType.minuteOfHour()));
+        assertEquals(true, test.isSupported(DateTimeFieldType.secondOfMinute()));
+        assertEquals(true, test.isSupported(DateTimeFieldType.millisOfSecond()));
+        assertEquals(false, test.isSupported(DateTimeFieldType.dayOfMonth()));
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testEqualsHashCode
+    public void testEqualsHashCode() {
+        TimeOfDay test1 = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        TimeOfDay test2 = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        assertEquals(true, test1.equals(test2));
+        assertEquals(true, test2.equals(test1));
+        assertEquals(true, test1.equals(test1));
+        assertEquals(true, test2.equals(test2));
+        assertEquals(true, test1.hashCode() == test2.hashCode());
+        assertEquals(true, test1.hashCode() == test1.hashCode());
+        assertEquals(true, test2.hashCode() == test2.hashCode());
+        
+        TimeOfDay test3 = new TimeOfDay(15, 20, 30, 40);
+        assertEquals(false, test1.equals(test3));
+        assertEquals(false, test2.equals(test3));
+        assertEquals(false, test3.equals(test1));
+        assertEquals(false, test3.equals(test2));
+        assertEquals(false, test1.hashCode() == test3.hashCode());
+        assertEquals(false, test2.hashCode() == test3.hashCode());
+        
+        assertEquals(false, test1.equals("Hello"));
+        assertEquals(true, test1.equals(new MockInstant()));
+        assertEquals(false, test1.equals(MockPartial.EMPTY_INSTANCE));
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testCompareTo
+    public void testCompareTo() {
+        TimeOfDay test1 = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay test1a = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(0, test1.compareTo(test1a));
+        assertEquals(0, test1a.compareTo(test1));
+        assertEquals(0, test1.compareTo(test1));
+        assertEquals(0, test1a.compareTo(test1a));
+        
+        TimeOfDay test2 = new TimeOfDay(10, 20, 35, 40);
+        assertEquals(-1, test1.compareTo(test2));
+        assertEquals(+1, test2.compareTo(test1));
+        
+        TimeOfDay test3 = new TimeOfDay(10, 20, 35, 40, GregorianChronology.getInstanceUTC());
+        assertEquals(-1, test1.compareTo(test3));
+        assertEquals(+1, test3.compareTo(test1));
+        assertEquals(0, test3.compareTo(test2));
+        
+        DateTimeFieldType[] types = new DateTimeFieldType[] {
+            DateTimeFieldType.hourOfDay(),
+            DateTimeFieldType.minuteOfHour(),
+            DateTimeFieldType.secondOfMinute(),
+            DateTimeFieldType.millisOfSecond(),
+        };
+        int[] values = new int[] {10, 20, 30, 40};
+        Partial p = new Partial(types, values);
+        assertEquals(0, test1.compareTo(p));
+        try {
+            test1.compareTo(null);
+            fail();
+        } catch (NullPointerException ex) {}
+
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testIsEqual_TOD
+    public void testIsEqual_TOD() {
+        TimeOfDay test1 = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay test1a = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(true, test1.isEqual(test1a));
+        assertEquals(true, test1a.isEqual(test1));
+        assertEquals(true, test1.isEqual(test1));
+        assertEquals(true, test1a.isEqual(test1a));
+        
+        TimeOfDay test2 = new TimeOfDay(10, 20, 35, 40);
+        assertEquals(false, test1.isEqual(test2));
+        assertEquals(false, test2.isEqual(test1));
+        
+        TimeOfDay test3 = new TimeOfDay(10, 20, 35, 40, GregorianChronology.getInstanceUTC());
+        assertEquals(false, test1.isEqual(test3));
+        assertEquals(false, test3.isEqual(test1));
+        assertEquals(true, test3.isEqual(test2));
+        
+        try {
+            new TimeOfDay(10, 20, 35, 40).isEqual(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testIsBefore_TOD
+    public void testIsBefore_TOD() {
+        TimeOfDay test1 = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay test1a = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(false, test1.isBefore(test1a));
+        assertEquals(false, test1a.isBefore(test1));
+        assertEquals(false, test1.isBefore(test1));
+        assertEquals(false, test1a.isBefore(test1a));
+        
+        TimeOfDay test2 = new TimeOfDay(10, 20, 35, 40);
+        assertEquals(true, test1.isBefore(test2));
+        assertEquals(false, test2.isBefore(test1));
+        
+        TimeOfDay test3 = new TimeOfDay(10, 20, 35, 40, GregorianChronology.getInstanceUTC());
+        assertEquals(true, test1.isBefore(test3));
+        assertEquals(false, test3.isBefore(test1));
+        assertEquals(false, test3.isBefore(test2));
+        
+        try {
+            new TimeOfDay(10, 20, 35, 40).isBefore(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testIsAfter_TOD
+    public void testIsAfter_TOD() {
+        TimeOfDay test1 = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay test1a = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(false, test1.isAfter(test1a));
+        assertEquals(false, test1a.isAfter(test1));
+        assertEquals(false, test1.isAfter(test1));
+        assertEquals(false, test1a.isAfter(test1a));
+        
+        TimeOfDay test2 = new TimeOfDay(10, 20, 35, 40);
+        assertEquals(false, test1.isAfter(test2));
+        assertEquals(true, test2.isAfter(test1));
+        
+        TimeOfDay test3 = new TimeOfDay(10, 20, 35, 40, GregorianChronology.getInstanceUTC());
+        assertEquals(false, test1.isAfter(test3));
+        assertEquals(true, test3.isAfter(test1));
+        assertEquals(false, test3.isAfter(test2));
+        
+        try {
+            new TimeOfDay(10, 20, 35, 40).isAfter(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithChronologyRetainFields_Chrono
+    public void testWithChronologyRetainFields_Chrono() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        TimeOfDay test = base.withChronologyRetainFields(BUDDHIST_TOKYO);
+        check(base, 10, 20, 30, 40);
+        assertEquals(COPTIC_UTC, base.getChronology());
+        check(test, 10, 20, 30, 40);
+        assertEquals(BUDDHIST_UTC, test.getChronology());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithChronologyRetainFields_sameChrono
+    public void testWithChronologyRetainFields_sameChrono() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        TimeOfDay test = base.withChronologyRetainFields(COPTIC_TOKYO);
+        assertSame(base, test);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithChronologyRetainFields_nullChrono
+    public void testWithChronologyRetainFields_nullChrono() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        TimeOfDay test = base.withChronologyRetainFields(null);
+        check(base, 10, 20, 30, 40);
+        assertEquals(COPTIC_UTC, base.getChronology());
+        check(test, 10, 20, 30, 40);
+        assertEquals(ISO_UTC, test.getChronology());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithField1
+    public void testWithField1() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay result = test.withField(DateTimeFieldType.hourOfDay(), 15);
+        
+        assertEquals(new TimeOfDay(10, 20, 30, 40), test);
+        assertEquals(new TimeOfDay(15, 20, 30, 40), result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithField2
+    public void testWithField2() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        try {
+            test.withField(null, 6);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithField3
+    public void testWithField3() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        try {
+            test.withField(DateTimeFieldType.dayOfMonth(), 6);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithField4
+    public void testWithField4() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay result = test.withField(DateTimeFieldType.hourOfDay(), 10);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded1
+    public void testWithFieldAdded1() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay result = test.withFieldAdded(DurationFieldType.hours(), 6);
+        
+        assertEquals(new TimeOfDay(10, 20, 30, 40), test);
+        assertEquals(new TimeOfDay(16, 20, 30, 40), result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded2
+    public void testWithFieldAdded2() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        try {
+            test.withFieldAdded(null, 0);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded3
+    public void testWithFieldAdded3() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        try {
+            test.withFieldAdded(null, 6);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded4
+    public void testWithFieldAdded4() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay result = test.withFieldAdded(DurationFieldType.hours(), 0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded5
+    public void testWithFieldAdded5() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        try {
+            test.withFieldAdded(DurationFieldType.days(), 6);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded6
+    public void testWithFieldAdded6() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay result = test.withFieldAdded(DurationFieldType.hours(), 16);
+        
+        assertEquals(new TimeOfDay(10, 20, 30, 40), test);
+        assertEquals(new TimeOfDay(2, 20, 30, 40), result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded7
+    public void testWithFieldAdded7() {
+        TimeOfDay test = new TimeOfDay(23, 59, 59, 999);
+        TimeOfDay result = test.withFieldAdded(DurationFieldType.millis(), 1);
+        assertEquals(new TimeOfDay(0, 0, 0, 0), result);
+        
+        test = new TimeOfDay(23, 59, 59, 999);
+        result = test.withFieldAdded(DurationFieldType.seconds(), 1);
+        assertEquals(new TimeOfDay(0, 0, 0, 999), result);
+        
+        test = new TimeOfDay(23, 59, 59, 999);
+        result = test.withFieldAdded(DurationFieldType.minutes(), 1);
+        assertEquals(new TimeOfDay(0, 0, 59, 999), result);
+        
+        test = new TimeOfDay(23, 59, 59, 999);
+        result = test.withFieldAdded(DurationFieldType.hours(), 1);
+        assertEquals(new TimeOfDay(0, 59, 59, 999), result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithFieldAdded8
+    public void testWithFieldAdded8() {
+        TimeOfDay test = new TimeOfDay(0, 0, 0, 0);
+        TimeOfDay result = test.withFieldAdded(DurationFieldType.millis(), -1);
+        assertEquals(new TimeOfDay(23, 59, 59, 999), result);
+        
+        test = new TimeOfDay(0, 0, 0, 0);
+        result = test.withFieldAdded(DurationFieldType.seconds(), -1);
+        assertEquals(new TimeOfDay(23, 59, 59, 0), result);
+        
+        test = new TimeOfDay(0, 0, 0, 0);
+        result = test.withFieldAdded(DurationFieldType.minutes(), -1);
+        assertEquals(new TimeOfDay(23, 59, 0, 0), result);
+        
+        test = new TimeOfDay(0, 0, 0, 0);
+        result = test.withFieldAdded(DurationFieldType.hours(), -1);
+        assertEquals(new TimeOfDay(23, 0, 0, 0), result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testPlus_RP
+    public void testPlus_RP() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, BuddhistChronology.getInstance());
+        TimeOfDay result = test.plus(new Period(1, 2, 3, 4, 5, 6, 7, 8));
+        TimeOfDay expected = new TimeOfDay(15, 26, 37, 48, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.plus((ReadablePeriod) null);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testPlusHours_int
+    public void testPlusHours_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.plusHours(1);
+        TimeOfDay expected = new TimeOfDay(2, 2, 3, 4, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.plusHours(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testPlusMinutes_int
+    public void testPlusMinutes_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.plusMinutes(1);
+        TimeOfDay expected = new TimeOfDay(1, 3, 3, 4, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.plusMinutes(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testPlusSeconds_int
+    public void testPlusSeconds_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.plusSeconds(1);
+        TimeOfDay expected = new TimeOfDay(1, 2, 4, 4, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.plusSeconds(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testPlusMillis_int
+    public void testPlusMillis_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.plusMillis(1);
+        TimeOfDay expected = new TimeOfDay(1, 2, 3, 5, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.plusMillis(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testMinus_RP
+    public void testMinus_RP() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, BuddhistChronology.getInstance());
+        TimeOfDay result = test.minus(new Period(1, 1, 1, 1, 1, 1, 1, 1));
+        TimeOfDay expected = new TimeOfDay(9, 19, 29, 39, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.minus((ReadablePeriod) null);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testMinusHours_int
+    public void testMinusHours_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.minusHours(1);
+        TimeOfDay expected = new TimeOfDay(0, 2, 3, 4, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.minusHours(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testMinusMinutes_int
+    public void testMinusMinutes_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.minusMinutes(1);
+        TimeOfDay expected = new TimeOfDay(1, 1, 3, 4, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.minusMinutes(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testMinusSeconds_int
+    public void testMinusSeconds_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.minusSeconds(1);
+        TimeOfDay expected = new TimeOfDay(1, 2, 2, 4, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.minusSeconds(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testMinusMillis_int
+    public void testMinusMillis_int() {
+        TimeOfDay test = new TimeOfDay(1, 2, 3, 4, BuddhistChronology.getInstance());
+        TimeOfDay result = test.minusMillis(1);
+        TimeOfDay expected = new TimeOfDay(1, 2, 3, 3, BuddhistChronology.getInstance());
+        assertEquals(expected, result);
+        
+        result = test.minusMillis(0);
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToLocalTime
+    public void testToLocalTime() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_UTC);
+        LocalTime test = base.toLocalTime();
+        assertEquals(new LocalTime(10, 20, 30, 40, COPTIC_UTC), test);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToDateTimeToday
+    public void testToDateTimeToday() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS); 
+        DateTime dt = new DateTime(2004, 6, 9, 6, 7, 8, 9);
+        DateTimeUtils.setCurrentMillisFixed(dt.getMillis());
+        
+        DateTime test = base.toDateTimeToday();
+        check(base, 10, 20, 30, 40);
+        DateTime expected = new DateTime(dt.getMillis(), COPTIC_LONDON);
+        expected = expected.hourOfDay().setCopy(10);
+        expected = expected.minuteOfHour().setCopy(20);
+        expected = expected.secondOfMinute().setCopy(30);
+        expected = expected.millisOfSecond().setCopy(40);
+        assertEquals(expected, test);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToDateTimeToday_Zone
+    public void testToDateTimeToday_Zone() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS); 
+        DateTime dt = new DateTime(2004, 6, 9, 6, 7, 8, 9);
+        DateTimeUtils.setCurrentMillisFixed(dt.getMillis());
+        
+        DateTime test = base.toDateTimeToday(TOKYO);
+        check(base, 10, 20, 30, 40);
+        DateTime expected = new DateTime(dt.getMillis(), COPTIC_TOKYO);
+        expected = expected.hourOfDay().setCopy(10);
+        expected = expected.minuteOfHour().setCopy(20);
+        expected = expected.secondOfMinute().setCopy(30);
+        expected = expected.millisOfSecond().setCopy(40);
+        assertEquals(expected, test);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToDateTimeToday_nullZone
+    public void testToDateTimeToday_nullZone() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS); 
+        DateTime dt = new DateTime(2004, 6, 9, 6, 7, 8, 9);
+        DateTimeUtils.setCurrentMillisFixed(dt.getMillis());
+        
+        DateTime test = base.toDateTimeToday((DateTimeZone) null);
+        check(base, 10, 20, 30, 40);
+        DateTime expected = new DateTime(dt.getMillis(), COPTIC_LONDON);
+        expected = expected.hourOfDay().setCopy(10);
+        expected = expected.minuteOfHour().setCopy(20);
+        expected = expected.secondOfMinute().setCopy(30);
+        expected = expected.millisOfSecond().setCopy(40);
+        assertEquals(expected, test);
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToDateTime_RI
+    public void testToDateTime_RI() {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        DateTime dt = new DateTime(0L); 
+        assertEquals("1970-01-01T01:00:00.000+01:00", dt.toString());
+        
+        DateTime test = base.toDateTime(dt);
+        check(base, 10, 20, 30, 40);
+        assertEquals("1970-01-01T01:00:00.000+01:00", dt.toString());
+        assertEquals("1970-01-01T10:20:30.040+01:00", test.toString());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToDateTime_nullRI
+    public void testToDateTime_nullRI() {
+        TimeOfDay base = new TimeOfDay(1, 2, 3, 4);
+        DateTimeUtils.setCurrentMillisFixed(TEST_TIME2);
+        
+        DateTime test = base.toDateTime((ReadableInstant) null);
+        check(base, 1, 2, 3, 4);
+        assertEquals("1970-01-02T01:02:03.004+01:00", test.toString());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testWithers
+    public void testWithers() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        check(test.withHourOfDay(6), 6, 20, 30, 40);
+        check(test.withMinuteOfHour(6), 10, 6, 30, 40);
+        check(test.withSecondOfMinute(6), 10, 20, 6, 40);
+        check(test.withMillisOfSecond(6), 10, 20, 30, 6);
+        try {
+            test.withHourOfDay(-1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.withHourOfDay(24);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testProperty
+    public void testProperty() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(test.hourOfDay(), test.property(DateTimeFieldType.hourOfDay()));
+        assertEquals(test.minuteOfHour(), test.property(DateTimeFieldType.minuteOfHour()));
+        assertEquals(test.secondOfMinute(), test.property(DateTimeFieldType.secondOfMinute()));
+        assertEquals(test.millisOfSecond(), test.property(DateTimeFieldType.millisOfSecond()));
+        try {
+            test.property(DateTimeFieldType.millisOfDay());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.property(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testSerialization
+    public void testSerialization() throws Exception {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, COPTIC_PARIS);
+        
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ObjectOutputStream oos = new ObjectOutputStream(baos);
+        oos.writeObject(test);
+        byte[] bytes = baos.toByteArray();
+        oos.close();
+        
+        ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+        ObjectInputStream ois = new ObjectInputStream(bais);
+        TimeOfDay result = (TimeOfDay) ois.readObject();
+        ois.close();
+        
+        assertEquals(test, result);
+        assertTrue(Arrays.equals(test.getValues(), result.getValues()));
+        assertTrue(Arrays.equals(test.getFields(), result.getFields()));
+        assertEquals(test.getChronology(), result.getChronology());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToString
+    public void testToString() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals("T10:20:30.040", test.toString());
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToString_String
+    public void testToString_String() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals("\ufffd\ufffd\ufffd\ufffd 10", test.toString("yyyy HH"));
+        assertEquals("T10:20:30.040", test.toString((String) null));
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToString_String_Locale
+    public void testToString_String_Locale() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals("10 20", test.toString("H m", Locale.ENGLISH));
+        assertEquals("T10:20:30.040", test.toString(null, Locale.ENGLISH));
+        assertEquals("10 20", test.toString("H m", null));
+        assertEquals("T10:20:30.040", test.toString(null, null));
+    }
+
+// org.joda.time.TestTimeOfDay_Basics::testToString_DTFormatter
+    public void testToString_DTFormatter() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals("\ufffd\ufffd\ufffd\ufffd 10", test.toString(DateTimeFormat.forPattern("yyyy HH")));
+        assertEquals("T10:20:30.040", test.toString((DateTimeFormatter) null));
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstantMidnight
+    public void testConstantMidnight() throws Throwable {
+        TimeOfDay test = TimeOfDay.MIDNIGHT;
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(0, test.getHourOfDay());
+        assertEquals(0, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactory_FromCalendarFields
+    public void testFactory_FromCalendarFields() throws Exception {
+        GregorianCalendar cal = new GregorianCalendar(1970, 1, 3, 4, 5, 6);
+        cal.set(Calendar.MILLISECOND, 7);
+        TimeOfDay expected = new TimeOfDay(4, 5, 6, 7);
+        assertEquals(expected, TimeOfDay.fromCalendarFields(cal));
+        try {
+            TimeOfDay.fromCalendarFields(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactory_FromDateFields_after1970
+    public void testFactory_FromDateFields_after1970() throws Exception {
+        GregorianCalendar cal = new GregorianCalendar(1970, 1, 3, 4, 5, 6);
+        cal.set(Calendar.MILLISECOND, 7);
+        TimeOfDay expected = new TimeOfDay(4, 5, 6, 7);
+        assertEquals(expected, TimeOfDay.fromDateFields(cal.getTime()));
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactory_FromDateFields_before1970
+    public void testFactory_FromDateFields_before1970() throws Exception {
+        GregorianCalendar cal = new GregorianCalendar(1969, 1, 3, 4, 5, 6);
+        cal.set(Calendar.MILLISECOND, 7);
+        TimeOfDay expected = new TimeOfDay(4, 5, 6, 7);
+        assertEquals(expected, TimeOfDay.fromDateFields(cal.getTime()));
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactory_FromDateFields_null
+    public void testFactory_FromDateFields_null() throws Exception {
+        try {
+            TimeOfDay.fromDateFields(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactoryMillisOfDay_long1
+    public void testFactoryMillisOfDay_long1() throws Throwable {
+        TimeOfDay test = TimeOfDay.fromMillisOfDay(TEST_TIME1);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(1, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactoryMillisOfDay_long1_Chronology
+    public void testFactoryMillisOfDay_long1_Chronology() throws Throwable {
+        TimeOfDay test = TimeOfDay.fromMillisOfDay(TEST_TIME1, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(1, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testFactoryMillisOfDay_long_nullChronology
+    public void testFactoryMillisOfDay_long_nullChronology() throws Throwable {
+        TimeOfDay test = TimeOfDay.fromMillisOfDay(TEST_TIME1, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(1, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor
+    public void testConstructor() throws Throwable {
+        TimeOfDay test = new TimeOfDay();
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10 + OFFSET, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_DateTimeZone
+    public void testConstructor_DateTimeZone() throws Throwable {
+        DateTime dt = new DateTime(2005, 6, 8, 23, 59, 30, 40, LONDON);
+        DateTimeUtils.setCurrentMillisFixed(dt.getMillis());
+        
+        
+        TimeOfDay test = new TimeOfDay(LONDON);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(23, test.getHourOfDay());
+        assertEquals(59, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+        
+        test = new TimeOfDay(PARIS);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(0, test.getHourOfDay());
+        assertEquals(59, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_nullDateTimeZone
+    public void testConstructor_nullDateTimeZone() throws Throwable {
+        DateTime dt = new DateTime(2005, 6, 8, 23, 59, 30, 40, LONDON);
+        DateTimeUtils.setCurrentMillisFixed(dt.getMillis());
+        
+        
+        TimeOfDay test = new TimeOfDay((DateTimeZone) null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(23, test.getHourOfDay());
+        assertEquals(59, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_Chronology
+    public void testConstructor_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(10 + OFFSET, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_nullChronology
+    public void testConstructor_nullChronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay((Chronology) null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10 + OFFSET, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_long1
+    public void testConstructor_long1() throws Throwable {
+        TimeOfDay test = new TimeOfDay(TEST_TIME1);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_long2
+    public void testConstructor_long2() throws Throwable {
+        TimeOfDay test = new TimeOfDay(TEST_TIME2);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(5 + OFFSET, test.getHourOfDay());
+        assertEquals(6, test.getMinuteOfHour());
+        assertEquals(7, test.getSecondOfMinute());
+        assertEquals(8, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_long1_Chronology
+    public void testConstructor_long1_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(TEST_TIME1, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_long2_Chronology
+    public void testConstructor_long2_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(TEST_TIME2, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(5 + OFFSET, test.getHourOfDay());
+        assertEquals(6, test.getMinuteOfHour());
+        assertEquals(7, test.getSecondOfMinute());
+        assertEquals(8, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_long_nullChronology
+    public void testConstructor_long_nullChronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(TEST_TIME1, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_Object1
+    public void testConstructor_Object1() throws Throwable {
+        Date date = new Date(TEST_TIME1);
+        TimeOfDay test = new TimeOfDay(date);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_Object2
+    public void testConstructor_Object2() throws Throwable {
+        Calendar cal = new GregorianCalendar();
+        cal.setTime(new Date(TEST_TIME1));
+        TimeOfDay test = new TimeOfDay(cal);
+        assertEquals(GJChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_nullObject
+    public void testConstructor_nullObject() throws Throwable {
+        TimeOfDay test = new TimeOfDay((Object) null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10 + OFFSET, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_todObject
+    public void testConstructor_todObject() throws Throwable {
+        TimeOfDay base = new TimeOfDay(10, 20, 30, 40, CopticChronology.getInstance(PARIS));
+        TimeOfDay test = new TimeOfDay(base);
+        assertEquals(CopticChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectString1
+    public void testConstructor_ObjectString1() throws Throwable {
+        TimeOfDay test = new TimeOfDay("10:20:30.040");
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectString2
+    public void testConstructor_ObjectString2() throws Throwable {
+        TimeOfDay test = new TimeOfDay("10:20:30.040+04:00");
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10 + OFFSET - 4, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectString3
+    public void testConstructor_ObjectString3() throws Throwable {
+        TimeOfDay test = new TimeOfDay("T10:20:30.040");
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectString4
+    public void testConstructor_ObjectString4() throws Throwable {
+        TimeOfDay test = new TimeOfDay("T10:20:30.040+04:00");
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10 + OFFSET - 4, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectString5
+    public void testConstructor_ObjectString5() throws Throwable {
+        TimeOfDay test = new TimeOfDay("10:20");
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectString6
+    public void testConstructor_ObjectString6() throws Throwable {
+        TimeOfDay test = new TimeOfDay("10");
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(0, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectStringEx1
+    public void testConstructor_ObjectStringEx1() throws Throwable {
+        try {
+            new TimeOfDay("1970-04-06");
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectStringEx2
+    public void testConstructor_ObjectStringEx2() throws Throwable {
+        try {
+            new TimeOfDay("1970-04-06T+14:00");
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectStringEx3
+    public void testConstructor_ObjectStringEx3() throws Throwable {
+        try {
+            new TimeOfDay("1970-04-06T10:20:30.040");
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_ObjectStringEx4
+    public void testConstructor_ObjectStringEx4() throws Throwable {
+        try {
+            new TimeOfDay("1970-04-06T10:20:30.040+14:00");
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_Object_Chronology
+    public void testConstructor_Object_Chronology() throws Throwable {
+        Date date = new Date(TEST_TIME1);
+        TimeOfDay test = new TimeOfDay(date, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor2_Object_Chronology
+    public void testConstructor2_Object_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay("T10:20");
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+        
+        try {
+            new TimeOfDay("T1020");
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_nullObject_Chronology
+    public void testConstructor_nullObject_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay((Object) null, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(10 + OFFSET, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_Object_nullChronology
+    public void testConstructor_Object_nullChronology() throws Throwable {
+        Date date = new Date(TEST_TIME1);
+        TimeOfDay test = new TimeOfDay(date, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(1 + OFFSET, test.getHourOfDay());
+        assertEquals(2, test.getMinuteOfHour());
+        assertEquals(3, test.getSecondOfMinute());
+        assertEquals(4, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_nullObject_nullChronology
+    public void testConstructor_nullObject_nullChronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay((Object) null, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10 + OFFSET, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int
+    public void testConstructor_int_int() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+        try {
+            new TimeOfDay(-1, 20);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(24, 20);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, -1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 60);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_Chronology
+    public void testConstructor_int_int_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+        try {
+            new TimeOfDay(-1, 20, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(24, 20, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, -1, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 60, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_nullChronology
+    public void testConstructor_int_int_nullChronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(0, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_int
+    public void testConstructor_int_int_int() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, 30);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+        try {
+            new TimeOfDay(-1, 20, 30);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(24, 20, 30);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, -1, 30);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 60, 30);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, -1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 60);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_int_Chronology
+    public void testConstructor_int_int_int_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+        try {
+            new TimeOfDay(-1, 20, 30, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(24, 20, 30, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, -1, 30, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 60, 30, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, -1, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 60, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_int_nullChronology
+    public void testConstructor_int_int_int_nullChronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(0, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_int_int
+    public void testConstructor_int_int_int_int() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+        try {
+            new TimeOfDay(-1, 20, 30, 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(24, 20, 30, 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, -1, 30, 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 60, 30, 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, -1, 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 60, 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 30, -1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 30, 1000);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_int_int_Chronology
+    public void testConstructor_int_int_int_int_Chronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, JulianChronology.getInstance());
+        assertEquals(JulianChronology.getInstanceUTC(), test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+        try {
+            new TimeOfDay(-1, 20, 30, 40, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(24, 20, 30, 40, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, -1, 30, 40, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 60, 30, 40, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, -1, 40, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 60, 40, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 30, -1, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            new TimeOfDay(10, 20, 30, 1000, JulianChronology.getInstance());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Constructors::testConstructor_int_int_int_int_nullChronology
+    public void testConstructor_int_int_int_int_nullChronology() throws Throwable {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40, null);
+        assertEquals(ISO_UTC, test.getChronology());
+        assertEquals(10, test.getHourOfDay());
+        assertEquals(20, test.getMinuteOfHour());
+        assertEquals(30, test.getSecondOfMinute());
+        assertEquals(40, test.getMillisOfSecond());
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetHour
+    public void testPropertyGetHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertSame(test.getChronology().hourOfDay(), test.hourOfDay().getField());
+        assertEquals("hourOfDay", test.hourOfDay().getName());
+        assertEquals("Property[hourOfDay]", test.hourOfDay().toString());
+        assertSame(test, test.hourOfDay().getReadablePartial());
+        assertSame(test, test.hourOfDay().getTimeOfDay());
+        assertEquals(10, test.hourOfDay().get());
+        assertEquals("10", test.hourOfDay().getAsString());
+        assertEquals("10", test.hourOfDay().getAsText());
+        assertEquals("10", test.hourOfDay().getAsText(Locale.FRENCH));
+        assertEquals("10", test.hourOfDay().getAsShortText());
+        assertEquals("10", test.hourOfDay().getAsShortText(Locale.FRENCH));
+        assertEquals(test.getChronology().hours(), test.hourOfDay().getDurationField());
+        assertEquals(test.getChronology().days(), test.hourOfDay().getRangeDurationField());
+        assertEquals(2, test.hourOfDay().getMaximumTextLength(null));
+        assertEquals(2, test.hourOfDay().getMaximumShortTextLength(null));
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetMaxMinValuesHour
+    public void testPropertyGetMaxMinValuesHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(0, test.hourOfDay().getMinimumValue());
+        assertEquals(0, test.hourOfDay().getMinimumValueOverall());
+        assertEquals(23, test.hourOfDay().getMaximumValue());
+        assertEquals(23, test.hourOfDay().getMaximumValueOverall());
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddHour
+    public void testPropertyAddHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().addToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 19, 20, 30, 40);
+        
+        copy = test.hourOfDay().addToCopy(0);
+        check(copy, 10, 20, 30, 40);
+        
+        copy = test.hourOfDay().addToCopy(13);
+        check(copy, 23, 20, 30, 40);
+        
+        copy = test.hourOfDay().addToCopy(14);
+        check(copy, 0, 20, 30, 40);
+        
+        copy = test.hourOfDay().addToCopy(-10);
+        check(copy, 0, 20, 30, 40);
+        
+        copy = test.hourOfDay().addToCopy(-11);
+        check(copy, 23, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddNoWrapHour
+    public void testPropertyAddNoWrapHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().addNoWrapToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 19, 20, 30, 40);
+        
+        copy = test.hourOfDay().addNoWrapToCopy(0);
+        check(copy, 10, 20, 30, 40);
+        
+        copy = test.hourOfDay().addNoWrapToCopy(13);
+        check(copy, 23, 20, 30, 40);
+        
+        try {
+            test.hourOfDay().addNoWrapToCopy(14);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+        
+        copy = test.hourOfDay().addNoWrapToCopy(-10);
+        check(copy, 0, 20, 30, 40);
+        
+        try {
+            test.hourOfDay().addNoWrapToCopy(-11);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddWrapFieldHour
+    public void testPropertyAddWrapFieldHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().addWrapFieldToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 19, 20, 30, 40);
+        
+        copy = test.hourOfDay().addWrapFieldToCopy(0);
+        check(copy, 10, 20, 30, 40);
+        
+        copy = test.hourOfDay().addWrapFieldToCopy(18);
+        check(copy, 4, 20, 30, 40);
+        
+        copy = test.hourOfDay().addWrapFieldToCopy(-15);
+        check(copy, 19, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetHour
+    public void testPropertySetHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().setCopy(12);
+        check(test, 10, 20, 30, 40);
+        check(copy, 12, 20, 30, 40);
+        
+        try {
+            test.hourOfDay().setCopy(24);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.hourOfDay().setCopy(-1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetTextHour
+    public void testPropertySetTextHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().setCopy("12");
+        check(test, 10, 20, 30, 40);
+        check(copy, 12, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyWithMaximumValueHour
+    public void testPropertyWithMaximumValueHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().withMaximumValue();
+        check(test, 10, 20, 30, 40);
+        check(copy, 23, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyWithMinimumValueHour
+    public void testPropertyWithMinimumValueHour() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.hourOfDay().withMinimumValue();
+        check(test, 10, 20, 30, 40);
+        check(copy, 0, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyCompareToHour
+    public void testPropertyCompareToHour() {
+        TimeOfDay test1 = new TimeOfDay(TEST_TIME1);
+        TimeOfDay test2 = new TimeOfDay(TEST_TIME2);
+        assertEquals(true, test1.hourOfDay().compareTo(test2) < 0);
+        assertEquals(true, test2.hourOfDay().compareTo(test1) > 0);
+        assertEquals(true, test1.hourOfDay().compareTo(test1) == 0);
+        try {
+            test1.hourOfDay().compareTo((ReadablePartial) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        
+        DateTime dt1 = new DateTime(TEST_TIME1);
+        DateTime dt2 = new DateTime(TEST_TIME2);
+        assertEquals(true, test1.hourOfDay().compareTo(dt2) < 0);
+        assertEquals(true, test2.hourOfDay().compareTo(dt1) > 0);
+        assertEquals(true, test1.hourOfDay().compareTo(dt1) == 0);
+        try {
+            test1.hourOfDay().compareTo((ReadableInstant) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetMinute
+    public void testPropertyGetMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertSame(test.getChronology().minuteOfHour(), test.minuteOfHour().getField());
+        assertEquals("minuteOfHour", test.minuteOfHour().getName());
+        assertEquals("Property[minuteOfHour]", test.minuteOfHour().toString());
+        assertSame(test, test.minuteOfHour().getReadablePartial());
+        assertSame(test, test.minuteOfHour().getTimeOfDay());
+        assertEquals(20, test.minuteOfHour().get());
+        assertEquals("20", test.minuteOfHour().getAsString());
+        assertEquals("20", test.minuteOfHour().getAsText());
+        assertEquals("20", test.minuteOfHour().getAsText(Locale.FRENCH));
+        assertEquals("20", test.minuteOfHour().getAsShortText());
+        assertEquals("20", test.minuteOfHour().getAsShortText(Locale.FRENCH));
+        assertEquals(test.getChronology().minutes(), test.minuteOfHour().getDurationField());
+        assertEquals(test.getChronology().hours(), test.minuteOfHour().getRangeDurationField());
+        assertEquals(2, test.minuteOfHour().getMaximumTextLength(null));
+        assertEquals(2, test.minuteOfHour().getMaximumShortTextLength(null));
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetMaxMinValuesMinute
+    public void testPropertyGetMaxMinValuesMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(0, test.minuteOfHour().getMinimumValue());
+        assertEquals(0, test.minuteOfHour().getMinimumValueOverall());
+        assertEquals(59, test.minuteOfHour().getMaximumValue());
+        assertEquals(59, test.minuteOfHour().getMaximumValueOverall());
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddMinute
+    public void testPropertyAddMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.minuteOfHour().addToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 29, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(39);
+        check(copy, 10, 59, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(40);
+        check(copy, 11, 0, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(1 * 60 + 45);
+        check(copy, 12, 5, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(13 * 60 + 39);
+        check(copy, 23, 59, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(13 * 60 + 40);
+        check(copy, 0, 0, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(-9);
+        check(copy, 10, 11, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(-19);
+        check(copy, 10, 1, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(-20);
+        check(copy, 10, 0, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(-21);
+        check(copy, 9, 59, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(-(10 * 60 + 20));
+        check(copy, 0, 0, 30, 40);
+        
+        copy = test.minuteOfHour().addToCopy(-(10 * 60 + 21));
+        check(copy, 23, 59, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddNoWrapMinute
+    public void testPropertyAddNoWrapMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.minuteOfHour().addNoWrapToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 29, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(39);
+        check(copy, 10, 59, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(40);
+        check(copy, 11, 0, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(1 * 60 + 45);
+        check(copy, 12, 5, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(13 * 60 + 39);
+        check(copy, 23, 59, 30, 40);
+        
+        try {
+            test.minuteOfHour().addNoWrapToCopy(13 * 60 + 40);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(-9);
+        check(copy, 10, 11, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(-19);
+        check(copy, 10, 1, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(-20);
+        check(copy, 10, 0, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(-21);
+        check(copy, 9, 59, 30, 40);
+        
+        copy = test.minuteOfHour().addNoWrapToCopy(-(10 * 60 + 20));
+        check(copy, 0, 0, 30, 40);
+        
+        try {
+            test.minuteOfHour().addNoWrapToCopy(-(10 * 60 + 21));
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddWrapFieldMinute
+    public void testPropertyAddWrapFieldMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.minuteOfHour().addWrapFieldToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 29, 30, 40);
+        
+        copy = test.minuteOfHour().addWrapFieldToCopy(49);
+        check(copy, 10, 9, 30, 40);
+        
+        copy = test.minuteOfHour().addWrapFieldToCopy(-47);
+        check(copy, 10, 33, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetMinute
+    public void testPropertySetMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.minuteOfHour().setCopy(12);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 12, 30, 40);
+        
+        try {
+            test.minuteOfHour().setCopy(60);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.minuteOfHour().setCopy(-1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetTextMinute
+    public void testPropertySetTextMinute() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.minuteOfHour().setCopy("12");
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 12, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyCompareToMinute
+    public void testPropertyCompareToMinute() {
+        TimeOfDay test1 = new TimeOfDay(TEST_TIME1);
+        TimeOfDay test2 = new TimeOfDay(TEST_TIME2);
+        assertEquals(true, test1.minuteOfHour().compareTo(test2) < 0);
+        assertEquals(true, test2.minuteOfHour().compareTo(test1) > 0);
+        assertEquals(true, test1.minuteOfHour().compareTo(test1) == 0);
+        try {
+            test1.minuteOfHour().compareTo((ReadablePartial) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        
+        DateTime dt1 = new DateTime(TEST_TIME1);
+        DateTime dt2 = new DateTime(TEST_TIME2);
+        assertEquals(true, test1.minuteOfHour().compareTo(dt2) < 0);
+        assertEquals(true, test2.minuteOfHour().compareTo(dt1) > 0);
+        assertEquals(true, test1.minuteOfHour().compareTo(dt1) == 0);
+        try {
+            test1.minuteOfHour().compareTo((ReadableInstant) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetSecond
+    public void testPropertyGetSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertSame(test.getChronology().secondOfMinute(), test.secondOfMinute().getField());
+        assertEquals("secondOfMinute", test.secondOfMinute().getName());
+        assertEquals("Property[secondOfMinute]", test.secondOfMinute().toString());
+        assertSame(test, test.secondOfMinute().getReadablePartial());
+        assertSame(test, test.secondOfMinute().getTimeOfDay());
+        assertEquals(30, test.secondOfMinute().get());
+        assertEquals("30", test.secondOfMinute().getAsString());
+        assertEquals("30", test.secondOfMinute().getAsText());
+        assertEquals("30", test.secondOfMinute().getAsText(Locale.FRENCH));
+        assertEquals("30", test.secondOfMinute().getAsShortText());
+        assertEquals("30", test.secondOfMinute().getAsShortText(Locale.FRENCH));
+        assertEquals(test.getChronology().seconds(), test.secondOfMinute().getDurationField());
+        assertEquals(test.getChronology().minutes(), test.secondOfMinute().getRangeDurationField());
+        assertEquals(2, test.secondOfMinute().getMaximumTextLength(null));
+        assertEquals(2, test.secondOfMinute().getMaximumShortTextLength(null));
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetMaxMinValuesSecond
+    public void testPropertyGetMaxMinValuesSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(0, test.secondOfMinute().getMinimumValue());
+        assertEquals(0, test.secondOfMinute().getMinimumValueOverall());
+        assertEquals(59, test.secondOfMinute().getMaximumValue());
+        assertEquals(59, test.secondOfMinute().getMaximumValueOverall());
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddSecond
+    public void testPropertyAddSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.secondOfMinute().addToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 39, 40);
+        
+        copy = test.secondOfMinute().addToCopy(29);
+        check(copy, 10, 20, 59, 40);
+        
+        copy = test.secondOfMinute().addToCopy(30);
+        check(copy, 10, 21, 0, 40);
+        
+        copy = test.secondOfMinute().addToCopy(39 * 60 + 29);
+        check(copy, 10, 59, 59, 40);
+        
+        copy = test.secondOfMinute().addToCopy(39 * 60 + 30);
+        check(copy, 11, 0, 0, 40);
+        
+        copy = test.secondOfMinute().addToCopy(13 * 60 * 60 + 39 * 60 + 30);
+        check(copy, 0, 0, 0, 40);
+        
+        copy = test.secondOfMinute().addToCopy(-9);
+        check(copy, 10, 20, 21, 40);
+        
+        copy = test.secondOfMinute().addToCopy(-30);
+        check(copy, 10, 20, 0, 40);
+        
+        copy = test.secondOfMinute().addToCopy(-31);
+        check(copy, 10, 19, 59, 40);
+        
+        copy = test.secondOfMinute().addToCopy(-(10 * 60 * 60 + 20 * 60 + 30));
+        check(copy, 0, 0, 0, 40);
+        
+        copy = test.secondOfMinute().addToCopy(-(10 * 60 * 60 + 20 * 60 + 31));
+        check(copy, 23, 59, 59, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddNoWrapSecond
+    public void testPropertyAddNoWrapSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.secondOfMinute().addNoWrapToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 39, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(29);
+        check(copy, 10, 20, 59, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(30);
+        check(copy, 10, 21, 0, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(39 * 60 + 29);
+        check(copy, 10, 59, 59, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(39 * 60 + 30);
+        check(copy, 11, 0, 0, 40);
+        
+        try {
+            test.secondOfMinute().addNoWrapToCopy(13 * 60 * 60 + 39 * 60 + 30);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(-9);
+        check(copy, 10, 20, 21, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(-30);
+        check(copy, 10, 20, 0, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(-31);
+        check(copy, 10, 19, 59, 40);
+        
+        copy = test.secondOfMinute().addNoWrapToCopy(-(10 * 60 * 60 + 20 * 60 + 30));
+        check(copy, 0, 0, 0, 40);
+        
+        try {
+            test.secondOfMinute().addNoWrapToCopy(-(10 * 60 * 60 + 20 * 60 + 31));
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddWrapFieldSecond
+    public void testPropertyAddWrapFieldSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.secondOfMinute().addWrapFieldToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 39, 40);
+        
+        copy = test.secondOfMinute().addWrapFieldToCopy(49);
+        check(copy, 10, 20, 19, 40);
+        
+        copy = test.secondOfMinute().addWrapFieldToCopy(-47);
+        check(copy, 10, 20, 43, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetSecond
+    public void testPropertySetSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.secondOfMinute().setCopy(12);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 12, 40);
+        
+        try {
+            test.secondOfMinute().setCopy(60);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.secondOfMinute().setCopy(-1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetTextSecond
+    public void testPropertySetTextSecond() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.secondOfMinute().setCopy("12");
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 12, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyCompareToSecond
+    public void testPropertyCompareToSecond() {
+        TimeOfDay test1 = new TimeOfDay(TEST_TIME1);
+        TimeOfDay test2 = new TimeOfDay(TEST_TIME2);
+        assertEquals(true, test1.secondOfMinute().compareTo(test2) < 0);
+        assertEquals(true, test2.secondOfMinute().compareTo(test1) > 0);
+        assertEquals(true, test1.secondOfMinute().compareTo(test1) == 0);
+        try {
+            test1.secondOfMinute().compareTo((ReadablePartial) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        
+        DateTime dt1 = new DateTime(TEST_TIME1);
+        DateTime dt2 = new DateTime(TEST_TIME2);
+        assertEquals(true, test1.secondOfMinute().compareTo(dt2) < 0);
+        assertEquals(true, test2.secondOfMinute().compareTo(dt1) > 0);
+        assertEquals(true, test1.secondOfMinute().compareTo(dt1) == 0);
+        try {
+            test1.secondOfMinute().compareTo((ReadableInstant) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetMilli
+    public void testPropertyGetMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertSame(test.getChronology().millisOfSecond(), test.millisOfSecond().getField());
+        assertEquals("millisOfSecond", test.millisOfSecond().getName());
+        assertEquals("Property[millisOfSecond]", test.millisOfSecond().toString());
+        assertSame(test, test.millisOfSecond().getReadablePartial());
+        assertSame(test, test.millisOfSecond().getTimeOfDay());
+        assertEquals(40, test.millisOfSecond().get());
+        assertEquals("40", test.millisOfSecond().getAsString());
+        assertEquals("40", test.millisOfSecond().getAsText());
+        assertEquals("40", test.millisOfSecond().getAsText(Locale.FRENCH));
+        assertEquals("40", test.millisOfSecond().getAsShortText());
+        assertEquals("40", test.millisOfSecond().getAsShortText(Locale.FRENCH));
+        assertEquals(test.getChronology().millis(), test.millisOfSecond().getDurationField());
+        assertEquals(test.getChronology().seconds(), test.millisOfSecond().getRangeDurationField());
+        assertEquals(3, test.millisOfSecond().getMaximumTextLength(null));
+        assertEquals(3, test.millisOfSecond().getMaximumShortTextLength(null));
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyGetMaxMinValuesMilli
+    public void testPropertyGetMaxMinValuesMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        assertEquals(0, test.millisOfSecond().getMinimumValue());
+        assertEquals(0, test.millisOfSecond().getMinimumValueOverall());
+        assertEquals(999, test.millisOfSecond().getMaximumValue());
+        assertEquals(999, test.millisOfSecond().getMaximumValueOverall());
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddMilli
+    public void testPropertyAddMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.millisOfSecond().addToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 30, 49);
+        
+        copy = test.millisOfSecond().addToCopy(959);
+        check(copy, 10, 20, 30, 999);
+        
+        copy = test.millisOfSecond().addToCopy(960);
+        check(copy, 10, 20, 31, 0);
+        
+        copy = test.millisOfSecond().addToCopy(13 * 60 * 60 * 1000 + 39 * 60 * 1000 + 29 * 1000 + 959);
+        check(copy, 23, 59, 59, 999);
+        
+        copy = test.millisOfSecond().addToCopy(13 * 60 * 60 * 1000 + 39 * 60 * 1000 + 29 * 1000 + 960);
+        check(copy, 0, 0, 0, 0);
+        
+        copy = test.millisOfSecond().addToCopy(-9);
+        check(copy, 10, 20, 30, 31);
+        
+        copy = test.millisOfSecond().addToCopy(-40);
+        check(copy, 10, 20, 30, 0);
+        
+        copy = test.millisOfSecond().addToCopy(-41);
+        check(copy, 10, 20, 29, 999);
+        
+        copy = test.millisOfSecond().addToCopy(-(10 * 60 * 60 * 1000 + 20 * 60 * 1000 + 30 * 1000 + 40));
+        check(copy, 0, 0, 0, 0);
+        
+        copy = test.millisOfSecond().addToCopy(-(10 * 60 * 60 * 1000 + 20 * 60 * 1000 + 30 * 1000 + 41));
+        check(copy, 23, 59, 59, 999);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddNoWrapMilli
+    public void testPropertyAddNoWrapMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.millisOfSecond().addNoWrapToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 30, 49);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(959);
+        check(copy, 10, 20, 30, 999);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(960);
+        check(copy, 10, 20, 31, 0);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(13 * 60 * 60 * 1000 + 39 * 60 * 1000 + 29 * 1000 + 959);
+        check(copy, 23, 59, 59, 999);
+        
+        try {
+            test.millisOfSecond().addNoWrapToCopy(13 * 60 * 60 * 1000 + 39 * 60 * 1000 + 29 * 1000 + 960);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(-9);
+        check(copy, 10, 20, 30, 31);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(-40);
+        check(copy, 10, 20, 30, 0);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(-41);
+        check(copy, 10, 20, 29, 999);
+        
+        copy = test.millisOfSecond().addNoWrapToCopy(-(10 * 60 * 60 * 1000 + 20 * 60 * 1000 + 30 * 1000 + 40));
+        check(copy, 0, 0, 0, 0);
+        
+        try {
+            test.millisOfSecond().addNoWrapToCopy(-(10 * 60 * 60 * 1000 + 20 * 60 * 1000 + 30 * 1000 + 41));
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        check(test, 10, 20, 30, 40);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyAddWrapFieldMilli
+    public void testPropertyAddWrapFieldMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.millisOfSecond().addWrapFieldToCopy(9);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 30, 49);
+        
+        copy = test.millisOfSecond().addWrapFieldToCopy(995);
+        check(copy, 10, 20, 30, 35);
+        
+        copy = test.millisOfSecond().addWrapFieldToCopy(-47);
+        check(copy, 10, 20, 30, 993);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetMilli
+    public void testPropertySetMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.millisOfSecond().setCopy(12);
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 30, 12);
+        
+        try {
+            test.millisOfSecond().setCopy(1000);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.millisOfSecond().setCopy(-1);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertySetTextMilli
+    public void testPropertySetTextMilli() {
+        TimeOfDay test = new TimeOfDay(10, 20, 30, 40);
+        TimeOfDay copy = test.millisOfSecond().setCopy("12");
+        check(test, 10, 20, 30, 40);
+        check(copy, 10, 20, 30, 12);
+    }
+
+// org.joda.time.TestTimeOfDay_Properties::testPropertyCompareToMilli
+    public void testPropertyCompareToMilli() {
+        TimeOfDay test1 = new TimeOfDay(TEST_TIME1);
+        TimeOfDay test2 = new TimeOfDay(TEST_TIME2);
+        assertEquals(true, test1.millisOfSecond().compareTo(test2) < 0);
+        assertEquals(true, test2.millisOfSecond().compareTo(test1) > 0);
+        assertEquals(true, test1.millisOfSecond().compareTo(test1) == 0);
+        try {
+            test1.millisOfSecond().compareTo((ReadablePartial) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        
+        DateTime dt1 = new DateTime(TEST_TIME1);
+        DateTime dt2 = new DateTime(TEST_TIME2);
+        assertEquals(true, test1.millisOfSecond().compareTo(dt2) < 0);
+        assertEquals(true, test2.millisOfSecond().compareTo(dt1) > 0);
+        assertEquals(true, test1.millisOfSecond().compareTo(dt1) == 0);
+        try {
+            test1.millisOfSecond().compareTo((ReadableInstant) null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestWeeks::testConstants
+    public void testConstants() {
+        assertEquals(0, Weeks.ZERO.getWeeks());
+        assertEquals(1, Weeks.ONE.getWeeks());
+        assertEquals(2, Weeks.TWO.getWeeks());
+        assertEquals(3, Weeks.THREE.getWeeks());
+        assertEquals(Integer.MAX_VALUE, Weeks.MAX_VALUE.getWeeks());
+        assertEquals(Integer.MIN_VALUE, Weeks.MIN_VALUE.getWeeks());
+    }
+
+// org.joda.time.TestWeeks::testFactory_weeks_int
+    public void testFactory_weeks_int() {
+        assertSame(Weeks.ZERO, Weeks.weeks(0));
+        assertSame(Weeks.ONE, Weeks.weeks(1));
+        assertSame(Weeks.TWO, Weeks.weeks(2));
+        assertSame(Weeks.THREE, Weeks.weeks(3));
+        assertSame(Weeks.MAX_VALUE, Weeks.weeks(Integer.MAX_VALUE));
+        assertSame(Weeks.MIN_VALUE, Weeks.weeks(Integer.MIN_VALUE));
+        assertEquals(-1, Weeks.weeks(-1).getWeeks());
+        assertEquals(4, Weeks.weeks(4).getWeeks());
+    }
+
+// org.joda.time.TestWeeks::testFactory_weeksBetween_RInstant
+    public void testFactory_weeksBetween_RInstant() {
+        DateTime start = new DateTime(2006, 6, 9, 12, 0, 0, 0, PARIS);
+        DateTime end1 = new DateTime(2006, 6, 30, 12, 0, 0, 0, PARIS);
+        DateTime end2 = new DateTime(2006, 7, 21, 12, 0, 0, 0, PARIS);
+        
+        assertEquals(3, Weeks.weeksBetween(start, end1).getWeeks());
+        assertEquals(0, Weeks.weeksBetween(start, start).getWeeks());
+        assertEquals(0, Weeks.weeksBetween(end1, end1).getWeeks());
+        assertEquals(-3, Weeks.weeksBetween(end1, start).getWeeks());
+        assertEquals(6, Weeks.weeksBetween(start, end2).getWeeks());
+    }
+
+// org.joda.time.TestWeeks::testFactory_weeksBetween_RPartial
+    public void testFactory_weeksBetween_RPartial() {
+        LocalDate start = new LocalDate(2006, 6, 9);
+        LocalDate end1 = new LocalDate(2006, 6, 30);
+        YearMonthDay end2 = new YearMonthDay(2006, 7, 21);
+        
+        assertEquals(3, Weeks.weeksBetween(start, end1).getWeeks());
+        assertEquals(0, Weeks.weeksBetween(start, start).getWeeks());
+        assertEquals(0, Weeks.weeksBetween(end1, end1).getWeeks());
+        assertEquals(-3, Weeks.weeksBetween(end1, start).getWeeks());
+        assertEquals(6, Weeks.weeksBetween(start, end2).getWeeks());
+    }
+
+// org.joda.time.TestWeeks::testFactory_weeksIn_RInterval
+    public void testFactory_weeksIn_RInterval() {
+        DateTime start = new DateTime(2006, 6, 9, 12, 0, 0, 0, PARIS);
+        DateTime end1 = new DateTime(2006, 6, 30, 12, 0, 0, 0, PARIS);
+        DateTime end2 = new DateTime(2006, 7, 21, 12, 0, 0, 0, PARIS);
+        
+        assertEquals(0, Weeks.weeksIn((ReadableInterval) null).getWeeks());
+        assertEquals(3, Weeks.weeksIn(new Interval(start, end1)).getWeeks());
+        assertEquals(0, Weeks.weeksIn(new Interval(start, start)).getWeeks());
+        assertEquals(0, Weeks.weeksIn(new Interval(end1, end1)).getWeeks());
+        assertEquals(6, Weeks.weeksIn(new Interval(start, end2)).getWeeks());
+    }
+
+// org.joda.time.TestWeeks::testFactory_standardWeeksIn_RPeriod
+    public void testFactory_standardWeeksIn_RPeriod() {
+        assertEquals(0, Weeks.standardWeeksIn((ReadablePeriod) null).getWeeks());
+        assertEquals(0, Weeks.standardWeeksIn(Period.ZERO).getWeeks());
+        assertEquals(1, Weeks.standardWeeksIn(new Period(0, 0, 1, 0, 0, 0, 0, 0)).getWeeks());
+        assertEquals(123, Weeks.standardWeeksIn(Period.weeks(123)).getWeeks());
+        assertEquals(-987, Weeks.standardWeeksIn(Period.weeks(-987)).getWeeks());
+        assertEquals(1, Weeks.standardWeeksIn(Period.days(13)).getWeeks());
+        assertEquals(2, Weeks.standardWeeksIn(Period.days(14)).getWeeks());
+        assertEquals(2, Weeks.standardWeeksIn(Period.days(15)).getWeeks());
+        try {
+            Weeks.standardWeeksIn(Period.months(1));
+            fail();
+        } catch (IllegalArgumentException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testFactory_parseWeeks_String
+    public void testFactory_parseWeeks_String() {
+        assertEquals(0, Weeks.parseWeeks((String) null).getWeeks());
+        assertEquals(0, Weeks.parseWeeks("P0W").getWeeks());
+        assertEquals(1, Weeks.parseWeeks("P1W").getWeeks());
+        assertEquals(-3, Weeks.parseWeeks("P-3W").getWeeks());
+        assertEquals(2, Weeks.parseWeeks("P0Y0M2W").getWeeks());
+        assertEquals(2, Weeks.parseWeeks("P2WT0H0M").getWeeks());
+        try {
+            Weeks.parseWeeks("P1Y1D");
+            fail();
+        } catch (IllegalArgumentException ex) {
+            
+        }
+        try {
+            Weeks.parseWeeks("P1WT1H");
+            fail();
+        } catch (IllegalArgumentException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testGetMethods
+    public void testGetMethods() {
+        Weeks test = Weeks.weeks(20);
+        assertEquals(20, test.getWeeks());
+    }
+
+// org.joda.time.TestWeeks::testGetFieldType
+    public void testGetFieldType() {
+        Weeks test = Weeks.weeks(20);
+        assertEquals(DurationFieldType.weeks(), test.getFieldType());
+    }
+
+// org.joda.time.TestWeeks::testGetPeriodType
+    public void testGetPeriodType() {
+        Weeks test = Weeks.weeks(20);
+        assertEquals(PeriodType.weeks(), test.getPeriodType());
+    }
+
+// org.joda.time.TestWeeks::testIsGreaterThan
+    public void testIsGreaterThan() {
+        assertEquals(true, Weeks.THREE.isGreaterThan(Weeks.TWO));
+        assertEquals(false, Weeks.THREE.isGreaterThan(Weeks.THREE));
+        assertEquals(false, Weeks.TWO.isGreaterThan(Weeks.THREE));
+        assertEquals(true, Weeks.ONE.isGreaterThan(null));
+        assertEquals(false, Weeks.weeks(-1).isGreaterThan(null));
+    }
+
+// org.joda.time.TestWeeks::testIsLessThan
+    public void testIsLessThan() {
+        assertEquals(false, Weeks.THREE.isLessThan(Weeks.TWO));
+        assertEquals(false, Weeks.THREE.isLessThan(Weeks.THREE));
+        assertEquals(true, Weeks.TWO.isLessThan(Weeks.THREE));
+        assertEquals(false, Weeks.ONE.isLessThan(null));
+        assertEquals(true, Weeks.weeks(-1).isLessThan(null));
+    }
+
+// org.joda.time.TestWeeks::testToString
+    public void testToString() {
+        Weeks test = Weeks.weeks(20);
+        assertEquals("P20W", test.toString());
+        
+        test = Weeks.weeks(-20);
+        assertEquals("P-20W", test.toString());
+    }
+
+// org.joda.time.TestWeeks::testSerialization
+    public void testSerialization() throws Exception {
+        Weeks test = Weeks.THREE;
+        
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ObjectOutputStream oos = new ObjectOutputStream(baos);
+        oos.writeObject(test);
+        byte[] bytes = baos.toByteArray();
+        oos.close();
+        
+        ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+        ObjectInputStream ois = new ObjectInputStream(bais);
+        Weeks result = (Weeks) ois.readObject();
+        ois.close();
+        
+        assertSame(test, result);
+    }
+
+// org.joda.time.TestWeeks::testToStandardDays
+    public void testToStandardDays() {
+        Weeks test = Weeks.weeks(2);
+        Days expected = Days.days(14);
+        assertEquals(expected, test.toStandardDays());
+        
+        try {
+            Weeks.MAX_VALUE.toStandardDays();
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testToStandardHours
+    public void testToStandardHours() {
+        Weeks test = Weeks.weeks(2);
+        Hours expected = Hours.hours(2 * 7 * 24);
+        assertEquals(expected, test.toStandardHours());
+        
+        try {
+            Weeks.MAX_VALUE.toStandardHours();
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testToStandardMinutes
+    public void testToStandardMinutes() {
+        Weeks test = Weeks.weeks(2);
+        Minutes expected = Minutes.minutes(2 * 7 * 24 * 60);
+        assertEquals(expected, test.toStandardMinutes());
+        
+        try {
+            Weeks.MAX_VALUE.toStandardMinutes();
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testToStandardSeconds
+    public void testToStandardSeconds() {
+        Weeks test = Weeks.weeks(2);
+        Seconds expected = Seconds.seconds(2 * 7 * 24 * 60 * 60);
+        assertEquals(expected, test.toStandardSeconds());
+        
+        try {
+            Weeks.MAX_VALUE.toStandardSeconds();
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testToStandardDuration
+    public void testToStandardDuration() {
+        Weeks test = Weeks.weeks(20);
+        Duration expected = new Duration(20L * DateTimeConstants.MILLIS_PER_WEEK);
+        assertEquals(expected, test.toStandardDuration());
+        
+        expected = new Duration(((long) Integer.MAX_VALUE) * DateTimeConstants.MILLIS_PER_WEEK);
+        assertEquals(expected, Weeks.MAX_VALUE.toStandardDuration());
+    }
+
+// org.joda.time.TestWeeks::testPlus_int
+    public void testPlus_int() {
+        Weeks test2 = Weeks.weeks(2);
+        Weeks result = test2.plus(3);
+        assertEquals(2, test2.getWeeks());
+        assertEquals(5, result.getWeeks());
+        
+        assertEquals(1, Weeks.ONE.plus(0).getWeeks());
+        
+        try {
+            Weeks.MAX_VALUE.plus(1);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testPlus_Weeks
+    public void testPlus_Weeks() {
+        Weeks test2 = Weeks.weeks(2);
+        Weeks test3 = Weeks.weeks(3);
+        Weeks result = test2.plus(test3);
+        assertEquals(2, test2.getWeeks());
+        assertEquals(3, test3.getWeeks());
+        assertEquals(5, result.getWeeks());
+        
+        assertEquals(1, Weeks.ONE.plus(Weeks.ZERO).getWeeks());
+        assertEquals(1, Weeks.ONE.plus((Weeks) null).getWeeks());
+        
+        try {
+            Weeks.MAX_VALUE.plus(Weeks.ONE);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testMinus_int
+    public void testMinus_int() {
+        Weeks test2 = Weeks.weeks(2);
+        Weeks result = test2.minus(3);
+        assertEquals(2, test2.getWeeks());
+        assertEquals(-1, result.getWeeks());
+        
+        assertEquals(1, Weeks.ONE.minus(0).getWeeks());
+        
+        try {
+            Weeks.MIN_VALUE.minus(1);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testMinus_Weeks
+    public void testMinus_Weeks() {
+        Weeks test2 = Weeks.weeks(2);
+        Weeks test3 = Weeks.weeks(3);
+        Weeks result = test2.minus(test3);
+        assertEquals(2, test2.getWeeks());
+        assertEquals(3, test3.getWeeks());
+        assertEquals(-1, result.getWeeks());
+        
+        assertEquals(1, Weeks.ONE.minus(Weeks.ZERO).getWeeks());
+        assertEquals(1, Weeks.ONE.minus((Weeks) null).getWeeks());
+        
+        try {
+            Weeks.MIN_VALUE.minus(Weeks.ONE);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testMultipliedBy_int
+    public void testMultipliedBy_int() {
+        Weeks test = Weeks.weeks(2);
+        assertEquals(6, test.multipliedBy(3).getWeeks());
+        assertEquals(2, test.getWeeks());
+        assertEquals(-6, test.multipliedBy(-3).getWeeks());
+        assertSame(test, test.multipliedBy(1));
+        
+        Weeks halfMax = Weeks.weeks(Integer.MAX_VALUE / 2 + 1);
+        try {
+            halfMax.multipliedBy(2);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testDividedBy_int
+    public void testDividedBy_int() {
+        Weeks test = Weeks.weeks(12);
+        assertEquals(6, test.dividedBy(2).getWeeks());
+        assertEquals(12, test.getWeeks());
+        assertEquals(4, test.dividedBy(3).getWeeks());
+        assertEquals(3, test.dividedBy(4).getWeeks());
+        assertEquals(2, test.dividedBy(5).getWeeks());
+        assertEquals(2, test.dividedBy(6).getWeeks());
+        assertSame(test, test.dividedBy(1));
+        
+        try {
+            Weeks.ONE.dividedBy(0);
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testNegated
+    public void testNegated() {
+        Weeks test = Weeks.weeks(12);
+        assertEquals(-12, test.negated().getWeeks());
+        assertEquals(12, test.getWeeks());
+        
+        try {
+            Weeks.MIN_VALUE.negated();
+            fail();
+        } catch (ArithmeticException ex) {
+            
+        }
+    }
+
+// org.joda.time.TestWeeks::testAddToLocalDate
+    public void testAddToLocalDate() {
+        Weeks test = Weeks.weeks(3);
+        LocalDate date = new LocalDate(2006, 6, 1);
+        LocalDate expected = new LocalDate(2006, 6, 22);
+        assertEquals(expected, date.plus(test));
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGet
+    public void testGet() {
+        YearMonthDay test = new YearMonthDay();
+        assertEquals(1970, test.get(DateTimeFieldType.year()));
+        assertEquals(6, test.get(DateTimeFieldType.monthOfYear()));
+        assertEquals(9, test.get(DateTimeFieldType.dayOfMonth()));
+        try {
+            test.get(null);
+            fail();
+        } catch (IllegalArgumentException ex) {}
+        try {
+            test.get(DateTimeFieldType.hourOfDay());
+            fail();
+        } catch (IllegalArgumentException ex) {}
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testSize
+    public void testSize() {
+        YearMonthDay test = new YearMonthDay();
+        assertEquals(3, test.size());
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGetFieldType
+    public void testGetFieldType() {
+        YearMonthDay test = new YearMonthDay(COPTIC_PARIS);
+        assertSame(DateTimeFieldType.year(), test.getFieldType(0));
+        assertSame(DateTimeFieldType.monthOfYear(), test.getFieldType(1));
+        assertSame(DateTimeFieldType.dayOfMonth(), test.getFieldType(2));
+        try {
+            test.getFieldType(-1);
+        } catch (IndexOutOfBoundsException ex) {}
+        try {
+            test.getFieldType(3);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGetFieldTypes
+    public void testGetFieldTypes() {
+        YearMonthDay test = new YearMonthDay(COPTIC_PARIS);
+        DateTimeFieldType[] fields = test.getFieldTypes();
+        assertSame(DateTimeFieldType.year(), fields[0]);
+        assertSame(DateTimeFieldType.monthOfYear(), fields[1]);
+        assertSame(DateTimeFieldType.dayOfMonth(), fields[2]);
+        assertNotSame(test.getFieldTypes(), test.getFieldTypes());
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGetField
+    public void testGetField() {
+        YearMonthDay test = new YearMonthDay(COPTIC_PARIS);
+        assertSame(COPTIC_UTC.year(), test.getField(0));
+        assertSame(COPTIC_UTC.monthOfYear(), test.getField(1));
+        assertSame(COPTIC_UTC.dayOfMonth(), test.getField(2));
+        try {
+            test.getField(-1);
+        } catch (IndexOutOfBoundsException ex) {}
+        try {
+            test.getField(3);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGetFields
+    public void testGetFields() {
+        YearMonthDay test = new YearMonthDay(COPTIC_PARIS);
+        DateTimeField[] fields = test.getFields();
+        assertSame(COPTIC_UTC.year(), fields[0]);
+        assertSame(COPTIC_UTC.monthOfYear(), fields[1]);
+        assertSame(COPTIC_UTC.dayOfMonth(), fields[2]);
+        assertNotSame(test.getFields(), test.getFields());
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGetValue
+    public void testGetValue() {
+        YearMonthDay test = new YearMonthDay();
+        assertEquals(1970, test.getValue(0));
+        assertEquals(6, test.getValue(1));
+        assertEquals(9, test.getValue(2));
+        try {
+            test.getValue(-1);
+        } catch (IndexOutOfBoundsException ex) {}
+        try {
+            test.getValue(3);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testGetValues
+    public void testGetValues() {
+        YearMonthDay test = new YearMonthDay();
+        int[] values = test.getValues();
+        assertEquals(1970, values[0]);
+        assertEquals(6, values[1]);
+        assertEquals(9, values[2]);
+        assertNotSame(test.getValues(), test.getValues());
+    }
+
+// org.joda.time.TestYearMonthDay_Basics::testIsSupported
+    public void testIsSupported() {
+        YearMonthDay test = new YearMonthDay(COPTIC_PARIS);
+        assertEquals(true, test.isSupported(DateTimeFieldType.year()));
+        assertEquals(true, test.isSupported(DateTimeFieldType.monthOfYear()));
+        assertEquals(true, test.isSupported(DateTimeFieldType.dayOfMonth()));
+        assertEquals(false, test.isSupported(DateTimeFieldType.hourOfDay()));
+    }

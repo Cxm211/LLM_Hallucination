@@ -1,0 +1,22 @@
+protected void _throwAsIOE(Exception e, Object propName, Object value)
+        throws IOException
+    {
+        if (e instanceof IllegalArgumentException) {
+            String actType = ClassUtil.classNameOf(value);
+            StringBuilder msg = new StringBuilder("Problem deserializing \"any\" property '").append(propName);
+            msg.append("' of class "+getClassName()+" (expected type: ").append(_type);
+            msg.append("; actual type: ").append(actType).append(")");
+            String origMsg = e.getMessage();
+            if (origMsg != null) {
+                msg.append(", problem: ").append(origMsg);
+            } else {
+                msg.append(" (no error message provided)");
+            }
+            throw new JsonMappingException(null, msg.toString(), e);
+        }
+        ClassUtil.throwIfIOE(e);
+        ClassUtil.throwIfRTE(e);
+        Throwable t = ClassUtil.getRootCause(e);
+        String tMsg = t.getMessage();
+        throw new JsonMappingException(null, (tMsg == null) ? "N/A" : tMsg, t);
+    }

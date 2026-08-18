@@ -1,0 +1,10 @@
+    public Iterator iterate(EvalContext context) {
+        Object result = compute(context);
+        if (result == null) {
+            return Collections.EMPTY_LIST.iterator();
+        }
+        if (result instanceof EvalContext) {
+            return new ValueIterator((EvalContext) result);
+        }
+        return ValueUtils.iterate(result);
+    }

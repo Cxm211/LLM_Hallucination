@@ -1,0 +1,59 @@
+public void copyCurrentEvent(JsonParser p) throws IOException
+{
+    if (_mayHaveNativeIds) {
+        _checkNativeIds(p);
+    }
+    switch (p.getCurrentToken()) {
+    case START_OBJECT:
+        writeStartObject();
+        break;
+    case END_OBJECT:
+        writeEndObject();
+        break;
+    case START_ARRAY:
+        writeStartArray();
+        break;
+    case END_ARRAY:
+        writeEndArray();
+        break;
+    case FIELD_NAME:
+        writeFieldName(p.getCurrentName());
+        break;
+    case VALUE_STRING:
+        if (p.hasTextCharacters()) {
+            writeString(p.getTextCharacters(), p.getTextOffset(), p.getTextLength());
+        } else {
+            writeString(p.getText());
+        }
+        break;
+    case VALUE_NUMBER_INT:
+        switch (p.getNumberType()) {
+        case INT:
+            writeNumber(p.getIntValue());
+            break;
+        case BIG_INTEGER:
+            writeNumber(p.getBigIntegerValue());
+            break;
+        default:
+            writeNumber(p.getLongValue());
+        }
+        break;
+    case VALUE_NUMBER_FLOAT:
+        writeNumber(p.getText());
+        break;
+    case VALUE_TRUE:
+        writeBoolean(true);
+        break;
+    case VALUE_FALSE:
+        writeBoolean(false);
+        break;
+    case VALUE_NULL:
+        writeNull();
+        break;
+    case VALUE_EMBEDDED_OBJECT:
+        writeObject(p.getEmbeddedObject());
+        break;
+    default:
+        throw new RuntimeException("Internal error: should never end up through this code path");
+    }
+}

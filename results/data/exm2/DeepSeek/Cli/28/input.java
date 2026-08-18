@@ -1,0 +1,93 @@
+    protected void processProperties(Properties properties)
+    {
+        if (properties == null)
+        {
+            return;
+        }
+
+        for (Enumeration e = properties.propertyNames(); e.hasMoreElements();)
+        {
+            String option = e.nextElement().toString();
+
+            if (!cmd.hasOption(option))
+            {
+                Option opt = getOptions().getOption(option);
+
+                // get the value from the properties instance
+                String value = properties.getProperty(option);
+
+                if (opt.hasArg())
+                {
+                    if (opt.getValues() == null || opt.getValues().length == 0)
+                    {
+                        try
+                        {
+                            opt.addValueForProcessing(value);
+                        }
+                        catch (RuntimeException exp)
+                        {
+                            // if we cannot add the value don't worry about it
+                        }
+                    }
+                }
+                else if (!("yes".equalsIgnoreCase(value)
+                        || "true".equalsIgnoreCase(value)
+                        || "1".equalsIgnoreCase(value)))
+                {
+                    // if the value is not yes, true or 1 then don't add the
+                    // option to the CommandLine
+                    break;
+                }
+
+                cmd.addOption(opt);
+            }
+        }
+    }
+
+// trigger testcase
+public void testPropertyOptionFlags() throws Exception
+    {
+        Properties properties = new Properties();
+        properties.setProperty( "a", "true" );
+        properties.setProperty( "c", "yes" );
+        properties.setProperty( "e", "1" );
+
+        Parser parser = new PosixParser();
+
+        CommandLine cmd = parser.parse(opts, null, properties);
+        assertTrue( cmd.hasOption("a") );
+        assertTrue( cmd.hasOption("c") );
+        assertTrue( cmd.hasOption("e") );
+
+
+        properties = new Properties();
+        properties.setProperty( "a", "false" );
+        properties.setProperty( "c", "no" );
+        properties.setProperty( "e", "0" );
+
+        cmd = parser.parse(opts, null, properties);
+        assertTrue( !cmd.hasOption("a") );
+        assertTrue( !cmd.hasOption("c") );
+        assertTrue( cmd.hasOption("e") ); // this option accepts as argument
+
+
+        properties = new Properties();
+        properties.setProperty( "a", "TRUE" );
+        properties.setProperty( "c", "nO" );
+        properties.setProperty( "e", "TrUe" );
+
+        cmd = parser.parse(opts, null, properties);
+        assertTrue( cmd.hasOption("a") );
+        assertTrue( !cmd.hasOption("c") );
+        assertTrue( cmd.hasOption("e") );
+
+        
+        properties = new Properties();
+        properties.setProperty( "a", "just a string" );
+        properties.setProperty( "e", "" );
+
+        cmd = parser.parse(opts, null, properties);
+        assertTrue( !cmd.hasOption("a") );
+        assertTrue( !cmd.hasOption("c") );
+        assertTrue( cmd.hasOption("e") );
+    }

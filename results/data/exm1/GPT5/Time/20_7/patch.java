@@ -1,0 +1,19 @@
+public int parseInto(DateTimeParserBucket bucket, String text, int position) {
+            String str = text.substring(position);
+            String bestId = null;
+            int bestLen = -1;
+            for (String id : ALL_IDS) {
+                if (str.startsWith(id)) {
+                    int len = id.length();
+                    if (len > bestLen) {
+                        bestLen = len;
+                        bestId = id;
+                    }
+                }
+            }
+            if (bestId != null) {
+                bucket.setZone(DateTimeZone.forID(bestId));
+                return position + bestLen;
+            }
+            return ~position;
+        }

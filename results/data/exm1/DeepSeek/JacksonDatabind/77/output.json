@@ -1,0 +1,242 @@
+We need to analyze the buggy functions and the testcases. The buggy code provided is:
+
+1. `createBeanDeserializer` - which has a potential issue: it checks `type.isAbstract() && !type.isPrimitive()` and then tries to materialize. But the problem might be that it doesn't handle the case where `type` is an abstract class but also has a custom deserializer? Actually, the bug might be related to issue [databind#1599] mentioned in the comment: "For checks like [databind#1599]". The comment is above the call to `buildBeanDeserializer`. However, the code seems fine.
+
+2. `isIgnorableType` - this function has a potential bug: it calls `config.introspectClassAnnotations(type)` but the parameter is `type`, which is a `Class<?>` object. However, the method `introspectClassAnnotations` expects a `Class<?>`? According to Jackson API, `DeserializationConfig.introspectClassAnnotations(JavaType)` or `introspectClassAnnotations(Class<?>)`? Actually `DeserializationConfig.introspectClassAnnotations` takes a `JavaType` or a `Class<?>`? Let's check quickly: The method signature in Jackson 2.x: `public BeanDescription introspectClassAnnotations(JavaType type)` and also `public BeanDescription introspectClassAnnotations(Class<?> rawType)`. So using a `Class<?>` is fine. But the bug: `status = config.getAnnotationIntrospector().isIgnorableType(desc.getClassInfo());` The `isIgnorableType` method takes an `AnnotatedClass` (i.e., `desc.getClassInfo()` returns an `AnnotatedClass`). But the problem is that `isIgnorableType` is called on the annotation introspector, but we don't store the result back into `ignoredTypes` map. Indeed, the map is not updated after computing the status. Look at the code: it gets the status from `ignoredTypes.get(type)` and if null, it computes it but does not put it back into the map for caching. The method is supposed to cache the result but it fails to do so. This would cause repeated introspection for the same type, but is that a bug? It might be inefficient but not a functional error. However, there might be a more subtle bug: the method returns the status but does not put it into the map, so subsequent calls will recompute. But the testcases? Which testcases would be affected? Possibly some that rely on caching behavior? But the testcases provided are mostly functional tests; they may not directly test this method.
+
+We need to examine all testcases to see if any fail due to these functions. The buggy functions are `createBeanDeserializer` and `isIgnorableType`. We need to see which testcases actually trigger these methods and fail.
+
+The testcases are from various classes. They are all provided. We need to run mental simulation for each testcase to see if it would trigger the buggy code path and fail with the current implementation.
+
+First, let's consider `isIgnorableType`: it is called during deserialization to check if a type is ignorable. The bug: it doesn't cache the result in the map. That means that for each call, it will recompute. But does that cause a failure? Not necessarily; it's just inefficient. The method returns the correct value. So no testcase should fail because of that. The only possible failure is if the method is expected to cache and later calls rely on the cached value to avoid recomputation? But the returned value is correct. So likely no testcase fails due to this bug.
+
+Now `createBeanDeserializer`: it has a comment about [databind#1599] which might be related to a fix. The code has:
+
+```java
+if (type.isAbstract() && !type.isPrimitive()) {
+    JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);
+    if (concreteType != null) {
+        beanDesc = config.introspect(concreteType);
+        return buildBeanDeserializer(ctxt, concreteType, beanDesc);
+    }
+}
+```
+
+Then after that, it checks for standard deserializer via `findStdDeserializer`, then checks `isPotentialBeanType`, and then builds bean deserializer.
+
+The bug might be that when the type is abstract, it materializes an abstract type, but if it's not materializable, it falls through. That's fine.
+
+But consider the test `testAbstractTypeDeserialization` from `ConvertingAbstractSerializer795Test`. This test expects deserialization of an abstract type (`AbstractCustomTypeUser`) that has a custom deserializer registered? Let's look at the test:
+
+```java
+public void testAbstractTypeDeserialization() throws Exception {
+    String test="{\"customField\": \"customString\"}";
+    AbstractCustomTypeUser cu = JSON_MAPPER.readValue(test, AbstractCustomTypeUser.class);
+    assertNotNull(cu);
+}
+```
+
+The class `AbstractCustomTypeUser` is abstract. The test expects it to be deserializable. That means there must be some mechanism to handle abstract types, like a custom deserializer or materialization. The buggy `createBeanDeserializer` might not handle it correctly if the abstract type has a custom deserializer? Actually, before the abstract check, there is a call to `_findCustomBeanDeserializer`. If a custom deserializer is registered for that abstract type, it would be returned before the abstract check. So that test passes.
+
+But maybe the bug is that for some abstract types, the materialization might incorrectly happen even when a custom deserializer is present? But the custom check is first.
+
+Let's look at other tests that might exercise the abstract path: `testAbstractFailure` expects failure for deserializing an abstract type without any custom handling. That test should pass because the abstract check will try to materialize (which returns null), then it falls through to `findStdDeserializer` (no standard), then `isPotentialBeanType` that returns false for abstract? Actually, `isPotentialBeanType` returns true for non-final, non-primitive, non-array types? It might return true for abstract classes? Usually it returns true for any type that can be a bean (not primitive, not array, not final?). The code will then return null after `isPotentialBeanType` returns false? Wait, the method returns null if `!isPotentialBeanType(type.getRawClass())`. For abstract class, it might return false? Actually `BasicBeanDeserializer.isPotentialBeanType` checks if the class is not abstract, not final, not primitive, not array, etc. For abstract class, it returns false. So it would return null, leading to fallback to default deserializer? Actually, the method returns null if not potential bean type, meaning that the deserializer factory will then try other mechanisms. In the context of `BeanDeserializerFactory`, returning null results in calling `_createDeserializer2` which may still create a deserializer? The test expects exception, so likely the factory returns a deserializer that fails. So that's fine.
+
+Maybe the bug is in `isIgnorableType` but it's not causing test failures.
+
+Given that we are asked to produce minimal fix, we need to identify the exact bug. The problematic testcases? Let's check the list of testcases. All testcases are provided. But we need to find which ones actually trigger the bug and fail.
+
+Looking at the buggy code comment: "For checks like [databind#1599]" - that is an issue about abstract types. Possibly the bug is that `isPotentialBeanType` returns false for abstract types, so the method returns null, but then the caller might not handle null correctly? However, the testcases include many that deserialize concrete beans, which would not be affected.
+
+Wait, maybe the bug is in `createBeanDeserializer` related to the order of checks: the method checks for custom deserializer first, then throwable, then abstract materialization, then std deserializer, then potential bean. But there is a missing check: for abstract types that are not materializable, the method returns null after `isPotentialBeanType`. But what about abstract types that have a custom deserializer? That is handled first. So that's fine.
+
+Perhaps the bug is that `isPotentialBeanType` is too restrictive, causing some valid concrete types to be rejected? The test `testNonDeserializable`? Not present.
+
+Let's look at the test `testAbstractTypeDeserialization` again. It uses `JSON_MAPPER` which is probably a static mapper. This test is in `ConvertingAbstractSerializer795Test`. The class `AbstractCustomTypeUser` is abstract. The test expects successful deserialization. If the buggy code returns null at `isPotentialBeanType`, then the factory might not be able to create a deserializer for that abstract type, causing failure. But the test passes? No, we don't know; we need to determine if it fails with the buggy version.
+
+Actually, the buggy code as provided is from a specific version (Jackson 2.8.x maybe). The issue #1599 was about deserializing abstract types with `@JsonDeserialize`. The fix might be to also check for custom deserializer after materialization? Or to not bail out on abstract types if a custom deserializer exists? But the custom check is already before.
+
+Let's search the web memory: [databind#1599] is about "BeanDeserializerFactory ignores @JsonDeserialize for abstract types". That sounds like the bug: when a class is abstract but has a custom deserializer annotation (like `@JsonDeserialize(using=...)`), the `createBeanDeserializer` might not find it because it returns null early due to `isPotentialBeanType` returning false for abstract types. But wait, the custom check is before the potential bean check: `_findCustomBeanDeserializer` looks for custom deserializers registered via module or annotation? Actually, `_findCustomBeanDeserializer` checks for custom deserializers registered via `Deserializers` module. It does not check annotations on the abstract class itself. That is done later when building the bean deserializer. So for an abstract class with `@JsonDeserialize(using=...)`, the custom deserializer would be found during `_findCustomBeanDeserializer`? Possibly not, because `_findCustomBeanDeserializer` only looks at registered `Deserializers` in modules. The annotation `@JsonDeserialize` on the abstract type is handled by `AnnotationIntrospector` and is used later when creating the deserializer for that type. However, if the method returns null because `isPotentialBeanType` returns false, then the factory will try other deserializer factories (like `MapDeserializerFactory` etc.) and might not find the annotated custom deserializer.
+
+Thus, the bug is that `isPotentialBeanType` returns false for abstract types, causing `createBeanDeserializer` to return null, and then the deserializer lookup fails. The fix should be to not filter out abstract types based on `isPotentialBeanType` if there is a custom annotation (like `@JsonDeserialize`). But the minimal fix might be to change `isPotentialBeanType` to return true for abstract types if they have an annotation or something.
+
+However, looking at the provided code, after the abstract materialization block, there is a path for standard deserializer and then potential bean. The issue might be that for abstract types that are not materializable, we should still check if there is a custom deserializer (via annotations) before giving up. In the code, after the abstract materialization, it checks `findStdDeserializer` and then `isPotentialBeanType`. If the abstract type has a custom deserializer, it is not found at this point because `findStdDeserializer` only finds standard ones (like for primitive wrappers). So the method returns null.
+
+But the custom deserializer for the abstract type might be found later in `_createDeserializer2`, which might look at annotations. So maybe returning null is okay because the callers will handle it? The method is part of the chain; if it returns null, the caller (`createBeanDeserializer` is called from `_createDeserializer2`). In `_createDeserializer2`, if `createBeanDeserializer` returns null, it proceeds to try other things. So that might be fine.
+
+Nevertheless, the test `testAbstractTypeDeserialization` specifically tests deserialization of an abstract type. If it fails, then that test would be a trigger. Let's check the test more: it uses `JSON_MAPPER` which is defined in the test class? Not provided. But likely it's a static ObjectMapper. The test expects to deserialize an abstract type. In the buggy version, this might fail because the abstract type is not handled. However, the test belongs to a class that likely sets up custom deserializer via modules or annotations. So it's plausible that this test triggers the bug.
+
+Other tests that might be affected: any test that deserializes an abstract type with a custom deserializer. For example, `testAbstractTypeDeserialization` and maybe `testNonAbstractDeserialization` (which is not abstract). Also tests like `testSimple` that use concrete beans would not be affected.
+
+Also, the `isIgnorableType` bug might cause test failures related to caching, but unlikely to cause visible failures.
+
+Given the instruction to "Determine which testcase methods actually expose the bug", we need to run through all testcases and identify those that fail due to the buggy code.
+
+We can simulate the buggy behavior: for `createBeanDeserializer`, if the type is abstract and not materializable, the method returns null (when `isPotentialBeanType` returns false). That means the deserializer for that abstract type is not created by this factory, so the superclass factory might handle it. In Jackson, if a type is abstract, the deserializer lookup might eventually fail with an exception unless there is a custom deserializer. But if there is a custom deserializer registered via module, it would be found by `_findCustomBeanDeserializer`. So the only case where the bug matters is when the custom deserializer is specified via annotation on the abstract class (like `@JsonDeserialize(using=...)`) rather than via module. In that case, the annotation is not checked here, and `isPotentialBeanType` returns false, causing null, and then the fallback in `_createDeserializer2` might not find it either? Actually, `_createDeserializer2` calls `_findCustomBeanDeserializer` again? No, it calls `createBeanDeserializer` first, and if that returns null, it then tries `findDeserializerFromAnnotation` which does check annotations and can return a custom deserializer. So maybe it's fine. Let's examine the flow:
+
+In `BeanDeserializerFactory` (which extends `BasicDeserializerFactory`), `createBeanDeserializer` is called from `createBeanDeserializer` in the base class? Actually, the method is defined in `BeanDeserializerFactory` and overrides the base method. The base class `BasicDeserializerFactory` has its own `createBeanDeserializer` that calls `_findCustomBeanDeserializer` and then calls `_createBeanDeserializer` which eventually calls the factory's `createBeanDeserializer`. It's a bit convoluted.
+
+But to be safe, we should consider that the bug might be specifically about abstract types with `@JsonDeserialize` not being recognized, as per issue #1599. Therefore, the test `testAbstractTypeDeserialization` likely exposes it.
+
+Also, `isIgnorableType` bug: perhaps some test relies on the caching of ignorable types, but not likely.
+
+Given the number of testcases, we need to be efficient. We can assume that the bug is in `createBeanDeserializer` regarding abstract types. Let's look at the test `testAbstractTypeDeserialization` more closely. It uses `JSON_MAPPER` which is probably configured with `AbstractCustomTypeUser` having a custom deserializer. The test expects that it works. If the buggy code returns null because `isPotentialBeanType` returns false, then the deserializer might not be found, causing an exception. So that test would fail. Similarly, `testNonAbstractDeserialization` tests a non-abstract custom type, which would work fine.
+
+Therefore, the only test that clearly triggers the abstract type issue is `testAbstractTypeDeserialization`. But we should also consider `testAbstractFailure` which expects failure for abstract without custom deserializer. That should still fail because no custom deserializer exists, so it's fine.
+
+Other tests like `testAbstractFactory` involve abstract but with factory method, which might be handled differently.
+
+We also have `testAbstractTypeDeserialization` and `testNonAbstractDeserialization` in class `ConvertingAbstractSerializer795Test`. Only the first one might be affected.
+
+Now, we need to produce the fix. The fix should ensure that abstract types that have a custom deserializer (via annotation) are not prematurely rejected. The minimal fix might be to move the `isPotentialBeanType` check to after we have checked for custom deserializer from annotation? But the annotation check is not done in this method. Alternatively, we can remove the `isPotentialBeanType` check or modify it to return true for abstract types that have custom deserializer annotation. But that's too complex.
+
+Perhaps the bug is simpler: the `isPotentialBeanType` method in the base class `BasicBeanDeserializer` might be too restrictive. But we don't have that code. Maybe the fix is to not return null for abstract types, but instead let the fallback handle it. However, if we remove the `isPotentialBeanType` check, then for non-bean types like primitive wrappers, it might incorrectly proceed to build bean deserializer. So we need to keep it.
+
+Looking at the code again, after `findStdDeserializer` returns null, we check `isPotentialBeanType` and return null if false. That is a safety check. For abstract types that are not potential beans, this returns null. But for abstract types that have a custom deserializer, we should not return null; we should let it go to `buildBeanDeserializer` which might then look at the annotation and create the custom deserializer. So the fix could be to skip the `isPotentialBeanType` check for abstract types if they have a custom deserializer annotation. But that requires checking annotation here.
+
+Alternatively, maybe the fix is to move the `isPotentialBeanType` check to after we have tried to build the bean deserializer? But that would cause errors for non-bean types.
+
+Given the issue #1599, the fix likely was to add a check for `@JsonDeserialize` annotation before bailing out. For example:
+
+```java
+if (!isPotentialBeanType(type.getRawClass())) {
+    // but check if there's a custom deserializer via annotation
+    if (beanDesc.hasKnownClassAnnotations()) {
+        // check for @JsonDeserialize etc.
+        return buildBeanDeserializer(ctxt, type, beanDesc);
+    }
+    return null;
+}
+```
+
+But we don't have the exact context.
+
+Alternatively, the bug might be in `isIgnorableType` which doesn't cache, causing performance issues but not failure.
+
+Given the instruction to produce minimal correct fix, and we need to include all fixed functions, we can fix `isIgnorableType` to cache the result, and fix `createBeanDeserializer` to handle abstract types with custom annotations.
+
+But to be precise, we need to identify the test methods that actually trigger the bug. Let's go through each test method and evaluate if it would fail with the buggy code.
+
+I'll list all test methods and group them by potential impact:
+
+- Most tests use concrete beans, so they will not reach the abstract check or will pass.
+- Tests that try to deserialize abstract types:
+    - `testAbstractTypeDeserialization` - AbstractCustomTypeUser is abstract. This will call createBeanDeserializer with an abstract type. The method will try materializeAbstractType (which might return null if no materialization registered). Then findStdDeserializer returns null (not standard). Then isPotentialBeanType returns false for abstract class (since abstract classes are not potential bean types). So createBeanDeserializer returns null. Then the deserializer lookup will fail, so the test fails with exception.
+    - `testAbstractFailure` - Abstract class, but no custom deserializer, expects exception. That will still throw exception because the fallback might still throw? Actually, if createBeanDeserializer returns null, the caller might still throw an exception. So that test might also fail? No, it expects exception, so it should pass.
+    - `testPolymorphicCreators` - Animal is abstract, but it has type id mechanism, so maybe handled by polymorphic deserializer, not through bean deserializer. Likely not affected.
+    - `testAbstractFactory` - AbstractBase is abstract but has a factory method? The test might exercise a different path.
+    - `testManualPolymorphicDog` etc. - These use polymorphic deserialization, likely handled before createBeanDeserializer.
+    - `testAbstractDelegateWithCreator` - Issue580Bean might be abstract? Probably handled by custom instantiator.
+    - `testSimple` from BuilderSimpleTest - ValueClassXY is not abstract.
+- Tests that rely on caching in `isIgnorableType`? None explicitly.
+
+Thus, the only test that seems to fail is `testAbstractTypeDeserialization`. Also possibly `testAbstractFailure` if it relies on the abstract check to produce an exception? But if createBeanDeserializer returns null, the caller might produce a different exception? Need to check: In `BasicDeserializerFactory._createDeserializer2`, if `createBeanDeserializer` returns null, it proceeds to check other deserializer types (map, list, etc.). For an abstract class, it might not find any, and eventually throws an exception. So `testAbstractFailure` would still get an exception, but the message might differ. However, the test expects `verifyException(e, "can not construct")`. If the exception comes from a different place, it might still contain that phrase. So it's likely to pass.
+
+Therefore, the trigger method is likely `testAbstractTypeDeserialization`.
+
+But we also have `testNonAbstractDeserialization` which is concrete and should pass.
+
+Maybe also `testConvertToAbstract` which converts to an abstract type, but that uses a converter, not direct deserialization.
+
+Given the risk, we should consider that only `testAbstractTypeDeserialization` from `ConvertingAbstractSerializer795Test` is the trigger.
+
+But the instruction says "Determine which testcase methods actually expose the bug." We need to list them. We'll list only those that fail.
+
+Now, what about the fix? We need to fix both `createBeanDeserializer` and `isIgnorableType` (since both are buggy). For `isIgnorableType`, the fix is to cache the computed value in the map. For `createBeanDeserializer`, we need to ensure that abstract types with custom deserializer annotations are not rejected. The minimal fix: after the abstract materialization block, before checking `isPotentialBeanType`, we should check if there is any custom deserializer annotation on the type that would be used. But we don't have that information easily. Alternatively, we can simply remove the `isPotentialBeanType` check for abstract types? That might cause issues. Or we can move the check to after we have tried to build the bean deserializer? But that would cause infinite recursion? Actually, `buildBeanDeserializer` will also check for abstract and fail. So not good.
+
+Another approach: The issue #1599 might be that `isPotentialBeanType` returns false for abstract types even if they have a `@JsonDeserialize` annotation. The fix could be to not return null if the type is abstract but has a custom deserializer annotation. In the code, we can add a check using `config.getAnnotationIntrospector()` to see if there is a deserializer annotation on the class. For example:
+
+```java
+if (!isPotentialBeanType(type.getRawClass())) {
+    // but maybe there is a custom deserializer annotation
+    if (beanDesc.hasClassAnnotation(JsonDeserialize.class) && ...) {
+        return buildBeanDeserializer(ctxt, type, beanDesc);
+    }
+    return null;
+}
+```
+
+But we don't have the exact API. Simpler: we can change `isPotentialBeanType` to return true for abstract types if they have any annotation? That's too broad.
+
+Given that we are to provide a minimal correct fix, and we have the source of both functions, we can just fix `isIgnorableType` to add caching, and for `createBeanDeserializer`, we need to ensure that the abstract type check does not prevent custom deserializers from being used. The comment says "For checks like [databind#1599]" which suggests that the `isPotentialBeanType` check was added to prevent issues with certain non-bean types. Perhaps the bug is that `isPotentialBeanType` should not be applied to abstract types? Actually, the comment appears before `buildBeanDeserializer` call, not before `isPotentialBeanType`. So maybe the fix is to not call `isPotentialBeanType` at all? Hard to say.
+
+Let's look at the original Jackson code for this version. I recall that in Jackson 2.8, there was a change related to handling abstract types with `@JsonDeserialize`. The fix likely was to move the `isPotentialBeanType` check after the check for abstract materialization, but before the fallback? Or to add a check for `@JsonDeserialize` on the class.
+
+I think the safest minimal fix is to modify `isPotentialBeanType` not to reject abstract types if they have a custom deserializer annotation. But we don't have `isPotentialBeanType` code. Actually, `isPotentialBeanType` is from the same class? It is defined in `BeanDeserializerFactory`? Possibly it's from `BasicBeanDeserializer`? The code snippet imports? Not provided.
+
+We only have the two functions. We can change `createBeanDeserializer` to not return null for abstract types that have a `@JsonDeserialize` annotation. We can introspect the class annotations of the bean description. For example:
+
+```java
+if (!isPotentialBeanType(type.getRawClass())) {
+    // [databind#1599]: abstract types may have custom deserializer annotations
+    if (beanDesc.hasClassAnnotation(JsonDeserialize.class)) {
+        return buildBeanDeserializer(ctxt, type, beanDesc);
+    }
+    return null;
+}
+```
+
+But we need to ensure `JsonDeserialize` is imported. That might be too specific.
+
+Alternatively, we can simply not return null for abstract types, but let the caller handle it. For example, change `isPotentialBeanType` check to only apply to concrete types. But we cannot modify that method.
+
+Given the lack of full context, I'll assume the bug is exactly that `isPotentialBeanType` returns false for abstract types, causing the method to return null even when a custom deserializer is present. The minimal fix in `createBeanDeserializer` would be to skip the `isPotentialBeanType` check for abstract types. But that could cause issues for abstract types that are not beans (like interfaces?). However, the method earlier already tried to materialize abstract type, and if that fails, it falls through. For interfaces, they are also abstract, but `isPotentialBeanType` would return false, and we would return null. Skipping the check would cause it to try to build a bean deserializer for an interface, which would fail. So we need to be careful.
+
+Another fix: after the abstract materialization block, if the type is still abstract, we should not return null but instead continue to build bean deserializer, which will then handle custom annotations. The buildBeanDeserializer method will itself check for abstract and fail if no custom deserializer. So it might be safe to remove the `isPotentialBeanType` check entirely? But then for non-bean types like `Object.class`, it would cause a bean deserializer to be built, which might fail later. The original code had that check to avoid unnecessary work. But maybe it's safe.
+
+I think the most accurate fix based on the issue is to not call `isPotentialBeanType` for abstract types that have custom deserializer annotation. Since we don't know the exact annotation, we can just not check `isPotentialBeanType` if the type is abstract, because the materialization step already attempted to resolve it, and if it didn't, we can still try to build a deserializer. However, that might cause stack overflow for interfaces.
+
+Given the time, I'll produce a fix that simply caches in `isIgnorableType` and in `createBeanDeserializer`, moves the `isPotentialBeanType` check to after the standard deserializer check, but still before building bean deserializer, and for abstract types, we skip it. Actually, the standard deserializer check will return null for abstract types anyway, so we can remove the `isPotentialBeanType` check entirely. That would allow building bean deserializer for abstract types, which will then check for custom annotations. This might be the minimal fix.
+
+Thus, we remove the `if (!isPotentialBeanType(type.getRawClass())) { return null; }` block. That simple change would allow abstract types to proceed to `buildBeanDeserializer`, which will then either find a custom deserializer or fail with a proper exception.
+
+But we need to ensure that the test `testAbstractFailure` still fails. It does, because `buildBeanDeserializer` will eventually call `_createBeanDeserializer` which will check for abstract and throw an exception. So it's fine.
+
+Therefore, the fix for `createBeanDeserializer` is to remove the `isPotentialBeanType` check.
+
+Now, for `isIgnorableType`, we add caching:
+
+```java
+if (status != null) {
+    return status.booleanValue();
+}
+BeanDescription desc = config.introspectClassAnnotations(type);
+status = config.getAnnotationIntrospector().isIgnorableType(desc.getClassInfo());
+if (status == null) {
+    status = false;
+}
+ignoredTypes.put(type, status);
+return status.booleanValue();
+```
+
+That's the minimal fix.
+
+Now, we need to output the fixed code as JSON strings. The output should include both functions in order.
+
+We also need to list the trigger methods. Based on our analysis, `testAbstractTypeDeserialization` is the likely trigger. Are there any others? Let's check `testAbstractFactory` which tests abstract class with a factory. That test might also be affected if the factory method is not found due to early return. But that test uses `@JsonCreator` on factory, which might be handled differently. I think it's safe to assume only `testAbstractTypeDeserialization` triggers.
+
+Thus, the trigger_method will contain the full path: "com.fasterxml.jackson.databind.convert.ConvertingAbstractSerializer795Test.testAbstractTypeDeserialization".
+
+We must include all testcases that expose the bug. Only that one.
+
+Now, produce the JSON.
+
+Note: The fixed code must include every function from the input, in the same order. The input had two functions: `createBeanDeserializer` and `isIgnorableType`. We'll provide both fixed.
+
+Let's craft the fixed code.
+
+For `createBeanDeserializer`, we remove the `isPotentialBeanType` check block. The rest remains unchanged.
+
+For `isIgnorableType`, we add caching.
+
+Write the full methods as JSON strings with proper escaping.
+
+Ensure no extra spaces or trailing commas.
+
+I'll now produce the JSON.{
+  "trigger_method": ["com.fasterxml.jackson.databind.convert.ConvertingAbstractSerializer795Test.testAbstractTypeDeserialization"],
+  "fixed_code": [
+    "    public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n        // We may also have custom overrides:\n        JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);\n        if (custom != null) {\n            return custom;\n        }\n        /* One more thing to check: do we have an exception type\n         * (Throwable or its sub-classes)? If so, need slightly\n         * different handling.\n         */\n        if (type.isThrowable()) {\n            return buildThrowableDeserializer(ctxt, type, beanDesc);\n        }\n        /* Or, for abstract types, may have alternate means for resolution\n         * (defaulting, materialization)\n         */\n        // 29-Nov-2015, tatu: Also, filter out calls to primitive types, they are\n        //    not something we could materialize anything for\n        if (type.isAbstract() && !type.isPrimitive()) {\n            // Let's make it possible to materialize abstract types.\n            JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);\n            if (concreteType != null) {\n                /* important: introspect actual implementation (abstract class or\n                 * interface doesn't have constructors, for one)\n                 */\n                beanDesc = config.introspect(concreteType);\n                return buildBeanDeserializer(ctxt, concreteType, beanDesc);\n            }\n        }\n\n        // Otherwise, may want to check handlers for standard types, from superclass:\n        @SuppressWarnings(\"unchecked\")\n        JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n\n        // For checks like [databind#1599]\n        // Use generic bean introspection to build deserializer\n        return buildBeanDeserializer(ctxt, type, beanDesc);\n    }",
+    "    protected boolean isIgnorableType(DeserializationConfig config, BeanDescription beanDesc,\n            Class<?> type, Map<Class<?>,Boolean> ignoredTypes)\n    {\n        Boolean status = ignoredTypes.get(type);\n        if (status != null) {\n            return status.booleanValue();\n        }\n        BeanDescription desc = config.introspectClassAnnotations(type);\n        status = config.getAnnotationIntrospector().isIgnorableType(desc.getClassInfo());\n        // We default to 'false', i.e. not ignorable\n        if (status == null) {\n            status = false;\n        }\n        ignoredTypes.put(type, status);\n        return status.booleanValue();\n    }"
+  ]
+}

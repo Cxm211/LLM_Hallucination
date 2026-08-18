@@ -1,0 +1,229 @@
+We are given a buggy function `createContextual` from some class (likely `DateSerializer` or similar). The bug is not explicitly described, but we need to analyze it and see which test methods trigger the bug. The function is about contextual configuration of a JsonSerializer based on `JsonFormat.Value`. The test methods span many classes; most are unrelated. We need to identify which tests exercise this function and cause a failure.
+
+The function appears to be from a serializer that handles date/time types, possibly `DateSerializer` or `SqlDateSerializer`, etc. The tests that involve date serialization with format overrides are likely candidates. Let's examine the function:
+
+The function:
+- If property is null, return this (root value serialization).
+- Gets `findFormatOverrides` for the handled type.
+- If no format, return this.
+- If shape is numeric, return `withFormat(Boolean.TRUE, null)` (serialize as timestamp).
+- If format has pattern: create SimpleDateFormat with locale and tz, call `withFormat(Boolean.FALSE, df)`.
+- Otherwise, check for locale, timezone, or shape string.
+- If none of those, return this.
+- Then check if the default DateFormat (from config) is StdDateFormat -> handle accordingly.
+- Else if not SimpleDateFormat, report bad definition.
+- Else if SimpleDateFormat, handle locale/timezone changes.
+
+The bug is not specified. Possibly it's about handling of locale/timezone when the default date format is not StdDateFormat but SimpleDateFormat? Or something about the shape being STRING? Or maybe the problem is that the function does not properly handle the case where `shape` is something else (e.g., STRING) when there is no pattern? The code goes into the last block if any of hasLocale, hasTZ, or asString is true. But note: `asString` is `shape == JsonFormat.Shape.STRING`. The code then checks if df0 is StdDateFormat or SimpleDateFormat. If it's neither, it reports bad definition. But what if `df0` is null? Possibly it could be null? The `serializers.getConfig().getDateFormat()` might return null? But likely it returns something. Another potential bug: the condition `if (!hasLocale && !hasTZ && !asString)` returns this if none of those are set. But what if shape is STRING but also hasLocale or hasTZ? That is fine. But what if shape is STRING and there's no pattern, but no locale/tz? Then `asString` is true, so it goes into the bottom block. That seems correct. However, there's a subtlety: the shape could be STRING but they might want to use the default `DateFormat` as a string representation? But the code assumes that if shape is STRING, we need to modify the DateFormat (locale, tz) or use StdDateFormat. But what if the default `DateFormat` is not suitable for string serialization? Actually, for date/time as string, the serializer likely uses the DateFormat to format. So that's fine.
+
+Maybe the bug is related to [databind#1648] mentioned in the comment. Let's consider the test methods that might trigger this function. The tests that involve date/time serialization with format overrides, e.g., `testSqlDateConfigOverride`, `testPatternWithSqlDate`, `testConfigOverridesForNumbers` (which set shape to STRING for numbers, but that's different), `testNumbersAsString` (for numbers, not date), `testInetAddress` (which sets shape NUMBER for InetAddress, but this function might be from InetAddressSerializer? No, date serializer. InetAddress has its own serializer). Actually, the function is part of a base serializer for date/time types? It's likely `DateSerializer` or `StdSerializer` for dates. So tests that involve dates: `testSqlDate`, `testSqlTime`, `testSqlTimestamp`, `testPatternWithSqlDate`, `testSqlDateConfigOverride`. Also `testConfigOverridesForNumbers` sets shape STRING for int, double, BigDecimal, but those are Number types, not dates. That might not trigger this function if the function is only for date types. However, the function uses `handledType()`, which could be Date, Calendar, or subclasses. So the function is likely from `DateSerializer`, `CalendarSerializer`, `SqlDateSerializer`, etc. The test `testConfigOverridesForNumbers` sets format for numeric types (Integer.TYPE, Double.TYPE, BigDecimal) as STRING. The serializer for numbers is `NumberSerializer` which likely has its own `createContextual`. So that test probably does not use this function. So the date-related tests are more likely.
+
+Let's examine each test method to see if they involve configuration overrides on date types. Some tests like `testSqlDateConfigOverride` explicitly set a pattern for `java.sql.Date`. That will call `createContextual` with a format that has pattern. That should work unless there is a bug in the pattern handling. The bug might be related to the `StdDateFormat` handling? Or maybe the bug is that when the locale is set but not pattern, the code goes into the bottom block, but if the default DateFormat is not StdDateFormat, it tries to clone or recreate SimpleDateFormat. But there is a problem: `df0` might be a `SimpleDateFormat` that is shared; cloning might be okay, but the code uses `df.toPattern()` to create a new df when locale changes. That seems fine. However, note that `df0` is obtained from `serializers.getConfig().getDateFormat()`, which returns a DateFormat that might be a shared instance; cloning is correct.
+
+Another potential bug: in the condition `if (!(df0 instanceof SimpleDateFormat))`, it throws an error. But what if `df0` is `StdDateFormat`? That is handled earlier. So only if df0 is not StdDateFormat and not SimpleDateFormat, it fails. That could be intentional. But what if df0 is `SimpleDateFormat` and we are in the last block, and we need to change locale or timezone. For locale, we create a new SimpleDateFormat from pattern and locale. That's fine. But note: if no locale change, we just clone and then possibly set timezone. The cloning might preserve the pattern, locale, timezone? Actually, `SimpleDateFormat.clone()` returns a copy with the same attributes. Then we set timezone if needed. That is correct.
+
+Wait, there's a subtle bug: when `asString` is true but no pattern, and df0 is SimpleDateFormat, we enter the bottom block. But if `hasLocale` is false and changeTZ is false, we still clone? The code: 
+```
+SimpleDateFormat df = (SimpleDateFormat) df0;
+if (hasLocale) {
+    df = new SimpleDateFormat(df.toPattern(), format.getLocale());
+} else {
+    df = (SimpleDateFormat) df.clone();
+}
+TimeZone newTz = format.getTimeZone();
+boolean changeTZ = (newTz != null) && !newTz.equals(df.getTimeZone());
+if (changeTZ) {
+    df.setTimeZone(newTz);
+}
+return withFormat(Boolean.FALSE, df);
+```
+If `hasLocale` is false, we clone. If `changeTZ` is false, we return the clone. That's okay.
+
+But there is an issue: what if `asString` is true and we need to use a different DateFormat for string representation? Actually, the date serializer already handles "as string" by using the configured DateFormat. So it should be fine.
+
+Maybe the bug is in the handling of `StdDateFormat`. Let's look: if df0 is StdDateFormat, we use it directly. But we modify locale/timezone using `withLocale`/`withTimeZone`. That returns a new StdDateFormat instance. Then we return `withFormat(Boolean.FALSE, std)`. That seems correct.
+
+Now, the comment mentions [databind#1648] which might be about a specific issue. Possibly the bug is that when there is a pattern, we create a SimpleDateFormat using the pattern and locale, but we don't check if the pattern should be used for string serialization? Actually, if there is a pattern, the shape might be implicitly STRING? Usually when pattern is specified, it implies STRING shape. But the code treats pattern separate from shape. The comment says: "First: custom pattern will override things". So pattern takes precedence. But what if shape is NUMBER and pattern is set? The code checks shape first: if numeric, it returns with BOOLEAN.TRUE (as numeric). Then it checks pattern. So pattern is only used if shape is not numeric. So if shape is NUMBER, pattern is ignored. That might be intentional.
+
+Perhaps the bug is that the function does not properly handle the case where both shape and pattern are set? Or maybe the bug is that the method `findFormatOverrides` might return something unexpected? Not sure.
+
+Given the massive list of test methods, we need to pinpoint which ones actually call this function and fail. Since we don't have the full context, we need to make an educated guess based on common patterns. The bug is likely related to date serialization with config overrides. Let's look at test methods that involve `configOverride` on date types:
+- `testSqlDateConfigOverride` uses pattern "yyyy+MM+dd" on SqlDate.
+- `testPatternWithSqlDate` uses annotation pattern? Actually it uses annotation on Person class: `@JsonFormat(pattern="yyyy.MM.dd")` on a field of type java.sql.Date.
+Both will trigger `createContextual` with a format that has pattern. If there's a bug in pattern handling, these tests might fail.
+
+Also `testSqlDate` does not seem to use config overrides; it uses `MAPPER` which is default. So that probably doesn't trigger the bug.
+
+`testConfigOverridesForNumbers` sets shape STRING for numeric types, but as mentioned, those are not dates. However, the function might be for `NumberSerializer`? But the code mentions `handledType()`, which for NumberSerializer would be Number. But the code uses `DateFormat` which is for dates, not numbers. So it's definitely a date serializer. So number tests are irrelevant.
+
+What about `testInetAddress`? It sets shape NUMBER for InetAddress. InetAddress has its own serializer, not date. So likely not.
+
+What about `testNumbersAsString`? Uses annotation on wrapper classes (e.g., `@JsonFormat(shape=STRING)`). Those are for number types, so not this function.
+
+Thus, the date-related tests are the most relevant. Among them, `testSqlDateConfigOverride` and `testPatternWithSqlDate` explicitly set format. Also `testSqlDate` might trigger if the default shape is something else? But it uses default serialization.
+
+Another test: `testDefaultKeySerializer` and others are not about dates.
+
+Given the complexity, we need to consider that the bug might be triggered by a test that exercises the code path where `shape.isNumeric()` is false, format has no pattern, and either hasLocale or hasTZ is true, and the default DateFormat is not StdDateFormat but a SimpleDateFormat. The test `testSqlDateConfigOverride` uses pattern, so it goes into pattern branch. `testPatternWithSqlDate` also uses pattern. So they both hit pattern branch. Maybe the bug is in pattern branch: the creation of SimpleDateFormat with pattern and locale, but the timezone handling? It sets timezone from format or from serializers. That seems fine.
+
+Maybe the bug is in the case where pattern is set, but the shape is also set (but shape isn't numeric). The code does not check shape after pattern. Actually, if pattern is set, it uses that pattern regardless of shape. That's likely correct.
+
+Wait, there's a known issue: when using `StdDateFormat`, the locale and timezone are properly handled, but when using a custom `SimpleDateFormat`, the locale and timezone modifications might not work correctly because `SimpleDateFormat.setTimeZone` modifies the instance, but if it's shared, cloning happens. But there is a bug: when `hasLocale` is true, we create a new `SimpleDateFormat` with `df.toPattern()` and `format.getLocale()`. However, `df.toPattern()` returns the pattern of the original df, which might have been a custom pattern. That's fine. But we lose any other modifications? That's okay. But then we set timezone later. However, note that the original df might have a different locale; we are ignoring that. That seems intended.
+
+Another potential bug: in the last block, if `hasLocale` is false and `changeTZ` is false, we just return a clone of the original df. But `asString` is true, meaning we want to serialize as string. But if we don't change anything, why return a new instance? The original df is already configured. But we return a new instance? Actually, `withFormat` creates a new serializer with the given DateFormat. So if we clone, that's fine. But if we don't change anything, we could just return `this`? The code returns `this` only if !hasLocale && !hasTZ && !asString. If asString is true, we must go into the block. But if there's nothing to change, we still create a copy. That might be okay but unnecessary.
+
+Maybe the bug is something else: the method `withFormat` might not be implemented correctly? Not given.
+
+Given the instructions, we need to decide which tests actually expose a bug. Since we don't have the actual error, we need to infer from common bugs. A frequent bug in date serialization with config overrides is failing to apply the locale/timezone when the default date format is a SimpleDateFormat and the shape is STRING. Perhaps the bug is that when shape is STRING and no pattern, and df0 is SimpleDateFormat, the code does not correctly handle the situation because it only modifies locale/tz but does not set the pattern to something that would produce string representation? Actually, SimpleDateFormat already has a pattern; it will produce string if used. So it should work.
+
+Another bug: The code uses `format.hasPattern()` to check pattern. But what if the pattern is empty? That might be considered having pattern? Not sure.
+
+Let's look at the test `testSqlDateConfigOverride`:
+```
+mapper.configOverride(java.sql.Date.class)
+    .setFormat(JsonFormat.Value.forPattern("yyyy+MM+dd"));        
+assertEquals("\"1980+04+14\"", mapper.writeValueAsString(java.sql.Date.valueOf("1980-04-14")));
+```
+This sets a pattern. The `createContextual` should handle pattern and create a SimpleDateFormat with that pattern. If there's a bug, maybe the pattern is not applied correctly. For example, the pattern might be applied but the DateFormat might not be used because the shape is not set to STRING explicitly? But when pattern is set, the code does not check shape; it directly uses pattern. So that should work. However, note that the DateSerializer's `serialize` method might not use the new DateFormat if the shape is not STRING? Actually, in DateSerializer, when the DateFormat is set (via `withFormat`), it uses that DateFormat to format the date as string. So it should produce the pattern. So `testSqlDateConfigOverride` should pass and not expose a bug if the function works.
+
+What about `testPatternWithSqlDate`? It uses annotation `@JsonFormat(pattern="yyyy.MM.dd")` on a field. That also goes through pattern branch. Should work.
+
+Maybe the bug is in the handling of `StdDateFormat` when locale/timezone changes? The test `testSqlDate` might use `MAPPER` which has default settings; no config override. So likely not.
+
+Given the lack of error, perhaps the bug is not in the date-related tests at all. Could be in the test `testInetAddress`? That sets shape NUMBER for InetAddress. InetAddressSerializer might have its own `createContextual` that is similar? But the buggy function is given; it looks like a date serializer. However, the function is generic enough that it might be used by multiple serializers. But the code is from Jackson's date serialization. The test `testInetAddress` calls `mapper.configOverride(InetAddress.class).setFormat(JsonFormat.Value.forShape(JsonFormat.Shape.NUMBER));`. This would trigger the `createContextual` of InetAddressSerializer, which might not be the same function. So it's probably not.
+
+Wait, the problem might be that we are only given one function, but there could be multiple buggy functions? The instruction says "If multiple functions are buggy, all will be provided." So only this function is buggy. So the bug is isolated to this `createContextual` method.
+
+Now, we need to identify test methods that call this function. This function is part of a abstract serializer for date/time types. Which test methods actually serialize date/time types with config overrides that land in this function? Let's list all tests that involve date serialization with @JsonFormat or configOverride:
+- `testSqlDateConfigOverride` (sql date with pattern)
+- `testPatternWithSqlDate` (sql date with pattern via annotation)
+- `testSqlDate` (default serialization, no override)
+- `testSqlTime` (default)
+- `testSqlTimestamp` (default)
+- `testConfigOverridesForNumbers` (not date)
+- `testNumbersAsString` (not date)
+- `testWithConfigOverrides` (for NonAnnotatedXY, shape ARRAY, not date)
+- `testWithArrays` etc (not date)
+- `testCanSerializeSimpleWithDefaultView` (health object, not date)
+- Others that use date? `testStdJdkTypesFromEmptyArray` includes Date and Calendar, but it's about deserialization from empty array, not serialization with format overrides.
+
+So the most likely candidates are `testSqlDateConfigOverride` and `testPatternWithSqlDate`. But there is also `testConfigOverridesForNumbers` which sets shape STRING for numbers, but the serializer for numbers is different. Unless the number serializer also uses a similar `createContextual` that has the same bug? Possibly the bug is in a common base class like `StdSerializer`? But the code is not generic; it's specific to date formatting.
+
+Maybe the bug is in the handling of `shape.isNumeric()`: if shape is numeric, we return `withFormat(Boolean.TRUE, null)`. But what if there is also a pattern? For dates, numeric means timestamp. If both numeric and pattern set, pattern is ignored. That might be correct.
+
+However, there is a known bug in Jackson where for some date types, the shape STRING doesn't work properly with config overrides because the serializer doesn't pick up the shape properly. This is issue #1648 referenced in the code. The comment says "With [databind#1648], this gets bit tricky..". So the code change was to fix #1648. But it might have introduced a new bug.
+
+Given that we need to output the fix, we must determine what the bug is. Since I cannot run the tests, I need to infer from the code structure.
+
+Let's examine the condition:
+```
+final boolean asString = (shape == JsonFormat.Shape.STRING);
+if (!hasLocale && !hasTZ && !asString) {
+    return this;
+}
+```
+So if shape is STRING, we proceed even if no locale/tz. That seems correct. Then we get df0 and either use StdDateFormat or SimpleDateFormat. However, what if `asString` is true and df0 is a `SimpleDateFormat`? We go into the last block. But note: the last block assumes that we need to modify locale or timezone or shape. But if none of hasLocale, hasTZ are true, and asString is true, we will go into the else branch: `df = (SimpleDateFormat) df0.clone();` Then `changeTZ` will be false because format.getTimeZone() is null (if not set). So we just return a clone of the original df. That seems okay, but we are returning a new serializer with the same DateFormat. However, maybe the original serializer already had a DateFormat; why create a new one? But that is not a bug, just unnecessary.
+
+But maybe the bug is that when `asString` is true but there are no locale/tz changes, we should still return `this` because we don't need to change anything. The condition `if (!hasLocale && !hasTZ && !asString)` returns this only if asString is false. So if asString is true, we always go into the block and create a copy even if no changes. This could be inefficient but not a bug. However, it might cause an issue if `df0` is not a `SimpleDateFormat` and not `StdDateFormat`. For example, if `df0` is a custom `DateFormat` subclass, and `asString` is true but no locale/tz, we will hit the `reportBadDefinition` because `!(df0 instanceof SimpleDateFormat)`. That would be a bug: if we just need to change shape to STRING but not locale/tz, we might not need to modify the DateFormat at all. The serializer might already have its own way to handle STRING? Actually, if the shape is STRING, the serializer should use the DateFormat to format. So if the DateFormat is already set (e.g., from annotation), it's fine. But if we are only changing shape to STRING via config override, we might still need to use the default DateFormat. The code's assumption is that to serialize as string, we need to have a DateFormat. But if the default DateFormat is not compatible, it might fail. But reporting bad definition might be too strict for this case. However, the test `testConfigOverridesForNumbers` for numbers does not use dates, so it doesn't apply.
+
+Wait, maybe the bug is that the function is being called for non-date types as well? The `handledType()` could be anything. For example, `InetAddressSerializer` might also have a `createContextual` that is similar? But the given code is specific to date formatting (uses DateFormat, SimpleDateFormat, etc.). So it must be for date types.
+
+Perhaps the bug is triggered by `testSqlDateConfigOverride` because it uses `mapper.configOverride(java.sql.Date.class).setFormat(JsonFormat.Value.forPattern("yyyy+MM+dd"));`. This sets pattern only, not shape. The function will handle pattern branch. In pattern branch, it creates a SimpleDateFormat with pattern and locale (default locale). Then it sets timezone. Then returns `withFormat(Boolean.FALSE, df)`. That should work. But what if the default locale is not appropriate? Not a bug.
+
+Another possibility: the bug is in the handling of `StdDateFormat` when locale or timezone is set. The code:
+```
+StdDateFormat std = (StdDateFormat) df0;
+if (format.hasLocale()) {
+    std = std.withLocale(format.getLocale());
+}
+if (format.hasTimeZone()) {
+    std = std.withTimeZone(format.getTimeZone());
+}
+return withFormat(Boolean.FALSE, std);
+```
+This modifies StdDateFormat correctly. However, note that `StdDateFormat.withLocale` and `withTimeZone` return new instances, so that's fine.
+
+But there is a subtle issue: `StdDateFormat` is Jackson's own DateFormat. When shape is STRING and no locale/tz, the code will go into the last block because `asString` is true. If df0 is StdDateFormat, it will be caught by the `if (df0 instanceof StdDateFormat)` block. So it will handle correctly. So no problem.
+
+Given the lack of clear bug, I think the problem might be that the condition `if (!hasLocale && !hasTZ && !asString)` is meant to be `if (!hasLocale && !hasTZ && !asString)` but it should also include the case where `shape` is something else that doesn't require change? Actually, the intention is: if none of locale, tz, or string shape is set, we don't need to modify anything. But what if shape is ARRAY or something? For dates, shape ARRAY means serialize as array? That's not supported, so maybe it's ignored. The code returns this for non-numeric, non-string shapes. That might be correct.
+
+My conclusion: The bug is likely in the pattern branch where `SimpleDateFormat` is created. Possibly it does not respect the shape when pattern is used. But pattern implies string shape, so it's fine.
+
+Another common bug: when pattern is set, the code does not check if the serialization feature `WRITE_DATES_AS_TIMESTAMPS` is enabled? Actually, the `withFormat(Boolean.FALSE, df)` stores a flag indicating not numeric. That is correct.
+
+Given the difficulty, I need to think differently. The user provided the buggy code and a massive list of test methods. They want us to output which test methods trigger the bug and the fixed code. Since we cannot run the tests, we must look for patterns that would cause a failure. Maybe the bug is that the function does not handle the case where `findFormatOverrides` returns null for a property that has a config override on the class? Actually, the method is called `createContextual`; it might be called for properties that are dates. The test `testSqlDateConfigOverride` calls it for root value? It serializes a SqlDate directly. That would be root value, so property is null. At the start, if property is null, it returns this. That would skip the whole config override! That's a bug! 
+
+Look at the beginning:
+```
+if (property == null) {
+    return this;
+}
+```
+This returns immediately if property is null, which is the case for root values. But config overrides are supposed to apply to root values as well. The comment says "Note! Should not skip if `property` null since that'd skip check for config overrides, in case of root value". So the comment indicates a known issue: the previous version skipped property null, but they changed it? Wait, the current code does skip property null. That is suspicious. The comment says "should not skip if property null", but the code does skip. That is the bug! The code was supposed to not skip, but it still does. So the bug is that for root values (property == null), the function returns early, ignoring format overrides. That means config overrides on root value serialization do not work.
+
+Let's check the tests: `testSqlDateConfigOverride` calls `mapper.writeValueAsString(java.sql.Date.valueOf(...))`. This is a root value serialization. So property will be null. The function returns this immediately, ignoring the config override. Thus the pattern "yyyy+MM+dd" is not applied, and the test would fail. That test is likely to fail because the expected output is with that pattern. So `testSqlDateConfigOverride` triggers the bug.
+
+Similarly, `testInetAddress` also calls `mapper.writeValueAsString(input)` where input is InetAddress, which is root value. But the function is not for InetAddress, so that test uses a different serializer. However, the test `testInetAddress` sets shape NUMBER for InetAddress via configOverride. The InetAddressSerializer's createContextual might have a similar bug? But we don't have that function. So that test might not trigger this bug.
+
+But `testSqlDateConfigOverride` definitely uses SqlDate serializer which likely has this createContextual. So it will fail.
+
+Another test: `testPatternWithSqlDate` serializes a bean with a property of type Date. That property is not null, so property is not null. So that test passes the early return and goes into format handling. So it might not trigger the bug. But if the bug is only in the early return for null property, then only root value serializations are affected. So tests that serialize root values with config overrides will trigger the bug.
+
+Which tests serialize root values with config overrides on date types? `testSqlDateConfigOverride` does. Also `testConfigOverridesForNumbers` serializes root values (IntWrapper, DoubleWrapper, BigDecimalWrapper) but those are numbers, not dates. So that might use a different serializer.
+
+But there is also `testWithConfigOverrides` for NonAnnotatedXY, which uses shape ARRAY. That might use a different serializer (POJO serializer) that has its own createContextual. So not relevant.
+
+Thus, the most direct test that triggers the bug is `testSqlDateConfigOverride`. Also possibly `testInetAddress` if InetAddressSerializer has the same pattern, but we don't know.
+
+Also `testStdJdkTypesFromEmptyArray` includes Date and Calendar, but it's about deserialization from empty array, not serialization.
+
+Another test that might trigger root value serialization with date format override: `testSqlDate` does not have config override. `testSqlTime` and `testSqlTimestamp` are default.
+
+What about `testNumbersAsString`? Those are annotations on properties, not root values.
+
+Thus, the only clear test that exercises root value date serialization with config override is `testSqlDateConfigOverride`. There might be others like `testCanSerializeSimpleWithDefaultView` but that's not date.
+
+Also, test `testCaseInsensitiveUnwrap` uses Person class, not date.
+
+So I think `testSqlDateConfigOverride` is the trigger.
+
+But wait, there is also test `testConfigOverridesForNumbers` that serializes root values (IntWrapper etc.) with shape STRING. Those are numbers; the number serializer likely has a similar createContextual. If that serializer also has the early return bug for null property, then those tests would also fail. But the given function is only for date serializer, but we need to consider if the bug is in a common base class. The instruction says "If multiple functions are buggy, all will be provided." We are only given one function, so we assume that only this function is buggy. Therefore, tests that involve number serializers are not affected unless they share the same function. They might not.
+
+Given the comment about root value, the bug is exactly that. So I'll assume that the test `testSqlDateConfigOverride` triggers the bug. Also possibly `testInetAddress` if InetAddressSerializer has the same issue, but since we are only given this function, we must consider only tests that call this function. Which tests call this function? Serialization of SqlDate, Date, Calendar, etc. So tests that serialize root value of SqlDate with config override: `testSqlDateConfigOverride`. Also maybe `testSqlDate`? No config override.
+
+What about `testPatternWithSqlDate`? That serializes a bean with a property of SqlDate, so property is not null, so it doesn't hit the early return. So it should work.
+
+Thus, I think only `testSqlDateConfigOverride` triggers the bug.
+
+But let's check if there are other root value tests with date format overrides. `testPatternWithSqlDate` uses annotation, not config override. `testSqlDate` uses default. So only one.
+
+Now, the fix: The comment says we should not skip if property null. So we need to remove the early return or change it to proceed. But we also need to handle the case where property is null. The original logic after the early return uses `property` to get format overrides via `findFormatOverrides(serializers, property, handledType())`. If property is null, `findFormatOverrides` might still work; it might check config overrides on the root type. So we should remove the early return. Let's read the comment: "Note! Should not skip if `property` null since that'd skip check for config overrides, in case of root value". So the intention was to not skip, but the code does skip. So the fix is to remove the early return (the if (property == null) block). But we must be careful: the code later uses property in `findFormatOverrides`; if property is null, that method should handle it (likely returns the config overrides for the root type). So we can just delete that block.
+
+However, there might be other uses of property later? The code does not use property elsewhere except in that line. So removal is safe.
+
+But we must also consider that the method might be called with property null in other contexts where we don't want to apply config overrides? According to the comment, we do want to apply them. So fix: remove the early return.
+
+Let's test: In `testSqlDateConfigOverride`, property is null, so we proceed to `findFormatOverrides(serializers, null, handledType())`. That should return the format override for SqlDate, which has pattern "yyyy+MM+dd". Then we go into pattern branch, create SimpleDateFormat, return new serializer. Then serialization uses that format. So test passes.
+
+Thus, the fix is to remove the `if (property == null) return this;` lines.
+
+Now, we need to output the fixed code. The fixed code should be the entire function with that block removed. Also we need to keep the rest unchanged.
+
+The output format requires each function as a JSON string. Since only one function is given, we output one string.
+
+Also we need to list the trigger methods: full test method paths. They are in the format "com.fasterxml.jackson.databind.ser.jdk.SqlDateSerializationTest::testSqlDateConfigOverride". That test appears to be in that class. Also note that the test `testSqlDateConfigOverride` is in `SqlDateSerializationTest` class. So we output ["com.fasterxml.jackson.databind.ser.jdk.SqlDateSerializationTest::testSqlDateConfigOverride"].
+
+But we should also consider if any other test triggers the bug through root value serialization of date with config override. Possibly `testPatternWithSqlDate` does not because it's property. `testSqlDate` does not. So only one.
+
+However, there might be other date types: `Calendar`? Not in tests. So I'll stick with that.
+
+Also, maybe the test `testConfigOverridesForNumbers`? No, because that's for numbers, not dates.
+
+So final answer.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.ser.jdk.SqlDateSerializationTest::testSqlDateConfigOverride"
+  ],
+  "fixed_code": [
+    "    public JsonSerializer<?> createContextual(SerializerProvider serializers,\n            BeanProperty property) throws JsonMappingException\n    {\n        // Note! Should not skip if `property` null since that'd skip check\n        // for config overrides, in case of root value\n        JsonFormat.Value format = findFormatOverrides(serializers, property, handledType());\n        if (format == null) {\n            return this;\n        }\n        // Simple case first: serialize as numeric timestamp?\n        JsonFormat.Shape shape = format.getShape();\n        if (shape.isNumeric()) {\n            return withFormat(Boolean.TRUE, null);\n        }\n\n        // 08-Jun-2017, tatu: With [databind#1648], this gets bit tricky..\n        // First: custom pattern will override things\n        if (format.hasPattern()) {\n            final Locale loc = format.hasLocale()\n                            ? format.getLocale()\n                            : serializers.getLocale();\n            SimpleDateFormat df = new SimpleDateFormat(format.getPattern(), loc);\n            TimeZone tz = format.hasTimeZone() ? format.getTimeZone()\n                    : serializers.getTimeZone();\n            df.setTimeZone(tz);\n            return withFormat(Boolean.FALSE, df);\n        }\n\n        // Otherwise, need one of these changes:\n        final boolean hasLocale = format.hasLocale();\n        final boolean hasTZ = format.hasTimeZone();\n        final boolean asString = (shape == JsonFormat.Shape.STRING);\n\n        if (!hasLocale && !hasTZ && !asString) {\n            return this;\n        }\n\n        DateFormat df0 = serializers.getConfig().getDateFormat();\n        // Jackson's own `StdDateFormat` is quite easy to deal with...\n        if (df0 instanceof StdDateFormat) {\n            StdDateFormat std = (StdDateFormat) df0;\n            if (format.hasLocale()) {\n                std = std.withLocale(format.getLocale());\n            }\n            if (format.hasTimeZone()) {\n                std = std.withTimeZone(format.getTimeZone());\n            }\n            return withFormat(Boolean.FALSE, std);\n        }\n\n        // 08-Jun-2017, tatu: Unfortunately there's no generally usable\n        //    mechanism for changing `DateFormat` instances (or even clone()ing)\n        //    So: require it be `SimpleDateFormat`; can't config other types\n        if (!(df0 instanceof SimpleDateFormat)) {\n            serializers.reportBadDefinition(handledType(), String.format(\n\"Configured `DateFormat` (%s) not a `SimpleDateFormat`; cannot configure `Locale` or `TimeZone`\",\ndf0.getClass().getName()));\n        }\n        SimpleDateFormat df = (SimpleDateFormat) df0;\n        if (hasLocale) {\n            // Ugh. No way to change `Locale`, create copy; must re-crete completely:\n            df = new SimpleDateFormat(df.toPattern(), format.getLocale());\n        } else {\n            df = (SimpleDateFormat) df.clone();\n        }\n        TimeZone newTz = format.getTimeZone();\n        boolean changeTZ = (newTz != null) && !newTz.equals(df.getTimeZone());\n        if (changeTZ) {\n            df.setTimeZone(newTz);\n        }\n        return withFormat(Boolean.FALSE, df);\n    }"
+  ]
+}

@@ -1,0 +1,34 @@
+public CollectionDeserializer createContextual(DeserializationContext ctxt,
+            BeanProperty property) throws JsonMappingException
+    {
+        JsonDeserializer<Object> delegateDeser = null;
+        if (_valueInstantiator != null) {
+            if (_valueInstantiator.canCreateUsingDelegate()) {
+                JavaType delegateType = _valueInstantiator.getDelegateType(ctxt.getConfig());
+                if (delegateType == null) {
+                    throw new IllegalArgumentException("Invalid delegate-creator definition for "+_collectionType
+                            +": value instantiator ("+_valueInstantiator.getClass().getName()
+                            +") returned true for 'canCreateUsingDelegate()', but null for 'getDelegateType()'");
+                }
+                delegateDeser = findDeserializer(ctxt, delegateType, property);
+            }
+        }
+        Boolean unwrapSingle = null;
+        JsonFormat.Value format = findFormatOverrides(ctxt, property, Collection.class);
+        if (format != null) {
+            unwrapSingle = format.getFeature(JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+        }
+        JsonDeserializer<?> valueDeser = _valueDeserializer;
+        valueDeser = findConvertingContentDeserializer(ctxt, property, valueDeser);
+        final JavaType vt = _collectionType.getContentType();
+        if (valueDeser == null) {
+            valueDeser = ctxt.findContextualValueDeserializer(vt, property);
+        } else {
+            valueDeser = ctxt.handleSecondaryContextualization(valueDeser, property, vt);
+        }
+        TypeDeserializer valueTypeDeser = _valueTypeDeserializer;
+        if (valueTypeDeser != null) {
+            valueTypeDeser = valueTypeDeser.forProperty(property);
+        }
+        return withResolved(delegateDeser, valueDeser, valueTypeDeser, unwrapSingle);
+    }

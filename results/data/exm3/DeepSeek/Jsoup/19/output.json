@@ -1,0 +1,540 @@
+We are given a buggy Java function (the Whitelist class) and a trigger testcase. The testcase shows that the method `handlesCustomProtocols` tests cleaning HTML with custom protocols (cid, data). The bug likely relates to how protocols are validated, especially with custom protocols added via `addProtocols`.
+
+Looking at the buggy code, specifically the `testValidProtocol` method:
+
+```java
+    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        // try to resolve relative urls to abs, and optionally update the attribute so output html has abs.
+        // rels without a baseuri get removed
+        String value = el.absUrl(attr.getKey());
+        if (!preserveRelativeLinks)
+            attr.setValue(value);
+        
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString() + ":";
+            if (value.toLowerCase().startsWith(prot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+The issue is that `el.absUrl(attr.getKey())` returns an absolute URL after resolving against the base URI. For custom protocols like `cid:12345`, `absUrl` may return an empty string or a malformed URL? Actually, `absUrl` is a method in jsoup's Element that returns an absolute URL from an attribute that is a URL. For non-absolute URLs, it returns an empty string if the URL is not a valid HTTP/HTTPS/etc? Let's think.
+
+When we have `src='cid:12345'`, the `absUrl` method will try to parse that as a URL. However, `cid` is not a standard protocol that Java's URL understands. In jsoup, `absUrl` uses `java.net.URL` to resolve? Actually, jsoup's `absUrl` method (from `Element`) uses the base URI to resolve relative URLs. For a protocol like `cid:12345`, it might be considered an absolute URL because it starts with a protocol. But `java.net.URL` may not parse it correctly, leading to a malformed URL exception? In jsoup's implementation, `absUrl` likely returns the original attribute value if it's already an absolute URL? Let's check the jsoup source (not provided). However, from the testcase, the bug is that when we add custom protocols, the cleaning still drops the attribute. The test expects:
+
+- Without custom protocols: both images are cleaned to `<img />` (src removed).
+- With custom protocols added: both images should keep the src attribute.
+
+But the test shows that the buggy version likely fails to preserve the custom protocol attributes because the protocol validation fails.
+
+Looking at `testValidProtocol`, it uses `el.absUrl(attr.getKey())` to get the absolute URL. For `src='cid:12345'`, `absUrl` might return `cid:12345`? Actually, `absUrl` returns an absolute URL, meaning if the base URI is set and the attribute is a relative URL, it resolves it. But `cid:12345` is an absolute URL (has a protocol). In jsoup's `absUrl` method, if the attribute is already an absolute URL (has a protocol), it returns that absolute URL. However, there is a known issue: `absUrl` uses `java.net.URL` constructor which may throw a `MalformedURLException` for non-standard protocols like `cid`. In that case, `absUrl` returns an empty string.
+
+Let's examine the jsoup source code for `absUrl` (from memory): In `Element`, `absUrl` calls `String absUrl(String attributeKey)` which does:
+
+```java
+    public String absUrl(String attributeKey) {
+        Validate.notEmpty(attributeKey);
+        String relUrl = attr(attributeKey);
+        if (!hasAttr(attributeKey)) {
+            return "";
+        } else {
+            URL base;
+            try {
+                base = new URL(baseUri);
+            } catch (MalformedURLException e) {
+                URL absUrl = new URL(relUrl);
+                return absUrl.toExternalForm();
+            }
+            // resolve relative to base
+            // ...
+        }
+    }
+```
+
+But if `relUrl` is something like `cid:12345`, constructing `new URL(relUrl)` will throw `MalformedURLException` because `cid` is not a known protocol? Actually, `java.net.URL` does allow any protocol as long as the string is a valid URL format? It requires a valid protocol handler. For unknown protocols, it will throw `MalformedURLException`. So `absUrl` would throw and catch? Wait, the above snippet is not accurate.
+
+Let's look at actual jsoup 1.10.2 source (likely version). In `Element.absUrl`:
+
+```java
+    public String absUrl(String attributeKey) {
+        Validate.notEmpty(attributeKey);
+        if (!hasAttr(attributeKey)) {
+            return "";
+        }
+        return StringUtil.resolve(baseUri, attr(attributeKey));
+    }
+```
+
+And `StringUtil.resolve`:
+
+```java
+    public static String resolve(String baseUrl, String relUrl) {
+        baseUrl = stripControlChars(baseUrl);
+        relUrl = stripControlChars(relUrl);
+        try {
+            URL base;
+            try {
+                base = new URL(baseUrl);
+            } catch (MalformedURLException e) {
+                // the base is unsuitable, but the attribute/rel may be abs on its own, so try that
+                URL abs = new URL(relUrl);
+                return abs.toExternalForm();
+            }
+            return resolve(base, relUrl);
+        } catch (MalformedURLException e) {
+            return "";
+        }
+    }
+```
+
+And `resolve(URL base, String relUrl)`:
+
+```java
+    static String resolve(URL base, String relUrl) throws MalformedURLException {
+        // ...
+        // if relUrl starts with a protocol, return it as is (abs)
+        // but note that new URL(base, relUrl) will also work if relUrl is absolute.
+        // Actually, the implementation may do: if relUrl starts with a protocol, then new URL(relUrl) and return.
+        // However, if relUrl is like "cid:12345", new URL(relUrl) will throw MalformedURLException because no handler.
+        // So the catch block returns "".
+    }
+```
+
+Thus, for a custom protocol like `cid:12345`, `absUrl` will throw `MalformedURLException` and return an empty string. Then `testValidProtocol` will set `attr.setValue(value)` (if `preserveRelativeLinks` is false) to empty string? Actually, if `value` is empty, then `attr.setValue("")`? That would set the attribute value to empty string, but then the loop checks if `value.toLowerCase().startsWith(prot)`. Since `value` is empty, it will not start with any protocol, so it returns false, causing the attribute to be considered unsafe and removed. That matches the bug.
+
+The fix: In `testValidProtocol`, we should not rely solely on `absUrl` for custom protocols. Instead, we should check the original attribute value if it matches a protocol when `preserveRelativeLinks` is true? Actually, the method currently does:
+
+```java
+        String value = el.absUrl(attr.getKey());
+        if (!preserveRelativeLinks)
+            attr.setValue(value);
+```
+
+If `preserveRelativeLinks` is false, we update the attribute to the absolute URL (which might be empty). But if the original attribute value is a custom protocol URL, we want to keep it as is, not convert to empty. The method should also check the original attribute value for protocol matching, not just the absolute URL.
+
+The intended behavior: The `addProtocols` method allows custom protocols. For validation, we need to check if the attribute's value (either relative or absolute) matches one of the allowed protocols. The `absUrl` is used to resolve relative URLs to absolute for validation, but for custom protocols that are already absolute, we should use the original value if `absUrl` fails.
+
+But note: The `preserveRelativeLinks` flag is about whether to keep relative links as relative (if true) or convert to absolute (if false). However, for custom protocols, we might not want to change them at all.
+
+We should modify `testValidProtocol` to also consider the original attribute value when the resolved absolute URL is empty (or maybe always check both). However, we must be careful: if the attribute is a relative URL (like `/path`), we need to resolve it to absolute to check the protocol. So we need to check both: first try absolute, if that passes, good. If not, maybe check the original? But the protocol check is about the scheme of the URL. For a relative URL, the scheme is inherited from the base URI. So we must resolve.
+
+But for custom protocols, the attribute value is already an absolute URL (with custom scheme). The `absUrl` method may fail to parse it and return empty. So we need to fall back to the original attribute value in that case.
+
+Let's look at the logic:
+
+- If `preserveRelativeLinks` is false, we set the attribute value to the absolute URL (which may be empty). That would break custom protocols.
+- Also, the protocol check uses `value` (the absolute URL) to compare. If `value` is empty, it fails.
+
+So we need to adjust: When `absUrl` returns empty, we should keep the original attribute value for checking (and also not overwrite it if `preserveRelativeLinks` is false? Actually, if `absUrl` returns empty, that means the URL is invalid (or custom protocol). Should we still allow it? Yes, if the protocol is in the allowed list, we should allow it.
+
+Thus, we can change `testValidProtocol` to:
+
+- Get the original attribute value: `String origValue = attr.getValue();`
+- Get the absolute URL: `String abs = el.absUrl(attr.getKey());`
+- Determine which value to use for protocol checking: if `abs` is not empty, use `abs`; otherwise, use `origValue`. But note: if `abs` is empty, the URL may be a custom protocol that `absUrl` cannot parse. However, it could also be a malformed URL that should be rejected. But if the protocol is in the allowed list, we accept it.
+- Also, if `preserveRelativeLinks` is false, we want to update the attribute to the absolute URL if possible; if not possible (abs empty), we should keep the original? Actually, if we cannot make it absolute, we should leave as is? The spec says: "Configure this Whitelist to preserve relative links... By default, false: URLs will be made absolute." So when false, we try to make absolute. If we cannot (because custom protocol), we should probably keep the original (which is already absolute in the custom protocol). So we should set the attribute to `abs` if `abs` is not empty; otherwise keep original.
+
+But note: the attribute value might be a relative link that cannot be resolved because of no base URI? In that case `abs` would be empty, and we should remove the attribute? That is the existing behavior: "rels without a baseuri get removed". That is correct.
+
+Thus, we need to modify `testValidProtocol` to:
+
+```java
+    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        // try to resolve relative urls to abs, and optionally update the attribute so output html has abs.
+        // rels without a baseuri get removed
+        String value = el.absUrl(attr.getKey());
+        if (value.length() == 0) {
+            // could not resolve, maybe it's a custom protocol
+            value = attr.getValue();
+        }
+        if (!preserveRelativeLinks && value.length() > 0) {
+            // only update if we have a non-empty value (either resolved or original)
+            // but we should only update to the absolute version if we resolved it; if we fell back to original, it's already absolute?
+            // Actually, if value is the original, it might be relative? But if absUrl returned empty, the original might be relative without base.
+            // In that case, we cannot make it absolute, so we should not update? But the spec says make absolute if possible.
+            // Let's only update if we have a resolved absolute URL (i.e., the one from absUrl).
+            // However, we already set value to attr.getValue() if absUrl empty. That might be relative.
+            // So we need to differentiate.
+            // Simpler: if absUrl is not empty, set attr to that (absolute). Otherwise, leave as is.
+            String abs = el.absUrl(attr.getKey());
+            if (abs.length() > 0) {
+                attr.setValue(abs);
+            }
+        } else if (preserveRelativeLinks) {
+            // do not change attribute
+        } else {
+            // preserveRelativeLinks is false but value is empty? Then we cannot make absolute, so leave as is? Actually attribute may be removed later.
+        }
+        
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString() + ":";
+            if (value.toLowerCase().startsWith(prot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+But this is messy and might break existing behavior.
+
+Let's examine the original jsoup source code (I recall that this bug was fixed in jsoup 1.10.3 or similar). The fix was to change `testValidProtocol` to use the original attribute value for protocol checking when `absUrl` returns empty, and also to not overwrite the attribute with an empty value.
+
+I can look up the actual fix from jsoup's history. But since I don't have internet, I'll infer.
+
+Alternatively, maybe the bug is simpler: In `isSafeAttribute`, when checking protocols, the condition `if (protocols.containsKey(tag))` and then `attrProts.containsKey(key)` returns true, but `testValidProtocol` returns false because of the `absUrl` issue. So we need to fix `testValidProtocol`.
+
+Let's write a corrected version that matches the expected behavior from the test.
+
+We need to ensure that custom protocols like `cid:` and `data:` are recognized. The test uses `addProtocols("img", "src", "cid", "data")`. So we need to allow those.
+
+In `testValidProtocol`, we should check both the absolute resolved URL and the original value. The simplest fix: Use `attr.getValue()` for protocol checking, but also resolve relative URLs if needed. However, we must still resolve relative URLs to check their protocol because a relative URL like `/path` could be resolved to `http://example.com/path` and then we check for `http`. So we need to resolve.
+
+But for custom protocols, the attribute value is already absolute (starts with protocol). So we can check the original value's protocol directly.
+
+Thus, we can do:
+
+- Get `String value = attr.getValue();`
+- If the value is a relative URL (does not start with a known protocol?), we need to resolve it. But we don't know which protocols are allowed. So we can try to resolve using `absUrl`. If `absUrl` returns non-empty, use that for checking (and also for updating if `preserveRelativeLinks` false). If `absUrl` returns empty, then the original value might be a custom protocol absolute URL, so we keep it.
+
+But note: `absUrl` might return empty for relative URLs without base URI. In that case, we cannot determine the protocol, so the attribute should be considered invalid.
+
+So algorithm:
+
+```java
+    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        String value = attr.getValue();
+        String abs = el.absUrl(attr.getKey());
+        boolean isRelative = !isAbsoluteUrl(value); // need a helper to check if value has a protocol scheme.
+        // But we don't have isAbsoluteUrl. We can guess: if value contains ":" and the part before ":" is a valid protocol? Not trivial.
+        // Instead, rely on absUrl: if abs is not empty and abs != value, then it was resolved.
+        // If abs is empty, then it's either an absolute URL with custom protocol, or a relative URL without base.
+        
+        // For protocol checking, we want to check the absolute URL if it was resolved; otherwise check the original.
+        String checkValue = abs.length() > 0 ? abs : value;
+        
+        // Update attribute if not preserving relative links and we have a resolved absolute URL.
+        if (!preserveRelativeLinks && abs.length() > 0) {
+            attr.setValue(abs);
+        }
+        
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString() + ":";
+            if (checkValue.toLowerCase().startsWith(prot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+This approach uses the resolved absolute URL if available; otherwise uses original. It updates the attribute only when we have a resolved absolute URL (i.e., for relative links that can be resolved). For custom protocols, `abs` will be empty, so we keep the original value and check it.
+
+But wait: For a custom protocol absolute URL, `absUrl` returns empty, so `checkValue` is the original (e.g., "cid:12345"). The protocol check will succeed if "cid" is in the allowed set. And we don't change the attribute (since `abs` is empty). That matches the test expectation.
+
+For a relative link like "/foo" with base URI "http://example.com", `absUrl` returns "http://example.com/foo". `checkValue` is that, and we update the attribute to absolute if `preserveRelativeLinks` false. That's correct.
+
+For a relative link without base URI, `absUrl` returns empty, `checkValue` is the relative value (e.g., "/foo"). The protocol check will fail because it doesn't start with any allowed protocol (like "http:"), so the attribute is removed. That's correct.
+
+Now, we need to implement `isAbsoluteUrl`? Actually we don't need it. We just rely on `absUrl` returning non-empty for resolvable URLs.
+
+But note: `absUrl` may return the original value if it's already absolute? For standard protocols like "http:", `absUrl` might return the same string? Actually, `absUrl` for an absolute URL returns the absolute URL (after stripping control chars). So `abs` would be non-empty and equal to the original (maybe normalized). That's fine.
+
+Thus, the fix is to change `testValidProtocol` as above.
+
+But also, there is a bug in the line `if (!preserveRelativeLinks) attr.setValue(value);` where `value` is from `absUrl`. If `absUrl` returns empty, it sets the attribute to empty string, which is wrong. So we must only set if `value` is not empty.
+
+So we can change that to:
+
+```java
+        String value = el.absUrl(attr.getKey());
+        if (!preserveRelativeLinks && value.length() > 0)
+            attr.setValue(value);
+```
+
+And then we need to use the appropriate value for checking protocols. But if `value` is empty, we should check the original attribute value.
+
+Thus, the fixed `testValidProtocol`:
+
+```java
+    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        // try to resolve relative urls to abs, and optionally update the attribute so output html has abs.
+        // rels without a baseuri get removed
+        String value = el.absUrl(attr.getKey());
+        if (value.length() == 0) {
+            // could not resolve, use the original value (could be a custom protocol)
+            value = attr.getValue();
+        } else {
+            // we have an absolute URL
+            if (!preserveRelativeLinks) {
+                attr.setValue(value);
+            }
+        }
+        
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString() + ":";
+            if (value.toLowerCase().startsWith(prot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+But note: In the case where `value` from `absUrl` is not empty, we set the attribute only if `!preserveRelativeLinks`. That's correct. However, we also need to consider that `value` might be the original absolute URL (if already absolute). That's fine.
+
+Now, what about the case where `preserveRelativeLinks` is true? We don't update the attribute, and we use the absolute URL (if resolvable) for checking? Actually, if `preserveRelativeLinks` is true, we should not change the attribute, but we still need to check the protocol based on the absolute URL? The spec says: "Note that when handling relative links, the input document must have an appropriate base URI set when parsing, so that the link's protocol can be confirmed. Regardless of the setting of the preserve relative links option, the link must be resolvable against the base URI to an allowed protocol; otherwise the attribute will be removed."
+
+So even if `preserveRelativeLinks` is true, we still need to resolve the link to check its protocol against the base URI. So we should use the absolute URL for checking, but not update the attribute. That matches the above: we use `value` (the absolute URL) for checking, but only update the attribute if `!preserveRelativeLinks`.
+
+But for custom protocols, `absUrl` returns empty, so we fall back to original value, and we don't update the attribute (since `absUrl` empty, we don't go into the else branch that updates). That's fine.
+
+Thus, this fix should work.
+
+Now, we also need to ensure that the `isSafeAttribute` method correctly handles the case where `protocols.containsKey(tag)` but `attrProts.containsKey(key)` is false? Actually, in `isSafeAttribute`:
+
+```java
+        if (attributes.containsKey(tag)) {
+            if (attributes.get(tag).contains(key)) {
+                if (protocols.containsKey(tag)) {
+                    Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);
+                    // ok if not defined protocol; otherwise test
+                    return !attrProts.containsKey(key) || testValidProtocol(el, attr, attrProts.get(key));
+                } else { // attribute found, no protocols defined, so OK
+                    return true;
+                }
+            }
+        } else { // no attributes defined for tag, try :all tag
+            return !tagName.equals(":all") && isSafeAttribute(":all", el, attr);
+        }
+        return false;
+```
+
+That logic seems fine.
+
+Now, we must also consider the `addAttributes` method for the pseudo tag `:all`. It works because `TagName` is created with the string `":all"`. That's fine.
+
+Now, we need to produce the fixed code for the entire Whitelist class. Since we only need to modify the `testValidProtocol` method, we will output the entire class with that method fixed.
+
+But note: The provided buggy function includes only the Whitelist class, but there might be other classes (like Cleaner, Jsoup) that are not shown. However, we are only allowed to modify the given functions. So we will output the fixed Whitelist class.
+
+Now, we need to generate additional trigger testcases. The requirement: generate minimal number of new testcases that fail on the buggy version, pass on the fixed version, and maximize coverage of different behaviors/branches, especially those not covered by the provided trigger.
+
+The provided trigger testcase tests custom protocols (cid, data) with `basicWithImages` whitelist. It covers the scenario where custom protocols are added and should be preserved. The buggy version fails because it drops the attributes.
+
+We need to cover other behaviors: 
+1. Relative links with base URI, with `preserveRelativeLinks` false (should be made absolute).
+2. Relative links with base URI, with `preserveRelativeLinks` true (should be kept relative if allowed protocol).
+3. Absolute HTTP links (should be allowed).
+4. Invalid protocols (should be removed).
+5. The pseudo tag `:all` for attributes.
+6. Enforced attributes.
+7. Tags not allowed.
+8. Attributes not allowed.
+9. Protocols defined for an attribute but the attribute value is not a URL? (Maybe not relevant)
+
+We need to design testcases that would fail on the buggy version due to the bug (i.e., custom protocols being incorrectly handled). But we already have a test for custom protocols. We need to cover other branches that might be affected by the fix? Actually, the fix only changes `testValidProtocol`. So any test that involves protocol validation could be affected. We want to ensure that our fix doesn't break existing behavior. So we should create testcases that pass on both versions? No, the requirement is that new testcases must fail on the buggy version. So we need to find scenarios where the buggy version fails but our fixed version passes. The buggy version fails for custom protocols. But also, the buggy version might mishandle relative links when `preserveRelativeLinks` is false and `absUrl` returns empty? That is actually correct behavior (remove attribute). But our fix changes the condition for updating the attribute: we only update if `absUrl` returns non-empty. This could affect relative links without base URI? The buggy version would set the attribute to empty string (because `absUrl` returns empty) and then the protocol check would fail (since empty doesn't start with any protocol), causing removal. Our fix: if `absUrl` empty, we fall back to original value, but then the protocol check will still fail (since original value is relative without protocol), so the attribute will still be removed. So same outcome. However, the buggy version sets the attribute to empty string before removal? That might not matter because the attribute is removed anyway. So that scenario might not fail on buggy vs fixed.
+
+But there is a scenario: a custom protocol that is allowed, but `absUrl` returns empty. The buggy version sets the attribute to empty (if `preserveRelativeLinks` false) and then the protocol check fails, causing removal. Our fix keeps the original value and passes the check. So this scenario fails on buggy, passes on fixed. That's exactly the provided test.
+
+We need additional scenarios that also fail on buggy due to the same root cause but maybe different tags/attributes or different protocol formats.
+
+For example:
+- Using a custom protocol with a tag other than img, like `<a href='custom:stuff'>`.
+- Using a custom protocol with uppercase letters (should be case-insensitive? The check uses `toLowerCase()` so it's fine).
+- Using a custom protocol that includes a colon in the value? Actually, the protocol is the part before the first colon.
+- Using a relative link with base URI and `preserveRelativeLinks` false: should be made absolute. The buggy version might incorrectly set to empty if `absUrl` fails? But `absUrl` should succeed for http relative links. So that passes.
+- Using a relative link without base URI: should be removed. That passes both.
+
+We can also test the `preserveRelativeLinks` true scenario with custom protocols. The buggy version would still set the attribute to empty? Wait: In buggy version, `if (!preserveRelativeLinks) attr.setValue(value);` So if `preserveRelativeLinks` is true, it does not set. However, `value` from `absUrl` is empty, so the loop checks empty string and fails. So the attribute is removed. Our fix would use the original value and pass. So that scenario also fails on buggy. So we can add a test with `preserveRelativeLinks(true)` and custom protocols.
+
+Thus, we can create a testcase that uses `preserveRelativeLinks(true)` and a custom protocol, expecting the attribute to be kept.
+
+Also, we can test the `:all` pseudo tag with custom protocols.
+
+But note: The testcase must be runnable in the same environment as the provided triggers. The triggers are JUnit tests in the class `CleanerTest`. We need to generate new test methods that can be added to that class. The path is given as `org/jsoup/safety/CleanerTest.java`. However, we must output the exact path of one of the provided trigger testcases. The provided trigger testcase path is `org/jsoup/safety/CleanerTest.java::handlesCustomProtocols`. Actually, the path is given as "testcase_1_path" in the output. The input says: "Each testcase must have a corresponding path end with .java. The path must be one of the exact file paths of the provided trigger testcases." The provided trigger testcase is from `org/jsoup/safety/CleanerTest.java`. So we can use that path.
+
+But we need to generate multiple testcases? We'll generate as many as needed to cover different behaviors. The minimal number that maximize coverage.
+
+Let's design:
+
+1. Test custom protocol with `preserveRelativeLinks` set to true. This tests that relative links are preserved but custom protocols still allowed. We'll use `<a href='custom:link'>` with a whitelist that allows `a` with href and custom protocol.
+
+2. Test custom protocol with pseudo tag `:all`. We can add attributes for all tags and allow a custom protocol for an attribute on all tags. For example, allow `data-*` attributes? But protocol validation is only for URL attributes. We can use `href` on any tag? Actually, only `a` has href typically. But we can add a custom attribute that is treated as URL? The whitelist only validates protocols for attributes that have protocols defined. So we can add a custom attribute like `data-src` and define protocols for it. This would test that the bug also affects other attributes.
+
+3. Test a mix of relative link and custom protocol: e.g., `<a href='http://example.com'>` (should work) and `<a href='custom:foo'>` (should work). Already covered.
+
+But to minimize, we can combine scenarios into one test method. However, each testcase is a separate method? The instruction says "Each testcase must have a corresponding path end with .java." That suggests each testcase is a whole Java file? But that would be huge. Actually, they likely mean each testcase is a single test method within the same file? The provided trigger testcase is a single test method `handlesCustomProtocols`. So we can output new testcases as separate methods in the same file. But the path would be the same for all. However, the output format expects each testcase to have a path. If we output multiple testcases with the same path, that's allowed? The instruction says "Each testcase must have a corresponding path end with .java. The path must be one of the exact file paths of the provided trigger testcases." It doesn't forbid multiple testcases with the same path. So we can output multiple testcase objects with the same path, each containing a different test method? But they would conflict if we try to add them to the same file. The better interpretation is that each testcase is a complete Java file (the whole test class). But that would duplicate the class. Usually, in such tasks, they provide a single test method as a trigger, and we generate additional test methods to be added to the same test class. I think we can output each testcase as a separate test method, and the path is the same Java file. However, we must ensure that if multiple testcases are added to the same file, they don't conflict (they are independent). We'll assume that we can add multiple test methods to the same file.
+
+Thus, we'll generate two additional testcases (methods) to cover different behaviors:
+
+- Test with `preserveRelativeLinks(true)` and custom protocol.
+- Test with `:all` tag and custom protocol for an attribute.
+
+But wait: The `:all` tag is for attributes, not for protocols? Actually, `addAttributes` supports `:all`. For protocols, we can add protocols for a specific tag, not for `:all`. In the code, `addProtocols` takes a tag name. It can be `:all`? The method `addProtocols` calls `TagName.valueOf(tag)`, so it would create a TagName with value `":all"`. Then in `isSafeAttribute`, when checking protocols, it looks up the tag in the `protocols` map. If we added protocols for `:all`, then `protocols.containsKey(tag)` would be true for that tag? Actually, the tag is the specific tag (e.g., "img"). The `:all` is a special tag for attributes only. In `isSafeAttribute`, if the specific tag is not found, it falls back to `:all` for attributes. But for protocols, it doesn't fall back. So adding protocols for `:all` might not work as expected. Actually, the documentation of `addAttributes` mentions `:all` for attributes, but `addProtocols` does not mention `:all`. So we should not assume.
+
+Thus, maybe we should test a different tag, like `a` with custom protocol.
+
+Also, we should test the scenario where `preserveRelativeLinks` is false, and a custom protocol is used. That is already covered by the original test? The original test does not set `preserveRelativeLinks`. It defaults to false. So it's covered.
+
+We need to test that our fix does not break relative link handling. So we can add a test for relative links with base URI, expecting them to be made absolute. That should pass on both buggy and fixed? But the requirement is that new testcases must fail on buggy. That test would pass on buggy? Possibly buggy version might also handle relative links correctly. So we don't need to include it if it doesn't fail.
+
+We must ensure that every generated testcase fails on the original buggy version. So we need to focus on scenarios where the buggy version incorrectly rejects valid custom protocols.
+
+Thus, we can create:
+
+1. Test with `preserveRelativeLinks(true)` and custom protocol. The buggy version will reject because `absUrl` returns empty and protocol check fails. Our fix will accept.
+
+2. Test with a custom protocol that includes dots or special characters? The protocol string is just the scheme. It should be alphanumeric plus maybe plus, minus, dot? The protocol validation just checks `value.toLowerCase().startsWith(prot)`. So as long as the scheme matches, it's fine.
+
+3. Test with multiple custom protocols added.
+
+We can combine these into one test method to reduce number. Let's design:
+
+- A test that uses `Whitelist.none()`? That doesn't allow any tags, so not relevant.
+
+- A test that uses `Whitelist.simpleText()`? No links.
+
+- A test that uses `Whitelist.basic()` with `a` tag and custom protocol for `href`.
+
+Let's write:
+
+```java
+@Test
+public void handlesCustomProtocolsWithPreserveRelativeLinks() {
+    String html = "<a href='custom:something'>Link</a>";
+    Whitelist whitelist = Whitelist.basic().preserveRelativeLinks(true);
+    // basic does not allow custom protocol by default, so we add
+    whitelist.addProtocols("a", "href", "custom");
+    String result = Jsoup.clean(html, whitelist);
+    // Should keep the attribute
+    assertEquals("<a href=\"custom:something\">Link</a>", result);
+}
+```
+
+But note: `basic()` already adds `addProtocols("a", "href", "ftp", "http", "https", "mailto")`. When we call `addProtocols` again, it adds to the existing set? The `addProtocols` method adds protocols to the existing set for that tag/attribute. So it should add "custom" to the allowed set. That's fine.
+
+Now, the buggy version will drop the href because `absUrl` returns empty and protocol check fails. Our fix will keep it.
+
+Second test: Test with `:all` for attributes? Actually, we can test adding an attribute for all tags and then use a custom protocol? But protocols are per tag. So maybe not.
+
+Alternatively, test with a tag that is not in the basic whitelist but added via `addTags`. For example, adding a custom tag `mytag` with attribute `myattr` that is a URL with custom protocol.
+
+But that requires adding the tag, attribute, and protocol. That's a good test for coverage.
+
+Let's write:
+
+```java
+@Test
+public void handlesCustomProtocolsOnCustomTag() {
+    String html = "<mytag myattr='custom:value'>Text</mytag>";
+    Whitelist whitelist = new Whitelist()
+        .addTags("mytag")
+        .addAttributes("mytag", "myattr")
+        .addProtocols("mytag", "myattr", "custom");
+    String result = Jsoup.clean(html, whitelist);
+    assertEquals("<mytag myattr=\"custom:value\">Text</mytag>", result);
+}
+```
+
+This tests the full flow for a non-standard tag and attribute.
+
+Now, both of these testcases should fail on buggy version (since custom protocol handling is broken) and pass on fixed version.
+
+We'll generate these two additional testcases.
+
+Now, we need to output the fixed Whitelist code and the additional testcases.
+
+But note: The provided buggy function is the entire Whitelist class. We must output the entire fixed class as a single string? The output format expects `fixed_code` as an array of strings, each being a fixed function. Since we have only one function (the Whitelist class), we'll output one string.
+
+Now, we need to be careful with escaping JSON strings. We'll produce a JSON object with `fixed_code` and `additional_testcases`.
+
+Let's construct the fixed Whitelist class. We'll copy the original and replace the `testValidProtocol` method with our fixed version.
+
+Original `testValidProtocol`:
+
+```java
+    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        // try to resolve relative urls to abs, and optionally update the attribute so output html has abs.
+        // rels without a baseuri get removed
+        String value = el.absUrl(attr.getKey());
+        if (!preserveRelativeLinks)
+            attr.setValue(value);
+        
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString() + ":";
+            if (value.toLowerCase().startsWith(prot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+We replace with:
+
+```java
+    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {
+        // try to resolve relative urls to abs, and optionally update the attribute so output html has abs.
+        // rels without a baseuri get removed
+        String value = el.absUrl(attr.getKey());
+        if (value.length() == 0) {
+            // could not resolve, use the original value (could be a custom protocol)
+            value = attr.getValue();
+        } else {
+            // we have an absolute URL
+            if (!preserveRelativeLinks) {
+                attr.setValue(value);
+            }
+        }
+        
+        for (Protocol protocol : protocols) {
+            String prot = protocol.toString() + ":";
+            if (value.toLowerCase().startsWith(prot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+But note: In the case where `value` from `absUrl` is not empty and `preserveRelativeLinks` is true, we do not update the attribute, but we still use the absolute URL for checking. That's correct.
+
+Edge case: What if `attr.getValue()` is empty? That's fine.
+
+Now, we also need to consider that `attr.getValue()` might be null? In jsoup, Attribute's getValue returns empty string if not set. So safe.
+
+Thus, we output the entire Whitelist class with this change.
+
+Now, generate the additional testcases. We'll write them as JUnit test methods.
+
+We must ensure they are valid Java code and can be compiled with the existing imports. The original test likely imports `org.jsoup.Jsoup`, `org.jsoup.safety.Whitelist`, and `org.junit.Test`. We'll assume the same.
+
+We'll output:
+
+1. Test case for preserveRelativeLinks true with custom protocol.
+2. Test case for custom tag and attribute with custom protocol.
+
+We'll also include the exact path: "org/jsoup/safety/CleanerTest.java".
+
+Now, construct the JSON.
+
+Important: We must escape newlines and quotes in the strings. We'll write the code blocks as strings with appropriate escaping.
+
+Let's begin.{
+  "fixed_code": [
+    "/**\n * The cleaner and these whitelists assume that you want to clean a <code>body</code> fragment of HTML (to add user\n * supplied HTML into a templated page), and not to clean a full HTML document. If the latter is the case, either wrap the\n * document HTML around the cleaned body HTML, or create a whitelist that allows <code>html</code> and <code>head</code>\n * elements as appropriate.\n * <p/>\n * If you are going to extend a whitelist, please be very careful. Make sure you understand what attributes may lead to\n * XSS attack vectors. URL attributes are particularly vulnerable and require careful validation. See \n * http://ha.ckers.org/xss.html for some XSS attack examples.\n *\n * @author Jonathan Hedley\n */\npublic class Whitelist {\n    private Set<TagName> tagNames; // tags allowed, lower case. e.g. [p, br, span]\n    private Map<TagName, Set<AttributeKey>> attributes; // tag -> attribute[]. allowed attributes [href] for a tag.\n    private Map<TagName, Map<AttributeKey, AttributeValue>> enforcedAttributes; // always set these attribute values\n    private Map<TagName, Map<AttributeKey, Set<Protocol>>> protocols; // allowed URL protocols for attributes\n    private boolean preserveRelativeLinks; // option to preserve relative links\n\n    /**\n     * This whitelist allows only text nodes: all HTML will be stripped.\n     *\n     * @return whitelist\n     */\n    public static Whitelist none() {\n        return new Whitelist();\n    }\n\n    /**\n     * This whitelist allows only simple text formatting: <code>b, em, i, strong, u</code>. All other HTML (tags and\n     * attributes) will be removed.\n     *\n     * @return whitelist\n     */\n    public static Whitelist simpleText() {\n        return new Whitelist()\n                .addTags(\"b\", \"em\", \"i\", \"strong\", \"u\")\n                ;\n    }\n\n    /**\n     * This whitelist allows a fuller range of text nodes: <code>a, b, blockquote, br, cite, code, dd, dl, dt, em, i, li,\n     * ol, p, pre, q, small, strike, strong, sub, sup, u, ul</code>, and appropriate attributes.\n     * <p/>\n     * Links (<code>a</code> elements) can point to <code>http, https, ftp, mailto</code>, and have an enforced\n     * <code>rel=nofollow</code> attribute.\n     * <p/>\n     * Does not allow images.\n     *\n     * @return whitelist\n     */\n    public static Whitelist basic() {\n        return new Whitelist()\n                .addTags(\n                        \"a\", \"b\", \"blockquote\", \"br\", \"cite\", \"code\", \"dd\", \"dl\", \"dt\", \"em\",\n                        \"i\", \"li\", \"ol\", \"p\", \"pre\", \"q\", \"small\", \"strike\", \"strong\", \"sub\",\n                        \"sup\", \"u\", \"ul\")\n\n                .addAttributes(\"a\", \"href\")\n                .addAttributes(\"blockquote\", \"cite\")\n                .addAttributes(\"q\", \"cite\")\n\n                .addProtocols(\"a\", \"href\", \"ftp\", \"http\", \"https\", \"mailto\")\n                .addProtocols(\"blockquote\", \"cite\", \"http\", \"https\")\n                .addProtocols(\"cite\", \"cite\", \"http\", \"https\")\n\n                .addEnforcedAttribute(\"a\", \"rel\", \"nofollow\")\n                ;\n\n    }\n\n    /**\n     * This whitelist allows the same text tags as {@link #basic}, and also allows <code>img</code> tags, with appropriate\n     * attributes, with <code>src</code> pointing to <code>http</code> or <code>https</code>.\n     *\n     * @return whitelist\n     */\n    public static Whitelist basicWithImages() {\n        return basic()\n                .addTags(\"img\")\n                .addAttributes(\"img\", \"align\", \"alt\", \"height\", \"src\", \"title\", \"width\")\n                .addProtocols(\"img\", \"src\", \"http\", \"https\")\n                ;\n    }\n\n    /**\n     * This whitelist allows a full range of text and structural body HTML: <code>a, b, blockquote, br, caption, cite,\n     * code, col, colgroup, dd, dl, dt, em, h1, h2, h3, h4, h5, h6, i, img, li, ol, p, pre, q, small, strike, strong, sub,\n     * sup, table, tbody, td, tfoot, th, thead, tr, u, ul</code>\n     * <p/>\n     * Links do not have an enforced <code>rel=nofollow</code> attribute, but you can add that if desired.\n     *\n     * @return whitelist\n     */\n    public static Whitelist relaxed() {\n        return new Whitelist()\n                .addTags(\n                        \"a\", \"b\", \"blockquote\", \"br\", \"caption\", \"cite\", \"code\", \"col\",\n                        \"colgroup\", \"dd\", \"div\", \"dl\", \"dt\", \"em\", \"h1\", \"h2\", \"h3\", \"h4\", \"h5\", \"h6\",\n                        \"i\", \"img\", \"li\", \"ol\", \"p\", \"pre\", \"q\", \"small\", \"strike\", \"strong\",\n                        \"sub\", \"sup\", \"table\", \"tbody\", \"td\", \"tfoot\", \"th\", \"thead\", \"tr\", \"u\",\n                        \"ul\")\n\n                .addAttributes(\"a\", \"href\", \"title\")\n                .addAttributes(\"blockquote\", \"cite\")\n                .addAttributes(\"col\", \"span\", \"width\")\n                .addAttributes(\"colgroup\", \"span\", \"width\")\n                .addAttributes(\"img\", \"align\", \"alt\", \"height\", \"src\", \"title\", \"width\")\n                .addAttributes(\"ol\", \"start\", \"type\")\n                .addAttributes(\"q\", \"cite\")\n                .addAttributes(\"table\", \"summary\", \"width\")\n                .addAttributes(\"td\", \"abbr\", \"axis\", \"colspan\", \"rowspan\", \"width\")\n                .addAttributes(\n                        \"th\", \"abbr\", \"axis\", \"colspan\", \"rowspan\", \"scope\",\n                        \"width\")\n                .addAttributes(\"ul\", \"type\")\n\n                .addProtocols(\"a\", \"href\", \"ftp\", \"http\", \"https\", \"mailto\")\n                .addProtocols(\"blockquote\", \"cite\", \"http\", \"https\")\n                .addProtocols(\"img\", \"src\", \"http\", \"https\")\n                .addProtocols(\"q\", \"cite\", \"http\", \"https\")\n                ;\n    }\n\n    /**\n     * Create a new, empty whitelist. Generally it will be better to start with a default prepared whitelist instead.\n     *\n     * @see #basic()\n     * @see #basicWithImages()\n     * @see #simpleText()\n     * @see #relaxed()\n     */\n    public Whitelist() {\n        tagNames = new HashSet<TagName>();\n        attributes = new HashMap<TagName, Set<AttributeKey>>();\n        enforcedAttributes = new HashMap<TagName, Map<AttributeKey, AttributeValue>>();\n        protocols = new HashMap<TagName, Map<AttributeKey, Set<Protocol>>>();\n        preserveRelativeLinks = false;\n    }\n\n    /**\n     * Add a list of allowed elements to a whitelist. (If a tag is not allowed, it will be removed from the HTML.)\n     *\n     * @param tags tag names to allow\n     * @return this (for chaining)\n     */\n    public Whitelist addTags(String... tags) {\n        Validate.notNull(tags);\n\n        for (String tagName : tags) {\n            Validate.notEmpty(tagName);\n            tagNames.add(TagName.valueOf(tagName));\n        }\n        return this;\n    }\n\n    /**\n     * Add a list of allowed attributes to a tag. (If an attribute is not allowed on an element, it will be removed.)\n     * <p/>\n     * To make an attribute valid for <b>all tags</b>, use the pseudo tag <code>:all</code>, e.g.\n     * <code>addAttributes(\":all\", \"class\")</code>.\n     *\n     * @param tag  The tag the attributes are for\n     * @param keys List of valid attributes for the tag\n     * @return this (for chaining)\n     */\n    public Whitelist addAttributes(String tag, String... keys) {\n        Validate.notEmpty(tag);\n        Validate.notNull(keys);\n\n        TagName tagName = TagName.valueOf(tag);\n        Set<AttributeKey> attributeSet = new HashSet<AttributeKey>();\n        for (String key : keys) {\n            Validate.notEmpty(key);\n            attributeSet.add(AttributeKey.valueOf(key));\n        }\n        if (attributes.containsKey(tagName)) {\n            Set<AttributeKey> currentSet = attributes.get(tagName);\n            currentSet.addAll(attributeSet);\n        } else {\n            attributes.put(tagName, attributeSet);\n        }\n        return this;\n    }\n\n    /**\n     * Add an enforced attribute to a tag. An enforced attribute will always be added to the element. If the element\n     * already has the attribute set, it will be overridden.\n     * <p/>\n     * E.g.: <code>addEnforcedAttribute(\"a\", \"rel\", \"nofollow\")</code> will make all <code>a</code> tags output as\n     * <code>&lt;a href=\"...\" rel=\"nofollow\"></code>\n     *\n     * @param tag   The tag the enforced attribute is for\n     * @param key   The attribute key\n     * @param value The enforced attribute value\n     * @return this (for chaining)\n     */\n    public Whitelist addEnforcedAttribute(String tag, String key, String value) {\n        Validate.notEmpty(tag);\n        Validate.notEmpty(key);\n        Validate.notEmpty(value);\n\n        TagName tagName = TagName.valueOf(tag);\n        AttributeKey attrKey = AttributeKey.valueOf(key);\n        AttributeValue attrVal = AttributeValue.valueOf(value);\n\n        if (enforcedAttributes.containsKey(tagName)) {\n            enforcedAttributes.get(tagName).put(attrKey, attrVal);\n        } else {\n            Map<AttributeKey, AttributeValue> attrMap = new HashMap<AttributeKey, AttributeValue>();\n            attrMap.put(attrKey, attrVal);\n            enforcedAttributes.put(tagName, attrMap);\n        }\n        return this;\n    }\n\n    /**\n     * Configure this Whitelist to preserve relative links in an element's URL attribute, or convert them to absolute\n     * links. By default, this is <b>false</b>: URLs will be  made absolute (e.g. start with an allowed protocol, like\n     * e.g. {@code http://}.\n     * <p />\n     * Note that when handling relative links, the input document must have an appropriate {@code base URI} set when\n     * parsing, so that the link's protocol can be confirmed. Regardless of the setting of the {@code preserve relative\n     * links} option, the link must be resolvable against the base URI to an allowed protocol; otherwise the attribute\n     * will be removed.\n     *\n     * @param preserve {@code true} to allow relative links, {@code false} (default) to deny\n     * @return this Whitelist, for chaining.\n     * @see #addProtocols\n     */\n    public Whitelist preserveRelativeLinks(boolean preserve) {\n        preserveRelativeLinks = preserve;\n        return this;\n    }\n\n    /**\n     * Add allowed URL protocols for an element's URL attribute. This restricts the possible values of the attribute to\n     * URLs with the defined protocol.\n     * <p/>\n     * E.g.: <code>addProtocols(\"a\", \"href\", \"ftp\", \"http\", \"https\")</code>\n     *\n     * @param tag       Tag the URL protocol is for\n     * @param key       Attribute key\n     * @param protocols List of valid protocols\n     * @return this, for chaining\n     */\n    public Whitelist addProtocols(String tag, String key, String... protocols) {\n        Validate.notEmpty(tag);\n        Validate.notEmpty(key);\n        Validate.notNull(protocols);\n\n        TagName tagName = TagName.valueOf(tag);\n        AttributeKey attrKey = AttributeKey.valueOf(key);\n        Map<AttributeKey, Set<Protocol>> attrMap;\n        Set<Protocol> protSet;\n\n        if (this.protocols.containsKey(tagName)) {\n            attrMap = this.protocols.get(tagName);\n        } else {\n            attrMap = new HashMap<AttributeKey, Set<Protocol>>();\n            this.protocols.put(tagName, attrMap);\n        }\n        if (attrMap.containsKey(attrKey)) {\n            protSet = attrMap.get(attrKey);\n        } else {\n            protSet = new HashSet<Protocol>();\n            attrMap.put(attrKey, protSet);\n        }\n        for (String protocol : protocols) {\n            Validate.notEmpty(protocol);\n            Protocol prot = Protocol.valueOf(protocol);\n            protSet.add(prot);\n        }\n        return this;\n    }\n\n    boolean isSafeTag(String tag) {\n        return tagNames.contains(TagName.valueOf(tag));\n    }\n\n    boolean isSafeAttribute(String tagName, Element el, Attribute attr) {\n        TagName tag = TagName.valueOf(tagName);\n        AttributeKey key = AttributeKey.valueOf(attr.getKey());\n\n        if (attributes.containsKey(tag)) {\n            if (attributes.get(tag).contains(key)) {\n                if (protocols.containsKey(tag)) {\n                    Map<AttributeKey, Set<Protocol>> attrProts = protocols.get(tag);\n                    // ok if not defined protocol; otherwise test\n                    return !attrProts.containsKey(key) || testValidProtocol(el, attr, attrProts.get(key));\n                } else { // attribute found, no protocols defined, so OK\n                    return true;\n                }\n            }\n        } else { // no attributes defined for tag, try :all tag\n            return !tagName.equals(\":all\") && isSafeAttribute(\":all\", el, attr);\n        }\n        return false;\n    }\n\n    private boolean testValidProtocol(Element el, Attribute attr, Set<Protocol> protocols) {\n        // try to resolve relative urls to abs, and optionally update the attribute so output html has abs.\n        // rels without a baseuri get removed\n        String value = el.absUrl(attr.getKey());\n        if (value.length() == 0) {\n            // could not resolve, use the original value (could be a custom protocol)\n            value = attr.getValue();\n        } else {\n            // we have an absolute URL\n            if (!preserveRelativeLinks) {\n                attr.setValue(value);\n            }\n        }\n        \n        for (Protocol protocol : protocols) {\n            String prot = protocol.toString() + \":\";\n            if (value.toLowerCase().startsWith(prot)) {\n                return true;\n            }\n        }\n        return false;\n    }\n\n    Attributes getEnforcedAttributes(String tagName) {\n        Attributes attrs = new Attributes();\n        TagName tag = TagName.valueOf(tagName);\n        if (enforcedAttributes.containsKey(tag)) {\n            Map<AttributeKey, AttributeValue> keyVals = enforcedAttributes.get(tag);\n            for (Map.Entry<AttributeKey, AttributeValue> entry : keyVals.entrySet()) {\n                attrs.put(entry.getKey().toString(), entry.getValue().toString());\n            }\n        }\n        return attrs;\n    }\n    \n    // named types for config. All just hold strings, but here for my sanity.\n\n    static class TagName extends TypedValue {\n        TagName(String value) {\n            super(value);\n        }\n\n        static TagName valueOf(String value) {\n            return new TagName(value);\n        }\n    }\n\n    static class AttributeKey extends TypedValue {\n        AttributeKey(String value) {\n            super(value);\n        }\n\n        static AttributeKey valueOf(String value) {\n            return new AttributeKey(value);\n        }\n    }\n\n    static class AttributeValue extends TypedValue {\n        AttributeValue(String value) {\n            super(value);\n        }\n\n        static AttributeValue valueOf(String value) {\n            return new AttributeValue(value);\n        }\n    }\n\n    static class Protocol extends TypedValue {\n        Protocol(String value) {\n            super(value);\n        }\n\n        static Protocol valueOf(String value) {\n            return new Protocol(value);\n        }\n    }\n\n    abstract static class TypedValue {\n        private String value;\n\n        TypedValue(String value) {\n            Validate.notNull(value);\n            this.value = value;\n        }\n\n        @Override\n        public int hashCode() {\n            final int prime = 31;\n            int result = 1;\n            result = prime * result + ((value == null) ? 0 : value.hashCode());\n            return result;\n        }\n\n        @Override\n        public boolean equals(Object obj) {\n            if (this == obj) return true;\n            if (obj == null) return false;\n            if (getClass() != obj.getClass()) return false;\n            TypedValue other = (TypedValue) obj;\n            if (value == null) {\n                if (other.value != null) return false;\n            } else if (!value.equals(other.value)) return false;\n            return true;\n        }\n\n        @Override\n        public String toString() {\n            return value;\n        }\n    }\n}"
+  ],
+  "additional_testcases": [
+    {
+      "path": "org/jsoup/safety/CleanerTest.java",
+      "testcase": "@Test\npublic void handlesCustomProtocolsWithPreserveRelativeLinks() {\n    String html = \"<a href='custom:something'>Link</a>\";\n    Whitelist whitelist = Whitelist.basic().preserveRelativeLinks(true);\n    whitelist.addProtocols(\"a\", \"href\", \"custom\");\n    String result = Jsoup.clean(html, whitelist);\n    assertEquals(\"<a href=\\\"custom:something\\\">Link</a>\", result);\n}"
+    },
+    {
+      "path": "org/jsoup/safety/CleanerTest.java",
+      "testcase": "@Test\npublic void handlesCustomProtocolsOnCustomTag() {\n    String html = \"<mytag myattr='custom:value'>Text</mytag>\";\n    Whitelist whitelist = new Whitelist()\n        .addTags(\"mytag\")\n        .addAttributes(\"mytag\", \"myattr\")\n        .addProtocols(\"mytag\", \"myattr\", \"custom\");\n    String result = Jsoup.clean(html, whitelist);\n    assertEquals(\"<mytag myattr=\\\"custom:value\\\">Text</mytag>\", result);\n}"
+    }
+  ]
+}

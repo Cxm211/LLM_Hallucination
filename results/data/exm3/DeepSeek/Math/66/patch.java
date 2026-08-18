@@ -1,0 +1,8 @@
+    private static final double GOLDEN_SECTION = 0.5 * (3 - Math.sqrt(5));
+
+    public BrentOptimizer() {
+        setMaxEvaluations(Integer.MAX_VALUE);
+        setMaximalIterationCount(100);
+        setAbsoluteAccuracy(1E-10);
+        setRelativeAccuracy(1.0e-14);
+    }

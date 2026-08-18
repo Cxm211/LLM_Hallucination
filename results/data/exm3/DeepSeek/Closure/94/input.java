@@ -1,0 +1,67 @@
+// buggy function
+  static boolean isValidDefineValue(Node val, Set<String> defines) {
+    switch (val.getType()) {
+      case Token.STRING:
+      case Token.NUMBER:
+      case Token.TRUE:
+      case Token.FALSE:
+        return true;
+
+      // Binary operators are only valid if both children are valid.
+      case Token.BITAND:
+      case Token.BITNOT:
+      case Token.BITOR:
+      case Token.BITXOR:
+
+      // Uniary operators are valid if the child is valid.
+      case Token.NOT:
+      case Token.NEG:
+        return isValidDefineValue(val.getFirstChild(), defines);
+
+      // Names are valid if and only if they are defines themselves.
+      case Token.NAME:
+      case Token.GETPROP:
+        if (val.isQualifiedName()) {
+          return defines.contains(val.getQualifiedName());
+        }
+    }
+    return false;
+  }
+
+// trigger testcase
+// com/google/javascript/jscomp/NodeUtilTest.java::testValidDefine
+public void testValidDefine() {
+    assertTrue(testValidDefineValue("1"));
+    assertTrue(testValidDefineValue("-3"));
+    assertTrue(testValidDefineValue("true"));
+    assertTrue(testValidDefineValue("false"));
+    assertTrue(testValidDefineValue("'foo'"));
+    
+    assertFalse(testValidDefineValue("x"));
+    assertFalse(testValidDefineValue("null"));
+    assertFalse(testValidDefineValue("undefined"));
+    assertFalse(testValidDefineValue("NaN"));
+    
+    assertTrue(testValidDefineValue("!true"));
+    assertTrue(testValidDefineValue("-true"));
+    assertTrue(testValidDefineValue("1 & 8"));
+    assertTrue(testValidDefineValue("1 + 8"));
+    assertTrue(testValidDefineValue("'a' + 'b'"));
+
+    assertFalse(testValidDefineValue("1 & foo"));
+  }
+
+// com/google/javascript/jscomp/ProcessDefinesTest.java::testOverridingString1
+public void testOverridingString1() {
+    test(
+        "/** @define {string} */ var DEF_OVERRIDE_STRING = 'x' + 'y';",
+        "var DEF_OVERRIDE_STRING=\"x\" + \"y\"");
+  }
+
+// com/google/javascript/jscomp/ProcessDefinesTest.java::testOverridingString3
+public void testOverridingString3() {
+    overrides.put("DEF_OVERRIDE_STRING", Node.newString("foo"));
+    test(
+        "/** @define {string} */ var DEF_OVERRIDE_STRING = 'x' + 'y';",
+        "var DEF_OVERRIDE_STRING=\"foo\"");
+  }

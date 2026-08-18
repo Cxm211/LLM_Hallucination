@@ -1,0 +1,1 @@
+    Node[] children = node.children().toArray(new Node[0]);

@@ -1,0 +1,373 @@
+// buggy function
+  private OriginalMapping getOriginalMappingForEntry(Entry entry) {
+    if (entry.getSourceFileId() == UNMAPPED) {
+      return null;
+    } else {
+      // Adjust the line/column here to be start at 1.
+      Builder x = OriginalMapping.newBuilder()
+        .setOriginalFile(sources[entry.getSourceFileId()])
+        .setLineNumber(entry.getSourceLine())
+        .setColumnPosition(entry.getSourceColumn());
+      if (entry.getNameId() != UNMAPPED) {
+        x.setIdentifier(names[entry.getNameId()]);
+      }
+      return x.build();
+    }
+  }
+
+  public void addMapping(
+      Node node,
+      FilePosition outputStartPosition,
+      FilePosition outputEndPosition) {
+    String sourceFile = node.getSourceFileName();
+
+    // If the node does not have an associated source file or
+    // its line number is -1, then the node does not have sufficient
+    // information for a mapping to be useful.
+    if (sourceFile == null || node.getLineno() < 0) {
+      return;
+    }
+
+    sourceFile = fixupSourceLocation(sourceFile);
+
+    String originalName = (String) node.getProp(Node.ORIGINALNAME_PROP);
+
+    // Strangely, Rhino source lines are one based but columns are
+    // zero based.
+    // We don't change this for the v1 or v2 source maps but for
+    // v3 we make them both 0 based.
+
+    generator.addMapping(
+        sourceFile, originalName,
+        new FilePosition(node.getLineno(), node.getCharno()),
+        outputStartPosition, outputEndPosition);
+  }
+
+// trigger testcase
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testBasicMapping1
+public void testBasicMapping1() throws Exception {
+    compileAndCheck("function __BASIC__() { }");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testBasicMapping2
+public void testBasicMapping2() throws Exception {
+    compileAndCheck("function __BASIC__(__PARAM1__) {}");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testBasicMappingGoldenOutput
+public void testBasicMappingGoldenOutput() throws Exception {
+    // Empty source map test
+    checkSourceMap("function __BASIC__() { }",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,QAASA,UAAS,EAAG;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"__BASIC__\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testGoldenOutput0a
+public void testGoldenOutput0a() throws Exception {
+    // Empty source map test
+    checkSourceMap("a;",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"a\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testGoldenOutput1
+public void testGoldenOutput1() throws Exception {
+    detailLevel = SourceMap.DetailLevel.ALL;
+
+    checkSourceMap("function f(foo, bar) { foo = foo + bar + 2; return foo; }",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,QAASA,EAAC,CAACC,GAAD,CAAMC,GAAN," +
+                       "CAAW,CAAED,GAAA,CAAMA,GAAN,CAAYC,GAAZ,CAAkB,CAAG," +
+                       "OAAOD,IAA9B;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"f\",\"foo\",\"bar\"]\n" +
+                   "}\n");
+
+    detailLevel = SourceMap.DetailLevel.SYMBOLS;
+
+    checkSourceMap("function f(foo, bar) { foo = foo + bar + 2; return foo; }",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,QAASA,EAATA,CAAWC,GAAXD,CAAgBE," +
+                       "GAAhBF,EAAuBC,GAAvBD,CAA6BC,GAA7BD,CAAmCE,GAAnCF," +
+                       "SAAmDC,IAAnDD;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"f\",\"foo\",\"bar\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testGoldenOutput2
+public void testGoldenOutput2() throws Exception {
+    checkSourceMap("function f(foo, bar) {\r\n\n\n\nfoo = foo + bar + foo;" +
+                   "\nreturn foo;\n}",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,QAASA,EAAC,CAACC,GAAD,CAAMC,GAAN," +
+                       "CAAW,CAIrBD,GAAA,CAAMA,GAAN,CAAYC,GAAZ,CAAkBD," +
+                       "GAClB,OAAOA,IALc;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"f\",\"foo\",\"bar\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testGoldenOutput3
+public void testGoldenOutput3() throws Exception {
+    checkSourceMap("c:\\myfile.js",
+                   "foo;",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA;\",\n" +
+                   "\"sources\":[\"c:\\\\myfile.js\"],\n" +
+                   "\"names\":[\"foo\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testGoldenOutput4
+public void testGoldenOutput4() throws Exception {
+    checkSourceMap("c:\\myfile.js",
+                   "foo;   boo;   goo;",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,GAAOC,IAAOC;\",\n" +
+                   "\"sources\":[\"c:\\\\myfile.js\"],\n" +
+                   "\"names\":[\"foo\",\"boo\",\"goo\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testGoldenOutput5
+public void testGoldenOutput5() throws Exception {
+    detailLevel = SourceMap.DetailLevel.ALL;
+
+    checkSourceMap(
+        "c:\\myfile.js",
+        "/** @preserve\n" +
+        " * this is a test.\n" +
+        " */\n" +
+        "var foo=a + 'this is a really long line that will force the"
+        + " mapping to span multiple lines 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + "' + c + d + e;",
+
+        "{\n" +
+        "\"version\":3,\n" +
+        "\"file\":\"testcode\",\n" +
+        "\"lineCount\":6,\n" +
+        "\"mappings\":\"A;;;;AAGA,IAAIA,IAAIC,CAAJD,CAAQ,mxCAARA;AAA8xCE," +
+            "CAA9xCF,CAAkyCG,CAAlyCH,CAAsyCI;\",\n" +
+        "\"sources\":[\"c:\\\\myfile.js\"],\n" +
+        "\"names\":[\"foo\",\"a\",\"c\",\"d\",\"e\"]\n" +
+        "}\n");
+
+    detailLevel = SourceMap.DetailLevel.SYMBOLS;
+
+    checkSourceMap("c:\\myfile.js",
+        "/** @preserve\n" +
+        " * this is a test.\n" +
+        " */\n" +
+        "var foo=a + 'this is a really long line that will force the"
+        + " mapping to span multiple lines 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + " 123456789 123456789 123456789 123456789 123456789"
+        + "' + c + d + e;",
+
+        "{\n" +
+        "\"version\":3,\n" +
+        "\"file\":\"testcode\",\n" +
+        "\"lineCount\":6,\n" +
+        "\"mappings\":\"A;;;;IAGIA,IAAIC,CAAJD;AAA8xCE,CAA9xCF,CAAkyCG," +
+            "CAAlyCH,CAAsyCI;\",\n" +
+        "\"sources\":[\"c:\\\\myfile.js\"],\n" +
+        "\"names\":[\"foo\",\"a\",\"c\",\"d\",\"e\"]\n" +
+        "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testLiteralMappings
+public void testLiteralMappings() throws Exception {
+    compileAndCheck("function __BASIC__(__PARAM1__, __PARAM2__) { " +
+                    "var __VAR__ = '__STR__'; }");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testLiteralMappingsGoldenOutput
+public void testLiteralMappingsGoldenOutput() throws Exception {
+    // Empty source map test
+    checkSourceMap("function __BASIC__(__PARAM1__, __PARAM2__) { " +
+                   "var __VAR__ = '__STR__'; }",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,QAASA,UAAS,CAACC,UAAD,CAAaC,UAAb," +
+                       "CAAyB,CAAE,IAAIC,QAAU,SAAhB;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"__BASIC__\",\"__PARAM1__\",\"__PARAM2__\"," +
+                       "\"__VAR__\"]\n" +
+                   "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testMultiFunctionMapping
+public void testMultiFunctionMapping() throws Exception {
+    compileAndCheck("function __BASIC__(__PARAM1__, __PARAM2__) {\n" +
+                    "var __VAR__ = '__STR__';\n" +
+                    "var __ANO__ = \"__STR2__\";\n" +
+                    "}\n" +
+
+                    "function __BASIC2__(__PARAM3__, __PARAM4__) {\n" +
+                    "var __VAR2__ = '__STR2__';\n" +
+                    "var __ANO2__ = \"__STR3__\";\n" +
+                    "}\n");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testMultilineMapping
+public void testMultilineMapping() throws Exception {
+    compileAndCheck("function __BASIC__(__PARAM1__, __PARAM2__) {\n" +
+                    "var __VAR__ = '__STR__';\n" +
+                    "var __ANO__ = \"__STR2__\";\n" +
+                    "}");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testMultilineMapping2
+public void testMultilineMapping2() throws Exception {
+    compileAndCheck("function __BASIC__(__PARAM1__, __PARAM2__) {\n" +
+                    "var __VAR__ = 1;\n" +
+                    "var __ANO__ = 2;\n" +
+                    "}");
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testParseSourceMetaMap
+public void testParseSourceMetaMap() throws Exception {
+    final String INPUT1 = "file1";
+    final String INPUT2 = "file2";
+    LinkedHashMap<String, String> inputs = Maps.newLinkedHashMap();
+    inputs.put(INPUT1, "var __FOO__ = 1;");
+    inputs.put(INPUT2, "var __BAR__ = 2;");
+    RunResult result1 = compile(inputs.get(INPUT1), INPUT1);
+    RunResult result2 = compile(inputs.get(INPUT2), INPUT2);
+
+    final String MAP1 = "map1";
+    final String MAP2 = "map2";
+    final LinkedHashMap<String, String> maps = Maps.newLinkedHashMap();
+    maps.put(MAP1, result1.sourceMapFileContent);
+    maps.put(MAP2, result2.sourceMapFileContent);
+
+    List<SourceMapSection> sections = Lists.newArrayList();
+
+    StringBuilder output = new StringBuilder();
+    FilePosition offset = appendAndCount(output, result1.generatedSource);
+    sections.add(SourceMapSection.forURL(MAP1, 0, 0));
+    output.append(result2.generatedSource);
+    sections.add(
+        SourceMapSection.forURL(MAP2, offset.getLine(), offset.getColumn()));
+
+    SourceMapGeneratorV3 generator = new SourceMapGeneratorV3();
+    StringBuilder mapContents = new StringBuilder();
+    generator.appendIndexMapTo(mapContents, "out.js", sections);
+
+    check(inputs, output.toString(), mapContents.toString(),
+      new SourceMapSupplier() {
+        @Override
+        public String getSourceMap(String url){
+          return maps.get(url);
+      }});
+  }
+
+// com/google/debugging/sourcemap/SourceMapGeneratorV3Test.java::testSourceMapMerging
+public void testSourceMapMerging() throws Exception {
+    final String INPUT1 = "file1";
+    final String INPUT2 = "file2";
+    LinkedHashMap<String, String> inputs = Maps.newLinkedHashMap();
+    inputs.put(INPUT1, "var __FOO__ = 1;");
+    inputs.put(INPUT2, "var __BAR__ = 2;");
+    RunResult result1 = compile(inputs.get(INPUT1), INPUT1);
+    RunResult result2 = compile(inputs.get(INPUT2), INPUT2);
+
+    StringBuilder output = new StringBuilder();
+    FilePosition offset = appendAndCount(output, result1.generatedSource);
+    output.append(result2.generatedSource);
+
+    SourceMapGeneratorV3 generator = new SourceMapGeneratorV3();
+
+    generator.mergeMapSection(0, 0, result1.sourceMapFileContent);
+    generator.mergeMapSection(offset.getLine(), offset.getColumn(),
+        result2.sourceMapFileContent);
+
+    StringBuilder mapContents = new StringBuilder();
+    generator.appendTo(mapContents, "out.js");
+
+    check(inputs, output.toString(), mapContents.toString());
+  }

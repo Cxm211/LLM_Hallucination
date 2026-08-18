@@ -1,0 +1,1 @@
+    if ("prototype".equals(name)) {

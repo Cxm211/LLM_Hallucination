@@ -1,0 +1,9 @@
+        usage = "An output wrapper for a javascript module (optional). "
+        + "The format is <name>:<wrapper>. The module name must correspond "
+        + "with a module specified using --module. The wrapper must "
+        + "contain %s as the code placeholder"
+    private List<String> module_wrapper = Lists.newArrayList();
+
+      public String getDefaultMetaVariable() {
+        return null;
+      }

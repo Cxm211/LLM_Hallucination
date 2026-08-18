@@ -1,0 +1,556 @@
+We are given a buggy code and a list of testcases. The task is to analyze the buggy functions, determine which testcases actually trigger the bug, and produce a minimal fix.
+
+First, let's understand the buggy code. There are several functions provided:
+
+1. `canPropertyBeDefined(JSType type, String propertyName)` - appears to be a method in some class (likely ObjectType or JSType). It checks if property can be defined on a type by iterating over alternates from `typesIndexedByProperty`. It always returns true if it finds a non-empty greatest subtype. The issue: it doesn't check if the alternate is a "bookkeeping" type. But the comment says "make sure it's not a type used for internal bookkeeping" but it just returns true without that check. This might be a bug.
+
+However, the testcases provided are many, but only some are likely to trigger this bug. The bug seems to be about property definition and maybe subtyping. Also there is `RecordType` constructor and `getGreatestSubtypeHelper` and `build` method.
+
+But the user said "Source: The complete functions where an error occurs." and gave several functions. Possibly the bug is in one of these functions, and we need to fix them. The testcases are from various test classes.
+
+We need to find which testcases actually expose the bug. To do that, we must identify the bug. Let's examine the functions.
+
+Function `canPropertyBeDefined`:
+```java
+public boolean canPropertyBeDefined(JSType type, String propertyName) {
+    if (typesIndexedByProperty.containsKey(propertyName)) {
+      for (JSType alt :
+               typesIndexedByProperty.get(propertyName).getAlternates()) {
+        JSType greatestSubtype = alt.getGreatestSubtype(type);
+        if (!greatestSubtype.isEmptyType()) {
+          // We've found a type with this property. Now we just have to make
+          // sure it's not a type used for internal bookkeeping.
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+```
+There is a comment: "Now we just have to make sure it's not a type used for internal bookkeeping." But the code just returns true. That indicates a missing check. Possibly it should check if the `alt` is not a bookkeeping type (e.g., `NO_TYPE`, `NO_OBJECT_TYPE`, `UNKNOWN_TYPE`? Or maybe the `alt` itself should not be such). Alternatively, maybe the loop should continue if the type is bookkeeping. This could cause false positives, allowing property definitions on types that shouldn't have them.
+
+But also the `RecordType` constructor calls `defineDeclaredProperty` which eventually calls `registry.registerPropertyOnType`. The `defineDeclaredProperty` is also provided. And `getGreatestSubtypeHelper` seems to have a bug? Let's examine.
+
+The `getGreatestSubtypeHelper` method in RecordType:
+```java
+JSType getGreatestSubtypeHelper(JSType that) {
+    if (that.isRecordType()) {
+      RecordType thatRecord = that.toMaybeRecordType();
+      RecordTypeBuilder builder = new RecordTypeBuilder(registry);
+
+      // The greatest subtype consists of those *unique* properties of both
+      // record types. If any property conflicts, then the NO_TYPE type
+      // is returned.
+      for (String property : properties.keySet()) {
+        if (thatRecord.hasProperty(property) &&
+            !thatRecord.getPropertyType(property).isEquivalentTo(
+                getPropertyType(property))) {
+          return registry.getNativeObjectType(JSTypeNative.NO_TYPE);
+        }
+
+        builder.addProperty(property, getPropertyType(property),
+            getPropertyNode(property));
+      }
+
+      for (String property : thatRecord.properties.keySet()) {
+        if (!hasProperty(property)) {
+          builder.addProperty(property, thatRecord.getPropertyType(property),
+              thatRecord.getPropertyNode(property));
+        }
+      }
+
+      return builder.build();
+    }
+    ...
+}
+```
+This looks mostly correct. However, note that `builder.addProperty` will call `defineDeclaredProperty` ultimately, which registers property on type. But the builder's `addProperty` might call `defineDeclaredProperty` that calls `registerPropertyOnType`. That could cause issues? But the bug might be in the `RecordType` constructor, where after defining properties, it freezes the record type (`isFrozen = true`). But the builder's `addProperty` (or `defineDeclaredProperty`) might modify the frozen record? Actually the builder is separate and creates a new RecordType. So that should be fine.
+
+The `build` method:
+```java
+public JSType build() {
+     // If we have an empty record, simply return the object type.
+    if (isEmpty) {
+       return registry.getNativeObjectType(JSTypeNative.OBJECT_TYPE);
+    }
+
+    return new RecordType(
+        registry, Collections.unmodifiableMap(properties));
+  }
+```
+This seems fine.
+
+Now, the bug may be in `canPropertyBeDefined`. It doesn't check for bookkeeping types. That could cause issues in tests that involve defining properties on types that shouldn't have them? Possibly the test `testGetAndSetJSDocInfoWithNamedType` or `testGetAndSetJSDocInfoWithObjectTypes` or others. But we need to see which tests fail due to this bug.
+
+But the user also provided many test methods. We need to run through each test mentally and see if any would expose the bug.
+
+Alternatively, maybe the bug is in `getGreatestSubtypeHelper` for record types: it returns `NO_TYPE` when property types are not equivalent, but maybe it should return `NO_OBJECT_TYPE`? Or maybe the check `!thatRecord.getPropertyType(property).isEquivalentTo(getPropertyType(property))` is too strict? It returns `NO_TYPE` if any property type differs, which is correct for greatest subtype (no common subtype). But maybe that's not the bug.
+
+Another possibility: in `getGreatestSubtypeHelper` when dealing with non-record types, there is a loop:
+```java
+      for (Map.Entry<String, JSType> entry : properties.entrySet()) {
+        String propName = entry.getKey();
+        JSType propType = entry.getValue();
+        UnionTypeBuilder builder = new UnionTypeBuilder(registry);
+        for (ObjectType alt :
+                 registry.getEachReferenceTypeWithProperty(propName)) {
+          JSType altPropType = alt.getPropertyType(propName);
+          if (altPropType != null && !alt.isEquivalentTo(this) &&
+              alt.isSubtype(that) &&
+              (propType.isUnknownType() || altPropType.isUnknownType() ||
+                  altPropType.isEquivalentTo(propType))) {
+            builder.addAlternate(alt);
+          }
+        }
+        greatestSubtype = greatestSubtype.getLeastSupertype(builder.build());
+      }
+```
+This loops over properties and for each property, gets all reference types that have that property, and if they satisfy conditions, adds them to a union builder. Then takes the least supertype of the union with the previous `greatestSubtype`. This might be problematic: it starts with `NO_OBJECT_TYPE` as greatestSubtype, then for each property, it computes the least supertype of current and the new union. That seems to compute the intersection of unions? Actually, to get the greatest subtype that has all properties, you need intersection of the sets of types that have each property. But here it's using `getLeastSupertype` which is union-like, not intersection. That would compute the set of types that have any of the properties? That seems wrong.
+
+Let's think: The greatest subtype of a record type `R` and some other type `that` (which is not a record) should be the type that is a subtype of both. For record type `R`, we require that the resulting type has all properties of `R` with compatible types. In the non-record case, the algorithm attempts to find types that have each property. For each property `p`, it computes the union of all types that have property `p` with compatible type and are subtypes of `that`. Then it takes the least supertype (i.e., union) of those unions? Actually `greatestSubtype = greatestSubtype.getLeastSupertype(builder.build())`. Initially `greatestSubtype = NO_OBJECT_TYPE`. For the first property, `greatestSubtype` becomes `NO_OBJECT_TYPE.getLeastSupertype(union1) = union1`. For the second property, `greatestSubtype` becomes `union1.getLeastSupertype(union2)`. That is the union of `union1` and `union2`. So it's taking the union of the sets of types that have property1 and property2. But we need the intersection: types that have *both* properties. So this is wrong. The correct approach is to take the intersection, not union. So the bug is that the algorithm computes the union instead of intersection.
+
+This is likely the bug. Let's verify with test cases that exercise this path. The path is `getGreatestSubtypeHelper` when `that` is not a record type. This is called from `getGreatestSubtype`. Many tests call `getGreatestSubtype`. For instance:
+
+- `testSupAndInf` in `RecordTypeTest`: calls `recordA.getGreatestSubtype(recordC)`. But both are record types, so it goes to the record branch, not this loop. So not that.
+
+- `testGreatestSubtypeUnionTypes` series: they call `getGreatestSubtype` on union types or other types. For example, `testGreatestSubtypeUnionTypes1`: `createNullableType(STRING_TYPE).getGreatestSubtype(createNullableType(NUMBER_TYPE))`. That involves union types, not record types. So `getGreatestSubtype` on non-record types? Actually `createNullableType(STRING_TYPE)` returns a union type of `STRING_TYPE` and `NULL_TYPE`. Then `getGreatestSubtype` on union type will call its own `getGreatestSubtypeHelper` which may delegate to record? No, union types have their own implementation. That test might not trigger this record's helper.
+
+- `testSupAndInf` in RecordTypeTest also uses `proxyRecordA.getGreatestSubtype(proxyRecordC)` which are proxy objects that wrap record types. They are not record types themselves, but the underlying type is record. The proxy's `getGreatestSubtype` might delegate to the proxy's own method, which eventually calls the underlying record's `getGreatestSubtypeHelper`. But since the underlying `that` (proxyRecordC) is not a record type (it's a ProxyObjectType), the record branch will not be taken? Actually the check `if (that.isRecordType())` – `ProxyObjectType` might override `isRecordType()` to return true if the referenced type is a record? Possibly not. Typically ProxyObjectType delegates to referenced type. So `proxyRecordC.isRecordType()` would return true because it references a record type. So it goes to the record branch, not the loop. So that test doesn't expose the bug.
+
+We need to find a test that calls `getGreatestSubtype` on a record type with a non-record type that is not a union? Or a test that calls `getGreatestSubtype` where the other type is an object type but not record, so the loop executes.
+
+Look at `testSupAndInf` - it also calls `proxyRecordA.getGreatestSubtype(proxyRecordC)` which both are proxies to records, so record branch.
+
+Maybe there is a test in `UnionTypeTest` that involves records? But the union type tests don't involve record types directly.
+
+Let's look at the list of test methods. There are many from `UnionTypeTest`, `ObjectTypeTest`, `RecordTypeTest`, etc. Which ones might trigger the bug in `getGreatestSubtypeHelper`?
+
+- `testSupAndInf` in RecordTypeTest: the `recordA.getGreatestSubtype(recordC)` goes to record branch. So not.
+- `testRecursiveRecord` in RecordTypeTest: uses `record.getGreatestSubtype(loop)`? Actually no, it only uses `Asserts.assertEquivalenceOperations(record, loop)`. That likely tests equivalence, not greatest subtype. Not.
+- `testLongToString` - only toString.
+- `testToString` in PrototypeObjectTypeTest - only toString.
+- `testGetAndSetJSDocInfoWithNamedType` and `WithObjectTypes` - these directly manipulate property definitions and JSDoc info. They might be affected by the `canPropertyBeDefined` bug? Possibly, because `setPropertyJSDocInfo` might call `canPropertyBeDefined`? Not sure. The test `testGetAndSetJSDocInfoWithObjectTypes` defines properties on object types. If `canPropertyBeDefined` returns true incorrectly, it might allow setting property info on types that shouldn't? But these tests use `ObjectType` created via `registry.createObjectType(sup)`. The `defineProperty` method might call `canPropertyBeDefined`? Not provided. But given the buggy code snippet is from somewhere, it might be that `defineProperty` or `canPropertyBeDefined` is buggy. However, the test might pass if `canPropertyBeDefined` always returns true? Let's check: in `testGetAndSetJSDocInfoWithObjectTypes`, they call `sup.defineProperty("X", NUMBER_TYPE, false, null);` and then `sup.setPropertyJSDocInfo("X", privateInfo);` and `sub.setPropertyJSDocInfo("X", deprecated);`. If `canPropertyBeDefined` is used to check if property can be defined, it might incorrectly allow property definition on `NO_TYPE` etc. But `sup` is a normal object type, so it should be fine. The bug might only affect cases where the type is something like `NO_TYPE` or `NO_OBJECT_TYPE`. For example, the test `testGetAndSetJSDocInfoWithNoType` calls `NO_TYPE.setPropertyJSDocInfo("X", deprecated);` and then asserts `getOwnPropertyJSDocInfo("X")` is null. If `canPropertyBeDefined` returns true for `NO_TYPE` incorrectly, then `setPropertyJSDocInfo` might actually set the property, causing the assertion to fail because it would return non-null. That test expects null because NO_TYPE should not have properties. So that test might expose the bug in `canPropertyBeDefined`. Similarly, `NO_OBJECT_TYPE.getPropertyNames()` in `testGetPropertyNames` expects empty set. If properties can be defined on `NO_OBJECT_TYPE` incorrectly, then `getPropertyNames` might include properties, causing failure.
+
+Thus, the bug in `canPropertyBeDefined` likely causes tests that involve property operations on `NO_TYPE` or `NO_OBJECT_TYPE` to fail. The test `testGetAndSetJSDocInfoWithNoType` directly uses `NO_TYPE`. Also `testGetPropertyNames` includes assertion on `NO_OBJECT_TYPE.getPropertyNames()` expecting empty set. If properties were defined on NO_OBJECT_TYPE incorrectly, it might not be empty.
+
+Let's examine `NO_TYPE` and `NO_OBJECT_TYPE` are special types that should be like bottom types. The `canPropertyBeDefined` method as written returns true as soon as it finds any alternative with a non-empty greatest subtype. For `NO_TYPE`, `getGreatestSubtype` with any type might return `NO_TYPE` (which is not empty?), but also `NO_TYPE` is empty? Actually `NO_TYPE` is the empty type, `isEmptyType()` returns true for `NO_TYPE`. So if `alt.getGreatestSubtype(NO_TYPE)` returns `NO_TYPE`, then `isEmptyType()` returns true, so it will skip and not return true. But if `alt` is something else, it might still return some type? Possibly the bug is that it doesn't check that the `alt` itself is not a bookkeeping type. For `NO_TYPE`, maybe `typesIndexedByProperty` does not contain any property, so the method returns false. That would be fine. But perhaps for `NO_OBJECT_TYPE`, it might have properties? Actually `NO_OBJECT_TYPE` is the bottom object type, it should not have properties. The test `testGetPropertyNames` expects `NO_OBJECT_TYPE.getPropertyNames()` to be empty. If `canPropertyBeDefined` returns true for `NO_OBJECT_TYPE`, then property definition might be allowed, but the test doesn't define properties on it; it just calls `getPropertyNames()`. So unless something else defines a property on `NO_OBJECT_TYPE`, it should be empty. So that test may not fail.
+
+The test `testGetAndSetJSDocInfoWithNoType` directly calls `NO_TYPE.setPropertyJSDocInfo("X", deprecated);`. If `setPropertyJSDocInfo` calls `canPropertyBeDefined` to check if property can be defined, and if it returns true incorrectly for `NO_TYPE`, then the set might proceed and then `getOwnPropertyJSDocInfo` would return the info, causing assertion failure. So that test might expose the bug.
+
+Now, the other major bug is in `getGreatestSubtypeHelper` for non-record case. Which tests call that? For a record type, if the other type is not a record, the loop executes. In the provided tests, are there any calls like `recordType.getGreatestSubtype(someObjectType)`? Not directly. However, in `UnionType` tests, there might be indirect calls. Also in `testSupAndInf`, they use proxies: `proxyRecordA.getGreatestSubtype(proxyRecordC)`. Since both are proxies to record types, `that.isRecordType()` should be true (because proxy delegates to record), so it goes to record branch, not the loop. So not.
+
+There is also `testRecursiveRecord` where `loop` is a ProxyObjectType initially of NUMBER_TYPE, then later of record. But no getGreatestSubtype call there.
+
+I suspect the main bug is the `canPropertyBeDefined` missing the check for bookkeeping types. The comment indicates that is the intended fix. Also, possibly the `getGreatestSubtypeHelper` loop has an algorithmic bug, but maybe it is intentionally using union? We need to check the correct logic: For a record type `R` and any other type `T`, the greatest subtype should be the type that has all properties of `R` with compatible types and is a subtype of `T`. The approach is: for each property `p` of `R`, find the set of types that have property `p` with compatible type and are subtypes of `T`. Then the intersection of those sets (over all properties) is the set of types that satisfy all properties. The current code computes union, which gives types that satisfy any property. That is wrong. So that should be fixed to compute intersection.
+
+But the test that would expose this bug would be one that calls `getGreatestSubtype` on a record type with a non-record type where the properties differ. For example, a record with two distinct properties, and a non-record type that has only one of them but not the other. The union would include the type that has only the first property, but the greatest subtype should be the type that has both (maybe none). So the result would be incorrect. Do any of the provided tests do that? Not obvious.
+
+Let's search the test methods: There is `testSupAndInf` which uses record types on both sides. There is `testRecursiveRecord` which uses record type but no getGreatestSubtype. There is no test that directly tests the non-record branch of record's getGreatestSubtype.
+
+Given that the user provided many test methods but only some are likely to trigger the bug, and we need to determine which ones. Based on analysis, the bug in `canPropertyBeDefined` is likely the one that causes failures in tests involving property operations on `NO_TYPE` or similar. Also, the `getGreatestSubtypeHelper` bug might be triggered by some tests. Let's examine all test methods again.
+
+List of test methods:
+
+1. `testGetPropertyNames` (JSTypeTest)
+2. `testGetAndSetJSDocInfoWithNamedType` (JSTypeTest)
+3. `testGetAndSetJSDocInfoWithObjectTypes` (JSTypeTest)
+4. `testGetAndSetJSDocInfoWithNoType` (JSTypeTest)
+5. `testObjectGetSubTypes` (JSTypeTest)
+6. `testImplementingType` (JSTypeTest)
+7. `testNamedTypeProperties` (NamedTypeTest)
+8. `testActiveXObjectResolve` (NamedTypeTest)
+9. `testToString` (PrototypeObjectTypeTest)
+10. `testRecursiveRecord` (RecordTypeTest)
+11. `testLongToString` (RecordTypeTest)
+12. `testSupAndInf` (RecordTypeTest)
+13. `testAllType` (UnionTypeBuilderTest)
+14. `testEmptyUnion` (UnionTypeBuilderTest)
+15. `testUnionTypes` (UnionTypeBuilderTest)
+16. `testUnknownTypes` (UnionTypeBuilderTest)
+17. `testRemovalOfDupes` (UnionTypeBuilderTest)
+18. `testRemovalOfDupes2` (UnionTypeBuilderTest)
+19. `testRemovalOfDupes3` (UnionTypeBuilderTest)
+20. `testUnionType` (UnionTypeTest)
+21. `testGreatestSubtypeUnionTypes1` (UnionTypeTest)
+22. `testGreatestSubtypeUnionTypes2` (UnionTypeTest)
+23. `testGreatestSubtypeUnionTypes3` (UnionTypeTest)
+24. `testGreatestSubtypeUnionTypes4` (UnionTypeTest)
+25. `testGreatestSubtypeUnionTypes5` (UnionTypeTest)
+26. `testSubtypingUnionTypes` (UnionTypeTest)
+27. `testSpecialUnionCanAssignTo` (UnionTypeTest)
+28. `testCreateUnionType` (UnionTypeTest)
+29. `testUnionWithUnknown` (UnionTypeTest)
+30. `testGetRestrictedUnion1` (UnionTypeTest)
+31. `testGetRestrictedUnion2` (UnionTypeTest)
+32. `testIsEquivalentTo` (UnionTypeTest)
+33. `testProxyUnionType` (UnionTypeTest)
+34. `testCollapseUnion1` (UnionTypeTest)
+35. `testCollapseUnion2` (UnionTypeTest)
+36. `testCollapseUnion3` (UnionTypeTest)
+37. `testCollapseUnion4` (UnionTypeTest)
+38. `testCollapseProxyUnion` (UnionTypeTest)
+
+Now, we need to see which of these actually exercise the buggy functions in a way that would fail.
+
+The buggy functions provided are:
+- `canPropertyBeDefined(...)`
+- `defineDeclaredProperty(...)`
+- `RecordType(...)` constructor
+- `getGreatestSubtypeHelper(...)` (from RecordType, but also from other types?)
+- `RecordTypeBuilder(...)` and `build()`
+
+But note: `defineDeclaredProperty` is simply calling `defineProperty` and `registerPropertyOnType`. It doesn't have a bug by itself. The bug might be that `defineDeclaredProperty` is called from `RecordType` constructor but the property registration might cause issues? But that is intended.
+
+Let's check the test `testNamedTypeProperties`. It calls `namedA.defineDeclaredProperty("foo", NUMBER_TYPE, null);` This might trigger `canPropertyBeDefined`? If the implementation of `defineDeclaredProperty` on `NamedType` (which extends ObjectType) calls `canPropertyBeDefined`, then it could be affected. Similarly, `testActiveXObjectResolve` doesn't involve property definition.
+
+`testGetAndSetJSDocInfoWithNoType` directly calls `NO_TYPE.setPropertyJSDocInfo("X", deprecated);`. The implementation of `setPropertyJSDocInfo` likely checks if the property can be defined (via `canPropertyBeDefined`). If that returns true incorrectly, then it would set the info and the subsequent `getOwnPropertyJSDocInfo` would return non-null, causing failure. So this test likely exposes the bug.
+
+Similarly, `testGetAndSetJSDocInfoWithObjectTypes` and `testGetAndSetJSDocInfoWithNamedType` involve setting JSDocInfo on object types, which might pass because those types are normal and `canPropertyBeDefined` might work correctly for normal types? But it might still pass because the property is defined first (defineProperty) and then setPropertyJSDocInfo might reuse that definition. The bug may not affect normal types. So these tests might not fail.
+
+`testGetPropertyNames` asserts that `NO_OBJECT_TYPE.getPropertyNames()` is empty. If `canPropertyBeDefined` allowed properties on `NO_OBJECT_TYPE`, then some property might have been defined elsewhere? Not likely. So maybe not.
+
+`testSupAndInf` in RecordTypeTest calls `recordA.getGreatestSubtype(recordC)` and `proxyRecordA.getGreatestSubtype(proxyRecordC)`. This uses the record branch of `getGreatestSubtypeHelper`. That branch returns `NO_TYPE` when properties conflict. But the test expects a non-empty record type. Let's look at the test:
+
+```java
+    JSType aInfC = new RecordTypeBuilder(registry)
+        .addProperty("a", NUMBER_TYPE, null)
+        .addProperty("b", NUMBER_TYPE, null)
+        .addProperty("c", NUMBER_TYPE, null)
+        .build();
+```
+And then:
+```java
+    Asserts.assertTypeEquals(
+        aInfC, recordA.getGreatestSubtype(recordC));
+```
+Where recordA has properties a,b; recordC has properties b,c. The greatest subtype should have a,b,c (since b is common and both have b with same type, a from recordA, c from recordC). That is exactly what the record branch does. So it should work. But note that the record branch also calls `builder.build()` which eventually creates a RecordType via constructor. That constructor calls `defineDeclaredProperty` for each property, which in turn registers the property on the registry. That might have side effects but should not cause failure.
+
+Now, consider the `getGreatestSubtypeHelper` for non-record case. It may be called in some tests, e.g., when a record type is compared with a union type? In `testSupAndInf`, they also use proxyRecordA and proxyRecordC. As argued, both are proxies to records, so `that.isRecordType()` is true, so it goes to record branch. So not.
+
+Maybe in `testRecursiveRecord`, there is no getGreatestSubtype.
+
+Given the tests, the only one that directly uses `NO_TYPE` and property operations is `testGetAndSetJSDocInfoWithNoType`. Also, `testGetPropertyNames` uses `NO_OBJECT_TYPE.getPropertyNames()` but that might not be affected.
+
+Another candidate: `testObjectGetSubTypes` and `testImplementingType` involve `getSubTypes` and `getDirectImplementors`, which may depend on registration of properties. If `canPropertyBeDefined` incorrectly allows properties on types that shouldn't have them, it might affect subtype relations, but that is indirect.
+
+Maybe the bug is specifically in `canPropertyBeDefined` and the fix is to add a check for bookkeeping types. Let's read the comment: "We've found a type with this property. Now we just have to make sure it's not a type used for internal bookkeeping." So we need to check that `alt` is not a bookkeeping type. What are bookkeeping types? Likely `NO_TYPE`, `NO_OBJECT_TYPE`, `UNKNOWN_TYPE`, etc. The code should continue if `alt` is such.
+
+Given that the fix is minimal, we should add a condition to skip bookkeeping types. For example:
+```java
+if (alt.isNoType() || alt.isNoObjectType() || alt.isUnknownType()) {
+  continue;
+}
+```
+But we need to use appropriate methods.
+
+Now, we also need to consider if there is a bug in `getGreatestSubtypeHelper`. The loop that computes union instead of intersection seems wrong. However, maybe it is intentionally computing union? Let's think: The algorithm described in the comment:
+1) For each property "x" of this record type, take the union of all classes with a property "x" with a compatible property type and which are a subtype of {@code that}.
+2) Take the intersection of all of these unions.
+
+But the code does:
+```java
+greatestSubtype = greatestSubtype.getLeastSupertype(builder.build());
+```
+That is taking the least supertype (which is union) of the current `greatestSubtype` and the new `builder.build()`. Starting from NO_OBJECT_TYPE, after first property, `greatestSubtype = union1`. After second property, `greatestSubtype = union1.getLeastSupertype(union2) = union1 ∪ union2`. That is the union of the unions, which is the union of all types that have any property. That is not the intersection. The comment says take the intersection of all those unions. The code should take the intersection. `getGreatestSubtype` would compute the intersection, but they use `getLeastSupertype`. So that is indeed a bug.
+
+But maybe there is a reason? Let's check if any test exercises this path. Possibly `testSupAndInf` with proxied records does not; they both are records. What about `testRecursiveRecord`? It doesn't call getGreatestSubtype. 
+
+Maybe there is a test in another file not listed? The list includes all test methods. So perhaps no test triggers that path. In that case, fixing this bug might not affect any test. But the task says to determine which testcase methods actually expose the bug. If no test exposes that bug, then we should not include any triggering methods for that bug. But the user might expect us to fix all bugs and identify all triggering tests. Since the bug in `getGreatestSubtypeHelper` is evident from code analysis, but if no test triggers it, we still might need to fix it? The task says: "Determine which testcase methods actually expose the bug." If no test exposes it, then the trigger_method list would be empty for that bug? But there is also the `canPropertyBeDefined` bug which might be exposed by `testGetAndSetJSDocInfoWithNoType`.
+
+Let's examine `canPropertyBeDefined` more. It is likely used in `ObjectType` to check if a property can be defined. The `defineProperty` method might check `canPropertyBeDefined` first. If it returns true for a type that should not allow property definition, then property can be defined incorrectly. For normal object types, it should be fine. For `NO_TYPE`, it should return false. But does `NO_TYPE` have any entries in `typesIndexedByProperty`? Probably not, so it returns false. However, the test `testGetAndSetJSDocInfoWithNoType` calls `setPropertyJSDocInfo` which might not call `canPropertyBeDefined`. The `setPropertyJSDocInfo` might directly try to set info on the property map. If the property doesn't exist, it might do nothing. So the test might pass regardless. Actually, the test expects null after set, so it might pass even if `canPropertyBeDefined` is buggy. So maybe that test is not exposed.
+
+Let's think again. The user provided the buggy code and many test methods. We need to simulate which tests would fail. Without running, we must deduce. Possibly the bug is in `RecordType` constructor: it calls `defineDeclaredProperty` which calls `defineProperty` and `registerPropertyOnType`. That might cause problems if the property is already defined? But the builder builds a new RecordType, so it should be fine.
+
+Another angle: The test `testNamedTypeProperties` might fail. It creates a `NamedType` and calls `defineDeclaredProperty` on it, then resolves it. The buggy `canPropertyBeDefined` might affect `defineProperty` on NamedType. If `canPropertyBeDefined` returns false incorrectly, then property might not be defined. But the test expects the property to be defined. So if `canPropertyBeDefined` returns false for a valid type, that would also be a bug. But the current `canPropertyBeDefined` returns true too eagerly (missing bookkeeping check), not false. So for normal types, it returns true, so property definition should succeed. So that test should pass.
+
+Thus, the bug seems to be that it does not filter out bookkeeping types, leading to false positives for those types. So tests that attempt to define properties on bookkeeping types or set JSDocInfo on them might be affected. The only test that does that is `testGetAndSetJSDocInfoWithNoType` (uses `NO_TYPE`). Also, `testGetPropertyNames` uses `NO_OBJECT_TYPE` but doesn't define properties. So maybe only `testGetAndSetJSDocInfoWithNoType` triggers the bug.
+
+But wait, there is also `testGetAndSetJSDocInfoWithNamedType` uses `namedGoogBar`, which is a named type, not a bookkeeping type. So no.
+
+Thus, likely the only triggering test is `testGetAndSetJSDocInfoWithNoType`.
+
+Now, about the `getGreatestSubtypeHelper` bug: There is a test `testSupAndInf` that uses proxy records. As argued, that goes to record branch. But maybe the proxy records are not considered record types? Let's check: `ProxyObjectType` likely extends `ObjectType` and overrides `isRecordType()` to check the referenced type. So if it references a record, it should be true. So that test uses the record branch. So not.
+
+What about `testRecursiveRecord`? It doesn't call getGreatestSubtype.
+
+Therefore, the `getGreatestSubtypeHelper` bug might not be triggered by any provided test. But that seems odd; maybe we missed a test. Look at `testCollapseUnion3` in UnionTypeTest: It creates unions of error types and expects collapse to "Error". That uses `collapseUnion()`, which might call `getGreatestSubtype` internally? Possibly, but not directly on record types.
+
+Thus, the only definite triggering test is `testGetAndSetJSDocInfoWithNoType`. But the user might expect us to identify all tests that fail due to the bug. Maybe there are more. Let's carefully examine `canPropertyBeDefined` and its usage. It is used in `ObjectType.canPropertyBeDefined`, which is likely called from `defineProperty`. If `defineProperty` allows property definition on `NO_OBJECT_TYPE`, then `NO_OBJECT_TYPE.getPropertyNames()` might include that property. But the test `testGetPropertyNames` expects empty. However, no property is defined on `NO_OBJECT_TYPE` in that test, so it won't be affected. Unless some other test inadvertently defines a property on `NO_OBJECT_TYPE` via the registry? Not likely.
+
+What about `testGetAndSetJSDocInfoWithObjectTypes`? It uses `sup` and `sub` which are normal object types. Not bookkeeping.
+
+Thus, only `testGetAndSetJSDocInfoWithNoType` directly interacts with a bookkeeping type. So I'll mark that as the trigger.
+
+Now, for the fix, we need to fix `canPropertyBeDefined` to include the check for bookkeeping types. Also, if `getGreatestSubtypeHelper` is buggy, we should fix it. Since the user included that function in the source, and it has a clear bug (union vs intersection), we should fix it as well. Even if no test triggers it, the user expects all bugs to be fixed. The task says "The defect may be caused by a single function or by multiple functions working together. If multiple functions collectively cause the issue, you must fix all of them." So we should fix both functions.
+
+But we must ensure the fix is minimal. For `canPropertyBeDefined`, we need to skip bookkeeping types. What constitutes bookkeeping? Possibly `isNoType()`, `isNoObjectType()`, `isUnknownType()`, `isEmptyType()`? The comment says "not a type used for internal bookkeeping." In the context of Closure Compiler, bookkeeping types are `NO_TYPE`, `NO_OBJECT_TYPE`, `UNKNOWN_TYPE`, etc. Probably we should skip if `alt.isNoType()` or `alt.isNoObjectType()` or `alt.isEmptyType()`? But the current code already skips if `greatestSubtype.isEmptyType()`, so that covers `NO_TYPE` and `NO_OBJECT_TYPE` because their greatest subtype with something might be empty? Actually `NO_TYPE.getGreatestSubtype(type)` returns `NO_TYPE` which is empty, so it would be skipped. So the current code already skips NO_TYPE and NO_OBJECT_TYPE for those cases. The problem is when the alternate itself is a bookkeeping type, e.g., `NO_TYPE` as an alternate? But `typesIndexedByProperty` likely only contains valid types. Maybe the issue is that some alternates may be `NO_OBJECT_TYPE` which is not empty? Let's see: If a property is defined on `NO_OBJECT_TYPE`, then `NO_OBJECT_TYPE` would be in the alternates. Then `NO_OBJECT_TYPE.getGreatestSubtype(NO_OBJECT_TYPE)` returns NO_OBJECT_TYPE, which is not empty (NO_OBJECT_TYPE is not empty, it represents the bottom of the object type hierarchy? Actually NO_OBJECT_TYPE is the type with no properties, so it is not empty; `isEmptyType()` returns false for NO_OBJECT_TYPE). So the code would return true. But we don't want property definition on NO_OBJECT_TYPE. So we need to skip types like NO_OBJECT_TYPE. Similarly, UNKNOWN_TYPE should be skipped.
+
+So we need to check if `alt` is a bookkeeping type. We'll use `alt.isNoObjectType()`, `alt.isNoType()`, `alt.isUnknownType()` and maybe `alt.isEmptyType()` (although NO_TYPE is empty, but NO_OBJECT_TYPE is not). The safest is to check if `alt` is one of the native bottom types.
+
+Alternatively, we could check if `alt.isSubtypeOf` something? But better to check explicitly: `alt.isNoType() || alt.isNoObjectType() || alt.isUnknownType()`.
+
+Now, for `getGreatestSubtypeHelper`, the fix should change the loop to compute intersection instead of union. The algorithm should be: start with a set that is all possible types (like `NO_OBJECT_TYPE` is the bottom? Actually we want the intersection of sets for each property. The intersection of a collection of sets can be computed by starting with the first set and then taking the greatest subtype (intersection) with each subsequent set. But we need the intersection of sets of types that have each property. The current code uses `getLeastSupertype` which gives union. We should use `getGreatestSubtype` to get intersection. However, `getGreatestSubtype` on two types returns the greatest subtype common to both. For two unions (sets), it should return the intersection of the sets. So the fix is to replace `getLeastSupertype` with `getGreatestSubtype`. Also, the initial value should be the first set, not NO_OBJECT_TYPE? Actually we need to start with the first set and then intersect with each subsequent set. Starting from `NO_OBJECT_TYPE` is wrong because `NO_OBJECT_TYPE.getGreatestSubtype(union)` is the intersection of NO_OBJECT_TYPE (empty set) with union, which would be empty. So we need to start with the first property's union. So we should initialize `greatestSubtype = null` and then for each property, if it's the first, set it to the union; otherwise, set it to `greatestSubtype.getGreatestSubtype(builder.build())`. Alternatively, we can keep the structure but change to `getGreatestSubtype` and initialize with the first iteration as the base. But since `NO_OBJECT_TYPE` is the bottom, `NO_OBJECT_TYPE.getGreatestSubtype(union)` would be `NO_OBJECT_TYPE` (since NO_OBJECT_TYPE is the greatest subtype common to NO_OBJECT_TYPE and anything? Actually, for two types, the greatest subtype is the type that is a subtype of both. NO_OBJECT_TYPE is a subtype of everything? NO_OBJECT_TYPE is the Object type with no properties, but it is a subtype of all object types. However, NO_OBJECT_TYPE is not a subtype of non-object types. So `NO_OBJECT_TYPE.getGreatestSubtype(union)` would be NO_OBJECT_TYPE if union contains NO_OBJECT_TYPE, else it would be something else? Actually, the greatest subtype of NO_OBJECT_TYPE and any union is the intersection of sets. NO_OBJECT_TYPE represents the set of all object types that are the bottom? It's a single type. Its greatest subtype with a union is the common subtypes. Since NO_OBJECT_TYPE is a single type, the intersection with union is either NO_OBJECT_TYPE if NO_OBJECT_TYPE is in the union, or NO_TYPE if not. So starting from NO_OBJECT_TYPE is messy. Better to start with the first property's union.
+
+But note that the code also handles the case where `thatRestrictedToObj` is non-empty. The loop is inside that branch. So the initial `greatestSubtype` is `NO_OBJECT_TYPE`. To fix, we can do:
+
+```
+UnionTypeBuilder finalBuilder = new UnionTypeBuilder(registry);
+boolean first = true;
+for (Map.Entry<String, JSType> entry : properties.entrySet()) {
+  ...
+  UnionTypeBuilder builder = new UnionTypeBuilder(registry);
+  for (ObjectType alt : ...) {
+    if (condition) builder.addAlternate(alt);
+  }
+  if (first) {
+    // initialize with builder.build()? But we need to take union of all alternates? Actually, we want the set of types that have this property. builder.build() is the union of all such types. That's fine.
+    greatestSubtype = builder.build();
+    first = false;
+  } else {
+    greatestSubtype = greatestSubtype.getGreatestSubtype(builder.build());
+  }
+}
+```
+
+But we must be careful: `greatestSubtype.getGreatestSubtype(builder.build())` should compute the intersection of the two unions. That is correct.
+
+Also, after the loop, if no property exists? Not possible if we are in the non-record branch, the record has at least one property.
+
+Thus, the fix is to change the line from:
+`greatestSubtype = greatestSubtype.getLeastSupertype(builder.build());`
+to something that computes intersection. We'll also need to handle the initial value.
+
+But the existing code starts with `greatestSubtype = registry.getNativeType(JSTypeNative.NO_OBJECT_TYPE);` and then loops. If we change to intersection, starting with NO_OBJECT_TYPE will always result in NO_TYPE or NO_OBJECT_TYPE because NO_OBJECT_TYPE is a single type. So we must change the initialization. The fix should:
+
+- Initialize `greatestSubtype` to `null`.
+- Track `first` boolean.
+- After loop, if `greatestSubtype` is still null (no properties? shouldn't happen), fallback to NO_TYPE.
+
+Alternatively, we can initialize with the first property's result and then intersect subsequent ones.
+
+Given minimal fix, we can adjust the loop.
+
+Now, produce the fixed code. We need to output all functions from the input, in the same order, with fixes. The input functions: `canPropertyBeDefined`, `defineDeclaredProperty`, `RecordType` constructor, `getGreatestSubtypeHelper`, `RecordTypeBuilder` constructor, `build`. Note that `defineDeclaredProperty` and `RecordTypeBuilder` constructor and `build` are fine. But we need to output all of them as they appear in the source? The source includes them sequentially. However, the input shows only the bodies. We need to output the full fixed functions as strings.
+
+The input code snippets:
+
+```java
+  public boolean canPropertyBeDefined(JSType type, String propertyName) {
+    if (typesIndexedByProperty.containsKey(propertyName)) {
+      for (JSType alt :
+               typesIndexedByProperty.get(propertyName).getAlternates()) {
+        JSType greatestSubtype = alt.getGreatestSubtype(type);
+        if (!greatestSubtype.isEmptyType()) {
+          // We've found a type with this property. Now we just have to make
+          // sure it's not a type used for internal bookkeeping.
+
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  public final boolean defineDeclaredProperty(String propertyName,
+      JSType type, Node propertyNode) {
+    boolean result = defineProperty(propertyName, type, false,
+        propertyNode);
+
+    // All property definitions go through this method
+    // or defineDeclaredProperty. Because the properties defined an an
+    // object can affect subtyping, it's slightly more efficient
+    // to register this after defining the property.
+    registry.registerPropertyOnType(propertyName, this);
+
+    return result;
+  }
+
+  RecordType(JSTypeRegistry registry, Map<String, RecordProperty> properties) {
+    super(registry, null, null);
+    setPrettyPrint(true);
+
+    for (String property : properties.keySet()) {
+      RecordProperty prop = properties.get(property);
+      if (prop == null) {
+        throw new IllegalStateException(
+            "RecordProperty associated with a property should not be null!");
+      }
+        defineDeclaredProperty(
+            property, prop.getType(), prop.getPropertyNode());
+    }
+
+    // Freeze the record type.
+    isFrozen = true;
+  }
+
+  JSType getGreatestSubtypeHelper(JSType that) {
+    if (that.isRecordType()) {
+      RecordType thatRecord = that.toMaybeRecordType();
+      RecordTypeBuilder builder = new RecordTypeBuilder(registry);
+
+      // The greatest subtype consists of those *unique* properties of both
+      // record types. If any property conflicts, then the NO_TYPE type
+      // is returned.
+      for (String property : properties.keySet()) {
+        if (thatRecord.hasProperty(property) &&
+            !thatRecord.getPropertyType(property).isEquivalentTo(
+                getPropertyType(property))) {
+          return registry.getNativeObjectType(JSTypeNative.NO_TYPE);
+        }
+
+        builder.addProperty(property, getPropertyType(property),
+            getPropertyNode(property));
+      }
+
+      for (String property : thatRecord.properties.keySet()) {
+        if (!hasProperty(property)) {
+          builder.addProperty(property, thatRecord.getPropertyType(property),
+              thatRecord.getPropertyNode(property));
+        }
+      }
+
+      return builder.build();
+    }
+
+    JSType greatestSubtype = registry.getNativeType(
+        JSTypeNative.NO_OBJECT_TYPE);
+    JSType thatRestrictedToObj =
+        registry.getNativeType(JSTypeNative.OBJECT_TYPE)
+        .getGreatestSubtype(that);
+    if (!thatRestrictedToObj.isEmptyType()) {
+      // In this branch, the other type is some object type. We find
+      // the greatest subtype with the following algorithm:
+      // 1) For each property "x" of this record type, take the union
+      //    of all classes with a property "x" with a compatible property type.
+      //    and which are a subtype of {@code that}.
+      // 2) Take the intersection of all of these unions.
+      for (Map.Entry<String, JSType> entry : properties.entrySet()) {
+        String propName = entry.getKey();
+        JSType propType = entry.getValue();
+        UnionTypeBuilder builder = new UnionTypeBuilder(registry);
+        for (ObjectType alt :
+                 registry.getEachReferenceTypeWithProperty(propName)) {
+          JSType altPropType = alt.getPropertyType(propName);
+          if (altPropType != null && !alt.isEquivalentTo(this) &&
+              alt.isSubtype(that) &&
+              (propType.isUnknownType() || altPropType.isUnknownType() ||
+                  altPropType.isEquivalentTo(propType))) {
+            builder.addAlternate(alt);
+          }
+        }
+        greatestSubtype = greatestSubtype.getLeastSupertype(builder.build());
+      }
+    }
+    return greatestSubtype;
+  }
+
+  public RecordTypeBuilder(JSTypeRegistry registry) {
+    this.registry = registry;
+  }
+
+  public JSType build() {
+     // If we have an empty record, simply return the object type.
+    if (isEmpty) {
+       return registry.getNativeObjectType(JSTypeNative.OBJECT_TYPE);
+    }
+
+    return new RecordType(
+        registry, Collections.unmodifiableMap(properties));
+  }
+```
+
+We need to output these functions with fixes. The order should be the same.
+
+For `canPropertyBeDefined`, add a check to skip bookkeeping types. We need to know what bookkeeping types are. Typically, `JSType` has methods like `isNoType()`, `isNoObjectType()`, `isUnknownType()`. But `isEmptyType()` already catches `NO_TYPE`. However, `NO_OBJECT_TYPE` is not empty. So we need to add `!alt.isNoObjectType() && !alt.isUnknownType()`.
+
+Alternatively, we could use `alt.isSubtypeOf(registry.getNativeObjectType(JSTypeNative.OBJECT_TYPE))`? But that might not filter correctly. Best to use explicit checks.
+
+Also, the comment mentions internal bookkeeping; perhaps they want to skip `ProxyObjectType` that wrap internal types? But not sure.
+
+A common pattern is to skip if `alt.isNoType() || alt.isNoObjectType() || alt.isUnknownType() || alt.isEmptyType()`. But `isEmptyType()` already skips in the condition. So we can add a check before the `isEmptyType` check: if the alternate itself is a bookkeeping type, continue.
+
+Thus, modify the loop:
+
+```java
+for (JSType alt : ...) {
+  if (alt.isNoType() || alt.isNoObjectType() || alt.isUnknownType()) {
+    continue;
+  }
+  JSType greatestSubtype = alt.getGreatestSubtype(type);
+  if (!greatestSubtype.isEmptyType()) {
+    return true;
+  }
+}
+```
+
+That should fix it.
+
+Now for `getGreatestSubtypeHelper`, we need to change the loop to compute intersection. We'll change from `getLeastSupertype` to `getGreatestSubtype` and adjust initialization.
+
+```java
+    JSType thatRestrictedToObj =
+        registry.getNativeType(JSTypeNative.OBJECT_TYPE)
+        .getGreatestSubtype(that);
+    if (!thatRestrictedToObj.isEmptyType()) {
+      JSType intersection = null;
+      for (Map.Entry<String, JSType> entry : properties.entrySet()) {
+        String propName = entry.getKey();
+        JSType propType = entry.getValue();
+        UnionTypeBuilder builder = new UnionTypeBuilder(registry);
+        for (ObjectType alt :
+                 registry.getEachReferenceTypeWithProperty(propName)) {
+          JSType altPropType = alt.getPropertyType(propName);
+          if (altPropType != null && !alt.isEquivalentTo(this) &&
+              alt.isSubtype(that) &&
+              (propType.isUnknownType() || altPropType.isUnknownType() ||
+                  altPropType.isEquivalentTo(propType))) {
+            builder.addAlternate(alt);
+          }
+        }
+        JSType propUnion = builder.build();
+        if (intersection == null) {
+          intersection = propUnion;
+        } else {
+          intersection = intersection.getGreatestSubtype(propUnion);
+        }
+      }
+      if (intersection != null) {
+        greatestSubtype = intersection;
+      }
+    }
+    return greatestSubtype;
+```
+
+But note that `greatestSubtype` was initialized to `NO_OBJECT_TYPE` and returned if the condition fails. If `thatRestrictedToObj` is empty, we return `NO_OBJECT_TYPE`. That's fine. If it is non-empty but no properties? Not possible. But if `intersection` remains null (no properties? shouldn't happen but if record has zero properties, but then it wouldn't be in this code? Actually a record type always has at least one property? Not necessarily, but the record type with no properties would have been converted to object type by builder. So safe.
+
+Now, we must ensure that the fix does not break other tests. The original code after loop also returns the computed `greatestSubtype`. Our new code will compute intersection and assign to `greatestSubtype` before return.
+
+Also, we need to preserve the original behavior for the record branch; it remains unchanged.
+
+Now, we also need to update the comment? Not necessary.
+
+Now, we need to output the fixed functions as strings. We need to include the exact method signatures and bodies. We must ensure proper formatting and escaping for JSON.
+
+We also need to output the list of trigger methods. Based on analysis, only `testGetAndSetJSDocInfoWithNoType` is likely to fail. But let's double-check by simulating mentally: In that test, `NO_TYPE.setPropertyJSDocInfo("X", deprecated);` and then `assertNull(NO_TYPE.getOwnPropertyJSDocInfo("X"));`. If `setPropertyJSDocInfo` internally calls `canPropertyBeDefined` which returns true for `NO_TYPE` incorrectly, then it would set the info and the assertion would fail. So that test would expose the bug. Other tests might not.
+
+Thus, trigger_method should include the fully qualified name: "com.google.javascript.rhino.jstype.JSTypeTest::testGetAndSetJSDocInfoWithNoType". But the format: "full_trigger_method_path1". The user's test methods are given with the class and method. So we should include the test class and method name. For example, "com.google.javascript.rhino.jstype.JSTypeTest.testGetAndSetJSDocInfoWithNoType" or with "::"? The input uses "::" in the comments. We'll use "::" to be consistent. So "com.google.javascript.rhino.jstype.JSTypeTest::testGetAndSetJSDocInfoWithNoType".
+
+Now, produce the JSON output.
+
+We need to include all functions from the input, even those unchanged. So we will output fixed_code array with six strings: the fixed `canPropertyBeDefined`, the `defineDeclaredProperty` unchanged, the `RecordType` constructor unchanged, the fixed `getGreatestSubtypeHelper`, the `RecordTypeBuilder` constructor unchanged, the `build` unchanged.
+
+Let's write the fixed functions as Java code strings. We must escape double quotes and backslashes, and use newlines appropriately.
+
+I'll produce the JSON.{
+  "trigger_method": [
+    "com.google.javascript.rhino.jstype.JSTypeTest::testGetAndSetJSDocInfoWithNoType"
+  ],
+  "fixed_code": [
+    "public boolean canPropertyBeDefined(JSType type, String propertyName) {\n    if (typesIndexedByProperty.containsKey(propertyName)) {\n      for (JSType alt :\n               typesIndexedByProperty.get(propertyName).getAlternates()) {\n        if (alt.isNoType() || alt.isNoObjectType() || alt.isUnknownType()) {\n          continue;\n        }\n        JSType greatestSubtype = alt.getGreatestSubtype(type);\n        if (!greatestSubtype.isEmptyType()) {\n          // We've found a type with this property. Now we just have to make\n          // sure it's not a type used for internal bookkeeping.\n          return true;\n        }\n      }\n    }\n    return false;\n  }",
+    "public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }",
+    "RecordType(JSTypeRegistry registry, Map<String, RecordProperty> properties) {\n    super(registry, null, null);\n    setPrettyPrint(true);\n\n    for (String property : properties.keySet()) {\n      RecordProperty prop = properties.get(property);\n      if (prop == null) {\n        throw new IllegalStateException(\n            \"RecordProperty associated with a property should not be null!\");\n      }\n        defineDeclaredProperty(\n            property, prop.getType(), prop.getPropertyNode());\n    }\n\n    // Freeze the record type.\n    isFrozen = true;\n  }",
+    "JSType getGreatestSubtypeHelper(JSType that) {\n    if (that.isRecordType()) {\n      RecordType thatRecord = that.toMaybeRecordType();\n      RecordTypeBuilder builder = new RecordTypeBuilder(registry);\n\n      // The greatest subtype consists of those *unique* properties of both\n      // record types. If any property conflicts, then the NO_TYPE type\n      // is returned.\n      for (String property : properties.keySet()) {\n        if (thatRecord.hasProperty(property) &&\n            !thatRecord.getPropertyType(property).isEquivalentTo(\n                getPropertyType(property))) {\n          return registry.getNativeObjectType(JSTypeNative.NO_TYPE);\n        }\n\n        builder.addProperty(property, getPropertyType(property),\n            getPropertyNode(property));\n      }\n\n      for (String property : thatRecord.properties.keySet()) {\n        if (!hasProperty(property)) {\n          builder.addProperty(property, thatRecord.getPropertyType(property),\n              thatRecord.getPropertyNode(property));\n        }\n      }\n\n      return builder.build();\n    }\n\n    JSType greatestSubtype = registry.getNativeType(\n        JSTypeNative.NO_OBJECT_TYPE);\n    JSType thatRestrictedToObj =\n        registry.getNativeType(JSTypeNative.OBJECT_TYPE)\n        .getGreatestSubtype(that);\n    if (!thatRestrictedToObj.isEmptyType()) {\n      // In this branch, the other type is some object type. We find\n      // the greatest subtype with the following algorithm:\n      // 1) For each property \"x\" of this record type, take the union\n      //    of all classes with a property \"x\" with a compatible property type.\n      //    and which are a subtype of {@code that}.\n      // 2) Take the intersection of all of these unions.\n      JSType intersection = null;\n      for (Map.Entry<String, JSType> entry : properties.entrySet()) {\n        String propName = entry.getKey();\n        JSType propType = entry.getValue();\n        UnionTypeBuilder builder = new UnionTypeBuilder(registry);\n        for (ObjectType alt :\n                 registry.getEachReferenceTypeWithProperty(propName)) {\n          JSType altPropType = alt.getPropertyType(propName);\n          if (altPropType != null && !alt.isEquivalentTo(this) &&\n              alt.isSubtype(that) &&\n              (propType.isUnknownType() || altPropType.isUnknownType() ||\n                  altPropType.isEquivalentTo(propType))) {\n            builder.addAlternate(alt);\n          }\n        }\n        JSType propUnion = builder.build();\n        if (intersection == null) {\n          intersection = propUnion;\n        } else {\n          intersection = intersection.getGreatestSubtype(propUnion);\n        }\n      }\n      if (intersection != null) {\n        greatestSubtype = intersection;\n      }\n    }\n    return greatestSubtype;\n  }",
+    "public RecordTypeBuilder(JSTypeRegistry registry) {\n    this.registry = registry;\n  }",
+    "public JSType build() {\n     // If we have an empty record, simply return the object type.\n    if (isEmpty) {\n       return registry.getNativeObjectType(JSTypeNative.OBJECT_TYPE);\n    }\n\n    return new RecordType(\n        registry, Collections.unmodifiableMap(properties));\n  }"
+  ]
+}

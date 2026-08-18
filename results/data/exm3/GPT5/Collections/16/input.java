@@ -1,0 +1,46 @@
+// buggy function
+    public List subList(int fromIndex, int toIndex) {
+        return new SetUniqueList(super.subList(fromIndex, toIndex), set);
+    }
+
+// trigger testcase
+// org/apache/commons/collections/list/TestSetUniqueList.java::testCollections307
+public void testCollections307() {
+        List list = new ArrayList();
+        List uniqueList = SetUniqueList.decorate(list);
+
+        String hello = "Hello";
+        String world = "World";
+        uniqueList.add(hello);
+        uniqueList.add(world);
+
+        List subList = list.subList(0, 0);
+        List subUniqueList = uniqueList.subList(0, 0);
+
+        assertFalse(subList.contains(world)); // passes
+        assertFalse(subUniqueList.contains(world)); // fails
+
+        List worldList = new ArrayList();
+        worldList.add(world);
+        assertFalse(subList.contains("World")); // passes
+        assertFalse(subUniqueList.contains("World")); // fails
+
+        // repeat the test with a different class than HashSet; 
+        // which means subclassing SetUniqueList below
+        list = new ArrayList();
+        uniqueList = new SetUniqueList307(list, new java.util.TreeSet());
+
+        uniqueList.add(hello);
+        uniqueList.add(world);
+
+        subList = list.subList(0, 0);
+        subUniqueList = uniqueList.subList(0, 0);
+
+        assertFalse(subList.contains(world)); // passes
+        assertFalse(subUniqueList.contains(world)); // fails
+
+        worldList = new ArrayList();
+        worldList.add(world);
+        assertFalse(subList.contains("World")); // passes
+        assertFalse(subUniqueList.contains("World")); // fails
+    }

@@ -1,0 +1,2814 @@
+// buggy code
+  public void process(Node externs, Node root) {
+    NodeTraversal.traverse(compiler, externs, new ProcessExterns());
+    NodeTraversal.traverse(compiler, root, new ProcessProperties());
+
+    Set<String> reservedNames =
+        new HashSet<String>(externedNames.size() + quotedNames.size());
+    reservedNames.addAll(externedNames);
+    reservedNames.addAll(quotedNames);
+
+    int numRenamedPropertyNames = 0;
+    int numSkippedPropertyNames = 0;
+    Set<Property> propsByFreq = new TreeSet<Property>(FREQUENCY_COMPARATOR);
+    for (Property p : propertyMap.values()) {
+      if (!p.skipAmbiguating) {
+        ++numRenamedPropertyNames;
+        computeRelatedTypes(p.type);
+        propsByFreq.add(p);
+      } else {
+        ++numSkippedPropertyNames;
+        reservedNames.add(p.oldName);
+      }
+    }
+
+    PropertyGraph graph = new PropertyGraph(Lists.newLinkedList(propsByFreq));
+    GraphColoring<Property, Void> coloring =
+        new GreedyGraphColoring<Property, Void>(graph, FREQUENCY_COMPARATOR);
+    int numNewPropertyNames = coloring.color();
+
+    NameGenerator nameGen = new NameGenerator(
+        reservedNames, "", reservedCharacters);
+    for (int i = 0; i < numNewPropertyNames; ++i) {
+      colorMap.put(i, nameGen.generateNextName());
+    }
+    for (GraphNode<Property, Void> node : graph.getNodes()) {
+      node.getValue().newName = colorMap.get(node.getAnnotation().hashCode());
+      renamingMap.put(node.getValue().oldName, node.getValue().newName);
+    }
+
+    // Update the string nodes.
+    for (Node n : stringNodesToRename) {
+      String oldName = n.getString();
+      Property p = propertyMap.get(oldName);
+      if (p != null && p.newName != null) {
+        Preconditions.checkState(oldName.equals(p.oldName));
+        if (!p.newName.equals(oldName)) {
+          n.setString(p.newName);
+          compiler.reportCodeChange();
+        }
+      }
+    }
+
+    logger.info("Collapsed " + numRenamedPropertyNames + " properties into "
+                + numNewPropertyNames + " and skipped renaming "
+                + numSkippedPropertyNames + " properties.");
+  }
+
+    public boolean isIndependentOf(Property prop) {
+      if (typesRelatedToSet.intersects(prop.typesSet)) {
+        return false;
+      }
+      return !getRelated(prop.type).intersects(typesInSet);
+    }
+
+    public void addNode(Property prop) {
+      typesInSet.or(prop.typesSet);
+      typesRelatedToSet.or(getRelated(prop.type));
+    }
+
+  private JSType getJSType(Node n) {
+    JSType jsType = n.getJSType();
+    if (jsType == null) {
+      // TODO(user): This branch indicates a compiler bug, not worthy of
+      // halting the compilation but we should log this and analyze to track
+      // down why it happens. This is not critical and will be resolved over
+      // time as the type checker is extended.
+      return compiler.getTypeRegistry().getNativeType(
+          JSTypeNative.UNKNOWN_TYPE);
+    } else {
+      return jsType;
+    }
+  }
+
+    private void addNonUnionType(JSType newType) {
+      if (skipAmbiguating || isInvalidatingType(newType)) {
+        skipAmbiguating = true;
+        return;
+      }
+
+      if (type == null) {
+        type = newType;
+      } else {
+        type = type.getLeastSupertype(newType);
+      }
+      typesSet.set(getIntForType(newType));
+    }
+
+    private FunctionType findOverriddenFunction(
+        ObjectType ownerType, String propName) {
+      // First, check to see if the property is implemented
+      // on a superclass.
+      JSType propType = ownerType.getPropertyType(propName);
+      if (propType instanceof FunctionType) {
+        return (FunctionType) propType;
+      }
+        // If it's not, then check to see if it's implemented
+        // on an implemented interface.
+
+      return null;
+    }
+
+// relevant test
+// com.google.javascript.jscomp.TypeCheckTest::testMethodInference9
+  public void testMethodInference9() throws Exception {
+    testTypes(
+        " function F() {}" +
+        "F.prototype.foo = function() { };" +
+        " " +
+        "function G() {}" +
+        " " +
+        "G.prototype.foo = function(a, var_args, opt_b) { };",
+        "variable length argument must be last");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStaticMethodDeclaration1
+  public void testStaticMethodDeclaration1() throws Exception {
+    testTypes(
+        " function F() { F.foo(true); }" +
+        " F.foo = function(x) {};",
+        "actual parameter 1 of F.foo does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStaticMethodDeclaration2
+  public void testStaticMethodDeclaration2() throws Exception {
+    testTypes(
+        "var goog = goog || {}; function f() { goog.foo(true); }" +
+        " goog.foo = function(x) {};",
+        "actual parameter 1 of goog.foo does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStaticMethodDeclaration3
+  public void testStaticMethodDeclaration3() throws Exception {
+    testTypes(
+        "var goog = goog || {}; function f() { goog.foo(true); }" +
+        "goog.foo = function() {};",
+        "Function goog.foo: called with 1 argument(s). Function requires " +
+        "at least 0 argument(s) and no more than 0 argument(s).");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticMethodDecl1
+  public void testDuplicateStaticMethodDecl1() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo = function(x) {};" +
+        " goog.foo = function(x) {};",
+        "variable goog.foo redefined with type function (number): ?, " +
+        "original definition at  [testcode] :1 with type function (number): ?");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticMethodDecl2
+  public void testDuplicateStaticMethodDecl2() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo = function(x) {};" +
+        " " +
+        "goog.foo = function(x) {};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticMethodDecl3
+  public void testDuplicateStaticMethodDecl3() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        "goog.foo = function(x) {};" +
+        "goog.foo = function(x) {};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticMethodDecl4
+  public void testDuplicateStaticMethodDecl4() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo = function(x) {};" +
+        "goog.foo = function(x) {};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticMethodDecl5
+  public void testDuplicateStaticMethodDecl5() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        "goog.foo = function(x) {};" +
+        " goog.foo = function(x) {};",
+        "variable goog.foo redefined with type function (?): undefined, " +
+        "original definition at  [testcode] :1 with type function (?): ?");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl1
+  public void testDuplicateStaticPropertyDecl1() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo;" +
+        " function Foo() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl2
+  public void testDuplicateStaticPropertyDecl2() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo;" +
+        " function Foo() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl3
+  public void testDuplicateStaticPropertyDecl3() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo;" +
+        " function Foo() {}",
+        "variable goog.foo redefined with type string, " +
+        "original definition at  [testcode] :1 with type Foo");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl4
+  public void testDuplicateStaticPropertyDecl4() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo = 'x';" +
+        " function Foo() {}",
+        "variable goog.foo redefined with type string, " +
+        "original definition at  [testcode] :1 with type Foo");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl5
+  public void testDuplicateStaticPropertyDecl5() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo = 'x';" +
+        " function Foo() {}",
+        "variable goog.foo redefined with type string, " +
+        "original definition at  [testcode] :1 with type Foo");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl6
+  public void testDuplicateStaticPropertyDecl6() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo = 'y';" +
+        " goog.foo = 'x';");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl7
+  public void testDuplicateStaticPropertyDecl7() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl8
+  public void testDuplicateStaticPropertyDecl8() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " function EventCopy() {}" +
+        " goog.foo;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateStaticPropertyDecl9
+  public void testDuplicateStaticPropertyDecl9() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.foo;" +
+        " goog.foo;" +
+        " function EventCopy() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDuplicateLocalVarDecl
+  public void testDuplicateLocalVarDecl() throws Exception {
+    testTypes(
+        "\n" +
+        "function f(x) {  var x = ''; }",
+        "variable x redefined with type string, " +
+        "original definition at  [testcode] :2 with type number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration1
+  public void testStubFunctionDeclaration1() throws Exception {
+    testFunctionType(
+        " function f() {};" +
+        " f.prototype.foo;",
+        "(new f).foo",
+        "function (this:f, number, string): number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration2
+  public void testStubFunctionDeclaration2() throws Exception {
+    testFunctionType(
+        " function f() {};" +
+        " f.subclass;",
+        "f.subclass",
+        "function (this:f.subclass): ?");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration3
+  public void testStubFunctionDeclaration3() throws Exception {
+    testFunctionType(
+        " function f() {};" +
+        " f.foo;",
+        "f.foo",
+        "function (): undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration4
+  public void testStubFunctionDeclaration4() throws Exception {
+    testFunctionType(
+        " function f() { " +
+        "   this.foo;" +
+        "}",
+        "(new f).foo",
+        "function (this:f): number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration5
+  public void testStubFunctionDeclaration5() throws Exception {
+    testFunctionType(
+        " function f() { " +
+        "   this.foo;" +
+        "}",
+        "(new f).foo",
+        createNullableType(U2U_CONSTRUCTOR_TYPE).toString());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration6
+  public void testStubFunctionDeclaration6() throws Exception {
+    testFunctionType(
+        " function f() {} " +
+        " f.prototype.foo;",
+        "(new f).foo",
+        createNullableType(U2U_CONSTRUCTOR_TYPE).toString());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration7
+  public void testStubFunctionDeclaration7() throws Exception {
+    testFunctionType(
+        " function f() {} " +
+        " f.prototype.foo = function() {};",
+        "(new f).foo",
+        createNullableType(U2U_CONSTRUCTOR_TYPE).toString());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration8
+  public void testStubFunctionDeclaration8() throws Exception {
+    
+    testFunctionType(
+        " var f = function() {}; ",
+        "f",
+        createNullableType(U2U_CONSTRUCTOR_TYPE).
+          restrictByNotNullOrUndefined().toString());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration9
+  public void testStubFunctionDeclaration9() throws Exception {
+    testFunctionType(
+        " var f; ",
+        "f",
+        "function (): number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStubFunctionDeclaration10
+  public void testStubFunctionDeclaration10() throws Exception {
+    testFunctionType(
+        " var f = function(x) {};",
+        "f",
+        "function (number): number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNestedFunctionInference1
+  public void testNestedFunctionInference1() throws Exception {
+    String nestedAssignOfFooAndBar =
+        " function f() {};" +
+        "f.prototype.foo = f.prototype.bar = function(){};";
+    testFunctionType(nestedAssignOfFooAndBar, "(new f).bar",
+        "function (this:f): ?");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testTypeRedefinition
+  public void testTypeRedefinition() throws Exception {
+    testTypes("a={}; a.A = {ZOR:'b'};"
+        + " a.A = function() {}",
+        "variable a.A redefined with type function (this:a.A): ?, " +
+        "original definition at  [testcode] :1 with type enum{a.A}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testIn1
+  public void testIn1() throws Exception {
+    testTypes("'foo' in Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testIn2
+  public void testIn2() throws Exception {
+    testTypes("3 in Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testIn3
+  public void testIn3() throws Exception {
+    testTypes("undefined in Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testIn4
+  public void testIn4() throws Exception {
+    testTypes("Date in Object",
+        "left side of 'in'\n" +
+        "found   : function (this:Date, ?, ?, ?, ?, ?, ?, ?): string\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testIn5
+  public void testIn5() throws Exception {
+    testTypes("'x' in null",
+        "'in' requires an object\n" +
+        "found   : null\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison2
+  public void testComparison2() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "if (a!==b) {}",
+        "condition always evaluates to the same value\n" +
+        "left : number\n" +
+        "right: Date");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison3
+  public void testComparison3() throws Exception {
+    
+    testTypes("var a;" +
+        "var b = a == null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison4
+  public void testComparison4() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "var c = a == b");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison5
+  public void testComparison5() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "a == b",
+        "condition always evaluates to true\n" +
+        "left : null\n" +
+        "right: null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison6
+  public void testComparison6() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "a != b",
+        "condition always evaluates to false\n" +
+        "left : null\n" +
+        "right: null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison7
+  public void testComparison7() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "a == b",
+        "condition always evaluates to true\n" +
+        "left : undefined\n" +
+        "right: undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison8
+  public void testComparison8() throws Exception {
+    testTypes(" var a = [];" +
+        "a[0] == null || a[1] == undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison9
+  public void testComparison9() throws Exception {
+    testTypes(" var a = [];" +
+        "a[0] == null",
+        "condition always evaluates to true\n" +
+        "left : undefined\n" +
+        "right: null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testComparison10
+  public void testComparison10() throws Exception {
+    testTypes(" var a = [];" +
+        "a[0] === null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnumStaticMethod1
+  public void testEnumStaticMethod1() throws Exception {
+    testTypes(
+        " var Foo = {AAA: 1};" +
+        " Foo.method = function(x) {};" +
+        "Foo.method(true);",
+        "actual parameter 1 of Foo.method does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnumStaticMethod2
+  public void testEnumStaticMethod2() throws Exception {
+    testTypes(
+        " var Foo = {AAA: 1};" +
+        " Foo.method = function(x) {};" +
+        "function f() { Foo.method(true); }",
+        "actual parameter 1 of Foo.method does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum1
+  public void testEnum1() throws Exception {
+    testTypes("var a={BB:1,CC:2};\n" +
+        "var d;d=a.BB;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum2
+  public void testEnum2() throws Exception {
+    testTypes("var a={b:1}",
+        "enum key b must be a syntactic constant");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum3
+  public void testEnum3() throws Exception {
+    testTypes("var a={BB:1,BB:2}",
+        "enum element BB already defined", true);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum4
+  public void testEnum4() throws Exception {
+    testTypes("var a={BB:'string'}",
+        "element type must match enum's type\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum5
+  public void testEnum5() throws Exception {
+    testTypes("var a={BB:'string'}",
+        "element type must match enum's type\n" +
+        "found   : string\n" +
+        "required: (String|null)");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum6
+  public void testEnum6() throws Exception {
+    testTypes("var a={BB:1,CC:2};\nvar d;d=a.BB;",
+        "assignment\n" +
+        "found   : a.<number>\n" +
+        "required: Array");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum7
+  public void testEnum7() throws Exception {
+    testTypes("var a={AA:1,BB:2,CC:3};" +
+        "var b=a.D;",
+        "element D does not exist on this enum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum8
+  public void testEnum8() throws Exception {
+    testTypes("var a=8;",
+        "enum initializer must be an object literal or an enum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum9
+  public void testEnum9() throws Exception {
+    testTypes(
+        "var goog = {};" +
+        "goog.a=8;",
+        "enum initializer must be an object literal or an enum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum10
+  public void testEnum10() throws Exception {
+    testTypes(
+        "" +
+        "goog.K = { A : 3 };");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum11
+  public void testEnum11() throws Exception {
+    testTypes(
+        "" +
+        "goog.K = { 502 : 3 };");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum12
+  public void testEnum12() throws Exception {
+    testTypes(
+        " var a = {};" +
+        " var b = a;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum13
+  public void testEnum13() throws Exception {
+    testTypes(
+        " var a = {};" +
+        " var b = a;",
+        "incompatible enum element types\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum14
+  public void testEnum14() throws Exception {
+    testTypes(
+        " var a = {FOO:5};" +
+        " var b = a;" +
+        "var c = b.FOO;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum15
+  public void testEnum15() throws Exception {
+    testTypes(
+        " var a = {FOO:5};" +
+        " var b = a;" +
+        "var c = b.BAR;",
+        "element BAR does not exist on this enum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum16
+  public void testEnum16() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.a={BB:1,BB:2}",
+        "enum element BB already defined", true);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum17
+  public void testEnum17() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.a={BB:'string'}",
+        "element type must match enum's type\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum18
+  public void testEnum18() throws Exception {
+    testTypes(" var E = {A: 1, B: 2};" +
+        "\n" +
+        "var f = function(x) { return x; };");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum19
+  public void testEnum19() throws Exception {
+    testTypes(" var E = {A: 1, B: 2};" +
+        "\n" +
+        "var f = function(x) { return x; };",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: E.<number>");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum20
+  public void testEnum20() throws Exception {
+    testTypes(" var E = {A: 1, B: 2}; var x = []; x[E.A] = 0;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum21
+  public void testEnum21() throws Exception {
+    Node n = parseAndTypeCheck(
+        " var E = {A : 'a', B : 'b'};\n" +
+        " function f(x) { return x; }");
+    Node nodeX = n.getLastChild().getLastChild().getLastChild().getLastChild();
+    JSType typeE = nodeX.getJSType();
+    assertFalse(typeE.isObject());
+    assertFalse(typeE.isNullable());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum22
+  public void testEnum22() throws Exception {
+    testTypes(" var E = {A: 1, B: 2};" +
+        " function f(x) {return x}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum23
+  public void testEnum23() throws Exception {
+    testTypes(" var E = {A: 1, B: 2};" +
+        " function f(x) {return x}",
+        "inconsistent return type\n" +
+        "found   : E.<number>\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum24
+  public void testEnum24() throws Exception {
+    testTypes(" var E = {A: {}};" +
+        " function f(x) {return x}",
+        "inconsistent return type\n" +
+        "found   : E.<(Object|null)>\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum25
+  public void testEnum25() throws Exception {
+    testTypes(" var E = {A: {}};" +
+        " function f(x) {return x}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum26
+  public void testEnum26() throws Exception {
+    testTypes("var a = {};  a.B = {A: 1, B: 2};" +
+        " function f(x) {return x}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum27
+  public void testEnum27() throws Exception {
+    
+    testTypes(" var A = {B: 1, C: 2}; " +
+        "function f(x) { return A == x; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum28
+  public void testEnum28() throws Exception {
+    
+    testTypes(" var A = {B: 1, C: 2}; " +
+        "function f(x) { return A.B == x; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum29
+  public void testEnum29() throws Exception {
+    testTypes(" var A = {B: 1, C: 2}; " +
+        " function f() { return A; }",
+        "inconsistent return type\n" +
+        "found   : enum{A}\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum30
+  public void testEnum30() throws Exception {
+    testTypes(" var A = {B: 1, C: 2}; " +
+        " function f() { return A.B; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum31
+  public void testEnum31() throws Exception {
+    testTypes(" var A = {B: 1, C: 2}; " +
+        " function f() { return A; }",
+        "inconsistent return type\n" +
+        "found   : enum{A}\n" +
+        "required: A.<number>");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum32
+  public void testEnum32() throws Exception {
+    testTypes(" var A = {B: 1, C: 2}; " +
+        " function f() { return A.B; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum34
+  public void testEnum34() throws Exception {
+    testTypes(" var A = {B: 1, C: 2}; " +
+        " function f(x) { return x == A.B; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum35
+  public void testEnum35() throws Exception {
+    testTypes("var a = a || {};  a.b = {C: 1, D: 2};" +
+              " function f() { return a.b.C; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum36
+  public void testEnum36() throws Exception {
+    testTypes("var a = a || {};  a.b = {C: 1, D: 2};" +
+              " function f() { return 1; }",
+              "inconsistent return type\n" +
+              "found   : number\n" +
+              "required: a.b.<number>");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum37
+  public void testEnum37() throws Exception {
+    testTypes(
+        "var goog = goog || {};" +
+        " goog.a = {};" +
+        " var b = goog.a;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum38
+  public void testEnum38() throws Exception {
+    testTypes(
+        " var MyEnum = {};" +
+        " function f(x) {}",
+        "Parse error. Cycle detected in inheritance chain " +
+        "of type MyEnum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum39
+  public void testEnum39() throws Exception {
+    testTypes(
+        " var MyEnum = {FOO: new Number(1)};" +
+        "" +
+        "function f(x) { return x == MyEnum.FOO && MyEnum.FOO == x; }",
+        "inconsistent return type\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testEnum40
+  public void testEnum40() throws Exception {
+    testTypes(
+        " var MyEnum = {FOO: new Number(1)};" +
+        "" +
+        "function f(x) { return x == MyEnum.FOO && MyEnum.FOO == x; }",
+        "inconsistent return type\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAliasedEnum1
+  public void testAliasedEnum1() throws Exception {
+    testTypes(
+        " var YourEnum = {FOO: 3};" +
+        " var MyEnum = YourEnum;" +
+        " function f(x) {} f(MyEnum.FOO);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAliasedEnum2
+  public void testAliasedEnum2() throws Exception {
+    testTypes(
+        " var YourEnum = {FOO: 3};" +
+        " var MyEnum = YourEnum;" +
+        " function f(x) {} f(MyEnum.FOO);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAliasedEnum3
+  public void testAliasedEnum3() throws Exception {
+    testTypes(
+        " var YourEnum = {FOO: 3};" +
+        " var MyEnum = YourEnum;" +
+        " function f(x) {} f(YourEnum.FOO);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAliasedEnum4
+  public void testAliasedEnum4() throws Exception {
+    testTypes(
+        " var YourEnum = {FOO: 3};" +
+        " var MyEnum = YourEnum;" +
+        " function f(x) {} f(YourEnum.FOO);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAliasedEnum5
+  public void testAliasedEnum5() throws Exception {
+    testTypes(
+        " var YourEnum = {FOO: 3};" +
+        " var MyEnum = YourEnum;" +
+        " function f(x) {} f(MyEnum.FOO);",
+        "actual parameter 1 of f does not match formal parameter\n" +
+        "found   : YourEnum.<number>\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsEnumUse1
+  public void testBackwardsEnumUse1() throws Exception {
+    testTypes(
+        " function f() { return MyEnum.FOO; }" +
+        " var MyEnum = {FOO: 'x'};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsEnumUse2
+  public void testBackwardsEnumUse2() throws Exception {
+    testTypes(
+        " function f() { return MyEnum.FOO; }" +
+        " var MyEnum = {FOO: 'x'};",
+        "inconsistent return type\n" +
+        "found   : MyEnum.<string>\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsEnumUse3
+  public void testBackwardsEnumUse3() throws Exception {
+    testTypes(
+        " function f() { return MyEnum.FOO; }" +
+        " var YourEnum = {FOO: 'x'};" +
+        " var MyEnum = YourEnum;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsEnumUse4
+  public void testBackwardsEnumUse4() throws Exception {
+    testTypes(
+        " function f() { return MyEnum.FOO; }" +
+        " var YourEnum = {FOO: 'x'};" +
+        " var MyEnum = YourEnum;",
+        "inconsistent return type\n" +
+        "found   : YourEnum.<string>\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsEnumUse5
+  public void testBackwardsEnumUse5() throws Exception {
+    testTypes(
+        " function f() { return MyEnum.BAR; }" +
+        " var YourEnum = {FOO: 'x'};" +
+        " var MyEnum = YourEnum;",
+        "element BAR does not exist on this enum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsConstructor1
+  public void testBackwardsConstructor1() throws Exception {
+    testTypes(
+        "function f() { (new Foo(true)); }" +
+        "" +
+        "var Foo = function(x) {};",
+        "actual parameter 1 of Foo does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBackwardsConstructor2
+  public void testBackwardsConstructor2() throws Exception {
+    testTypes(
+        "function f() { (new Foo(true)); }" +
+        "" +
+        "var YourFoo = function(x) {};" +
+        "" +
+        "var Foo = YourFoo;",
+        "actual parameter 1 of Foo does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testMinimalConstructorAnnotation
+  public void testMinimalConstructorAnnotation() throws Exception {
+    testTypes("function Foo(){}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends1
+  public void testGoodExtends1() throws Exception {
+    
+    testTypes("function base() {}\n" +
+        "function derived() {}\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends2
+  public void testGoodExtends2() throws Exception {
+    testTypes("function derived() {}\n" +
+        "function base() {}\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends3
+  public void testGoodExtends3() throws Exception {
+    testTypes("function base() {}\n" +
+        "function derived() {}\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends4
+  public void testGoodExtends4() throws Exception {
+    
+    
+    
+    Node n = parseAndTypeCheck(
+        "var goog = {};\n" +
+        "goog.Base = function(){};\n" +
+        "goog.Derived = function(){};\n");
+    Node subTypeName = n.getLastChild().getLastChild().getFirstChild();
+    assertEquals("goog.Derived", subTypeName.getQualifiedName());
+
+    FunctionType subCtorType =
+        (FunctionType) subTypeName.getNext().getJSType();
+    assertEquals("goog.Derived", subCtorType.getInstanceType().toString());
+
+    JSType superType = subCtorType.getPrototype().getImplicitPrototype();
+    assertEquals("goog.Base", superType.toString());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends5
+  public void testGoodExtends5() throws Exception {
+    
+    testTypes("function base() {}\n" +
+        "function derived() {}\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends6
+  public void testGoodExtends6() throws Exception {
+    testFunctionType(
+        CLOSURE_DEFS +
+        "function base() {}\n" +
+        " " +
+        "  base.prototype.foo = function() { return 1; };\n" +
+        "function derived() {}\n" +
+        "goog.inherits(derived, base);",
+        "derived.superClass_.foo",
+        "function (this:base): number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends7
+  public void testGoodExtends7() throws Exception {
+    testFunctionType(
+        "Function.prototype.inherits = function(x) {};" +
+        "function base() {}\n" +
+        "function derived() {}\n" +
+        "derived.inherits(base);",
+        "(new derived).constructor",
+        "function (this:derived): ?");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodExtends8
+  public void testGoodExtends8() throws Exception {
+    testTypes(" function Sub() {}" +
+        " function f() { return (new Sub()).foo; }" +
+        " function Base() {}" +
+        " Base.prototype.foo = true;",
+        "inconsistent return type\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadExtends1
+  public void testBadExtends1() throws Exception {
+    testTypes("function base() {}\n" +
+        "function derived() {}\n",
+        "Parse error. Unknown type not_base");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadExtends2
+  public void testBadExtends2() throws Exception {
+    testTypes("function base() {\n" +
+        "\n" +
+        "this.baseMember = new Number(4);\n" +
+        "}\n" +
+        "function derived() {}\n" +
+        "\n" +
+        "function foo(x){ }\n" +
+        "var y;\n" +
+        "foo(y.baseMember);\n",
+        "actual parameter 1 of foo does not match formal parameter\n" +
+        "found   : Number\n" +
+        "required: String");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadExtends3
+  public void testBadExtends3() throws Exception {
+    testTypes("function base() {}",
+        "@extends used without @constructor or @interface for base");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testLateExtends
+  public void testLateExtends() throws Exception {
+    testTypes(
+        CLOSURE_DEFS +
+        " function Foo() {}\n" +
+        "Foo.prototype.foo = function() {};\n" +
+        "function Bar() {}\n" +
+        "goog.inherits(Foo, Bar);\n",
+        "Missing @extends tag on type Foo");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSuperclassMatch
+  public void testSuperclassMatch() throws Exception {
+    compiler.options_.setCodingConvention(new GoogleCodingConvention());
+    testTypes(" var Foo = function() {};\n" +
+        " var Bar = function() {};\n" +
+        "Bar.inherits = function(x){};" +
+        "Bar.inherits(Foo);\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSuperclassMatchWithMixin
+  public void testSuperclassMatchWithMixin() throws Exception {
+    compiler.options_.setCodingConvention(new GoogleCodingConvention());
+    testTypes(" var Foo = function() {};\n" +
+        " var Baz = function() {};\n" +
+        " var Bar = function() {};\n" +
+        "Bar.inherits = function(x){};" +
+        "Bar.mixin = function(y){};" +
+        "Bar.inherits(Foo);\n" +
+        "Bar.mixin(Baz);\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSuperclassMismatch1
+  public void testSuperclassMismatch1() throws Exception {
+    compiler.options_.setCodingConvention(new GoogleCodingConvention());
+    testTypes(" var Foo = function() {};\n" +
+        " var Bar = function() {};\n" +
+        "Bar.inherits = function(x){};" +
+        "Bar.inherits(Foo);\n",
+        "Missing @extends tag on type Bar");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSuperclassMismatch2
+  public void testSuperclassMismatch2() throws Exception {
+    compiler.options_.setCodingConvention(new GoogleCodingConvention());
+    testTypes(" var Foo = function(){};\n" +
+        " var Bar = function(){};\n" +
+        "Bar.inherits = function(x){};" +
+        "Bar.inherits(Foo);",
+        "Missing @extends tag on type Bar");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSuperClassDefinedAfterSubClass1
+  public void testSuperClassDefinedAfterSubClass1() throws Exception {
+    testTypes(
+        " function A() {}" +
+        " function B() {}" +
+        " function Base() {}" +
+        " " +
+        "function foo(x) { return x; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSuperClassDefinedAfterSubClass2
+  public void testSuperClassDefinedAfterSubClass2() throws Exception {
+    testTypes(
+        " function A() {}" +
+        " function B() {}" +
+        " " +
+        "function foo(x) { return x; }" +
+        " function Base() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDirectPrototypeAssignment1
+  public void testDirectPrototypeAssignment1() throws Exception {
+    testTypes(
+        " function Base() {}" +
+        "Base.prototype.foo = 3;" +
+        " function A() {}" +
+        "A.prototype = new Base();" +
+        " function foo() { return (new A).foo; }",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testDirectPrototypeAssignment2
+  public void testDirectPrototypeAssignment2() throws Exception {
+    
+    
+    testTypes(
+        " function Base() {}" +
+        " function A() {}" +
+        "A.prototype = new Base();" +
+        "A.prototype.foo = 3;" +
+        " function foo() { return (new Base).foo; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodImplements1
+  public void testGoodImplements1() throws Exception {
+    testTypes("function Disposable() {}\n" +
+        "function f() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodImplements2
+  public void testGoodImplements2() throws Exception {
+    testTypes("function Base1() {}\n" +
+        "function Base2() {}\n" +
+        " function derived() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGoodImplements3
+  public void testGoodImplements3() throws Exception {
+    testTypes("function Disposable() {}\n" +
+        "function f() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadImplements1
+  public void testBadImplements1() throws Exception {
+    testTypes("function Base1() {}\n" +
+        "function Base2() {}\n" +
+        " function derived() {}",
+        "Parse error. Unknown type nonExistent");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadImplements2
+  public void testBadImplements2() throws Exception {
+    testTypes("function Disposable() {}\n" +
+        "function f() {}",
+        "@implements used without @constructor or @interface for f");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceExtends
+  public void testInterfaceExtends() throws Exception {
+    testTypes("function A() {}\n" +
+        "function B() {}\n" +
+        " function derived() {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadInterfaceExtends1
+  public void testBadInterfaceExtends1() throws Exception {
+    testTypes("function A() {}",
+        "Parse error. Unknown type nonExistent");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadInterfaceExtends2
+  public void testBadInterfaceExtends2() throws Exception {
+    testTypes("function A() {}\n" +
+        "function B() {}",
+        "B cannot extend this type; a constructor can only extend objects " +
+        "and an interface can only extend interfaces");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadInterfaceExtends3
+  public void testBadInterfaceExtends3() throws Exception {
+    testTypes("function A() {}\n" +
+        "function B() {}",
+        "B cannot extend this type; a constructor can only extend objects " +
+        "and an interface can only extend interfaces");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadInterfaceExtends4
+  public void testBadInterfaceExtends4() throws Exception {
+    
+    
+    
+    testTypes("function A() {}\n" +
+        "function B() {}\n" +
+        "B.prototype = A;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadInterfaceExtends5
+  public void testBadInterfaceExtends5() throws Exception {
+    
+    
+    
+    testTypes("function A() {}\n" +
+        "function B() {}\n" +
+        "B.prototype = A;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadImplementsAConstructor
+  public void testBadImplementsAConstructor() throws Exception {
+    testTypes("function A() {}\n" +
+        "function B() {}",
+        "can only implement interfaces");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadImplementsNonInterfaceType
+  public void testBadImplementsNonInterfaceType() throws Exception {
+    testTypes("function B() {}",
+        "can only implement interfaces");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBadImplementsNonObjectType
+  public void testBadImplementsNonObjectType() throws Exception {
+    testTypes("function S() {}",
+        "can only implement interfaces");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment1
+  public void testInterfaceAssignment1() throws Exception {
+    testTypes("var I = function() {};\n" +
+        "var T = function() {};\n" +
+        "var t = new T();\n" +
+        "var i = t;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment2
+  public void testInterfaceAssignment2() throws Exception {
+    testTypes("var I = function() {};\n" +
+        "var T = function() {};\n" +
+        "var t = new T();\n" +
+        "var i = t;",
+        "initializing variable\n" +
+        "found   : T\n" +
+        "required: I");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment3
+  public void testInterfaceAssignment3() throws Exception {
+    testTypes("var I = function() {};\n" +
+        "var T = function() {};\n" +
+        "var t = new T();\n" +
+        "var i = t;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment4
+  public void testInterfaceAssignment4() throws Exception {
+    testTypes("var I1 = function() {};\n" +
+        "var I2 = function() {};\n" +
+        "var T = function() {};\n" +
+        "var t = new T();\n" +
+        "var i = t;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment5
+  public void testInterfaceAssignment5() throws Exception {
+    testTypes("var I1 = function() {};\n" +
+        "var I2 = function() {};\n" +
+        "" +
+        "var T = function() {};\n" +
+        "var t = new T();\n" +
+        "var i1 = t;\n" +
+        "var i2 = t;\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment6
+  public void testInterfaceAssignment6() throws Exception {
+    testTypes("var I1 = function() {};\n" +
+        "var I2 = function() {};\n" +
+        "var T = function() {};\n" +
+        "var i1 = new T();\n" +
+        "var i2 = i1;\n",
+        "initializing variable\n" +
+        "found   : I1\n" +
+        "required: I2");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment7
+  public void testInterfaceAssignment7() throws Exception {
+    testTypes("var I1 = function() {};\n" +
+        "var I2 = function() {};\n" +
+        "var T = function() {};\n" +
+        "var t = new T();\n" +
+        "var i1 = t;\n" +
+        "var i2 = t;\n" +
+        "i1 = i2;\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment8
+  public void testInterfaceAssignment8() throws Exception {
+    testTypes("var I = function() {};\n" +
+        "var i;\n" +
+        "var o = i;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment9
+  public void testInterfaceAssignment9() throws Exception {
+    testTypes("var I = function() {};\n" +
+        "function f() { return null; }\n" +
+        "var i = f();\n",
+        "initializing variable\n" +
+        "found   : (I|null)\n" +
+        "required: I");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment10
+  public void testInterfaceAssignment10() throws Exception {
+    testTypes("var I1 = function() {};\n" +
+        "var I2 = function() {};\n" +
+        "var T = function() {};\n" +
+        "function f() { return new T(); }\n" +
+        "var i1 = f();\n",
+        "initializing variable\n" +
+        "found   : (I1|I2)\n" +
+        "required: I1");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment11
+  public void testInterfaceAssignment11() throws Exception {
+    testTypes("var I1 = function() {};\n" +
+        "var I2 = function() {};\n" +
+        "var T = function() {};\n" +
+        "function f() { return new T(); }\n" +
+        "var i1 = f();\n",
+        "initializing variable\n" +
+        "found   : (I1|I2|T)\n" +
+        "required: I1");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment12
+  public void testInterfaceAssignment12() throws Exception {
+    testTypes("var I = function() {};\n" +
+              "var T1 = function() {};\n" +
+              "var T2 = function() {};\n" +
+              "function f() { return new T2(); }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testInterfaceAssignment13
+  public void testInterfaceAssignment13() throws Exception {
+    testTypes("var I = function() {};\n" +
+        "var T = function() {};\n" +
+        "function Super() {};\n" +
+        "Super.prototype.foo = " +
+        "function() { return new T(); };\n" +
+        "function Sub() {}\n" +
+        "Sub.prototype.foo = " +
+        "function() { return new T(); };\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGetprop1
+  public void testGetprop1() throws Exception {
+    testTypes("function foo(){foo().bar;}",
+        "undefined has no properties\n" +
+        "found   : undefined\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess1
+  public void testArrayAccess1() throws Exception {
+    testTypes("var a = []; var b = a['hi'];");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess2
+  public void testArrayAccess2() throws Exception {
+    testTypes("var a = []; var b = a[[1,2]];",
+        "array access\n" +
+        "found   : Array\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess3
+  public void testArrayAccess3() throws Exception {
+    testTypes("var bar = [];" +
+        "function baz(){};" +
+        "var foo = bar[baz()];",
+        "array access\n" +
+        "found   : undefined\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess4
+  public void testArrayAccess4() throws Exception {
+    testTypes("function foo(){};var bar = foo()[foo()];",
+        "array access\n" +
+        "found   : Array\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess6
+  public void testArrayAccess6() throws Exception {
+    testTypes("var bar = null[1];",
+        "only arrays or objects can be accessed\n" +
+        "found   : null\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess7
+  public void testArrayAccess7() throws Exception {
+    testTypes("var bar = void 0; bar[0];",
+        "only arrays or objects can be accessed\n" +
+        "found   : undefined\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testArrayAccess8
+  public void testArrayAccess8() throws Exception {
+    
+    
+    testTypes("var bar = void 0; bar[0]; bar[1];",
+        "only arrays or objects can be accessed\n" +
+        "found   : undefined\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testPropAccess
+  public void testPropAccess() throws Exception {
+    testTypes("var f = function(x) {\n" +
+        "var o = String(x);\n" +
+        "if (typeof o['a'] != 'undefined') { return o['a']; }\n" +
+        "return null;\n" +
+        "};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testPropAccess2
+  public void testPropAccess2() throws Exception {
+    testTypes("var bar = void 0; bar.baz;",
+        "undefined has no properties\n" +
+        "found   : undefined\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testPropAccess3
+  public void testPropAccess3() throws Exception {
+    
+    
+    testTypes("var bar = void 0; bar.baz; bar.bax;",
+        "undefined has no properties\n" +
+        "found   : undefined\n" +
+        "required: Object");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testPropAccess4
+  public void testPropAccess4() throws Exception {
+    testTypes(" function f(x) { return x['hi']; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSwitchCase1
+  public void testSwitchCase1() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "switch(a){case b:;}",
+        "case expression doesn't match switch\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSwitchCase2
+  public void testSwitchCase2() throws Exception {
+    testTypes("var a = null; switch (typeof a) { case 'foo': }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar1
+  public void testVar1() throws Exception {
+    Pair<Node, Scope> p =
+        parseAndTypeCheckWithScope("var a = null");
+
+    assertEquals(createUnionType(STRING_TYPE, NULL_TYPE),
+        p.getSecond().getVar("a").getType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar2
+  public void testVar2() throws Exception {
+    testTypes(" var a = function(){}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar3
+  public void testVar3() throws Exception {
+    Pair<Node, Scope> p = parseAndTypeCheckWithScope("var a = 3;");
+
+    assertEquals(NUMBER_TYPE, p.second.getVar("a").getType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar4
+  public void testVar4() throws Exception {
+    Pair<Node, Scope> p = parseAndTypeCheckWithScope(
+        "var a = 3; a = 'string';");
+
+    assertEquals(createUnionType(STRING_TYPE, NUMBER_TYPE),
+        p.second.getVar("a").getType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar5
+  public void testVar5() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.foo = 'hello';" +
+        "var a = goog.foo;",
+        "initializing variable\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar6
+  public void testVar6() throws Exception {
+    testTypes(
+        "function f() {" +
+        "  return function() {" +
+        "    " +
+        "    var a = 7;" +
+        "  };" +
+        "}",
+        "initializing variable\n" +
+        "found   : number\n" +
+        "required: Date");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar7
+  public void testVar7() throws Exception {
+    testTypes("var a, b;",
+        "declaration of multiple variables with shared type information");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar8
+  public void testVar8() throws Exception {
+    testTypes("var a, b;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar9
+  public void testVar9() throws Exception {
+    testTypes("var a;",
+        "enum initializer must be an object literal or an enum");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar10
+  public void testVar10() throws Exception {
+    testTypes("var foo = 'abc';",
+        "initializing variable\n" +
+        "found   : string\n" +
+        "required: Number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar11
+  public void testVar11() throws Exception {
+    testTypes("var foo = 'abc';",
+        "initializing variable\n" +
+        "found   : string\n" +
+        "required: Date");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar12
+  public void testVar12() throws Exception {
+    testTypes("var foo = 'abc', " +
+        "bar = 5;",
+        new String[] {
+        "initializing variable\n" +
+        "found   : string\n" +
+        "required: Date",
+        "initializing variable\n" +
+        "found   : number\n" +
+        "required: RegExp"});
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar13
+  public void testVar13() throws Exception {
+    
+    testTypes("var a,a;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar14
+  public void testVar14() throws Exception {
+    testTypes(" function f() { var x; return x; }",
+        "inconsistent return type\n" +
+        "found   : undefined\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testVar15
+  public void testVar15() throws Exception {
+    testTypes("" +
+        "function f() { var x = x || {}; return x; }",
+        "inconsistent return type\n" +
+        "found   : {...}\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAssign1
+  public void testAssign1() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.foo = 'hello';",
+        "assignment to property foo of goog\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAssign2
+  public void testAssign2() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.foo = 3;" +
+        "goog.foo = 'hello';",
+        "assignment to property foo of goog\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAssign3
+  public void testAssign3() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.foo = 3;" +
+        "goog.foo = 4;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAssign4
+  public void testAssign4() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.foo = 3;" +
+        "goog.foo = 'hello';");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAssignInference
+  public void testAssignInference() throws Exception {
+    testTypes(
+        "" +
+        "function f(x) {" +
+        "  var y = null;" +
+        "  y = x[0];" +
+        "  if (y == null) { return 4; } else { return 6; }" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testOr1
+  public void testOr1() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "a + b || undefined;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testOr2
+  public void testOr2() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "var c = a + b || undefined;",
+        "initializing variable\n" +
+        "found   : (number|undefined)\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testOr3
+  public void testOr3() throws Exception {
+    testTypes("var a;" +
+        "var c = a || 3;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testOr4
+  public void testOr4() throws Exception {
+     testTypes("var x;x=null || \"a\";",
+         "assignment\n" +
+         "found   : string\n" +
+         "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testOr5
+  public void testOr5() throws Exception {
+     testTypes("var x;x=undefined || \"a\";",
+         "assignment\n" +
+         "found   : string\n" +
+         "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd1
+  public void testAnd1() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "a + b && undefined;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd2
+  public void testAnd2() throws Exception {
+    testTypes("var a;" +
+        "var b;" +
+        "var c = a + b && undefined;",
+        "initializing variable\n" +
+        "found   : (number|undefined)\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd3
+  public void testAnd3() throws Exception {
+    testTypes("var a;" +
+        "var c = a && undefined;",
+        "initializing variable\n" +
+        "found   : undefined\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd4
+  public void testAnd4() throws Exception {
+    testTypes("function f(x){};\n" +
+        "var x; var y;\n" +
+        "if (x && y) { f(y) }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd5
+  public void testAnd5() throws Exception {
+    testTypes("function f(x,y){};\n" +
+        "var x; var y;\n" +
+        "if (x && y) { f(x, y) }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd6
+  public void testAnd6() throws Exception {
+    testTypes("function f(x){};\n" +
+        "var x;\n" +
+        "if (x && f(x)) { f(x) }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testAnd7
+  public void testAnd7() throws Exception {
+    
+    
+    
+    
+    testTypes("var x; if (x && x) {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHook
+  public void testHook() throws Exception {
+    testTypes("function foo(){ var x=foo()?a:b; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType1
+  public void testHookRestrictsType1() throws Exception {
+    testTypes("" +
+        "function f() { return null;}" +
+        " var a = f();" +
+        "" +
+        "var b = a ? a : 'default';");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType2
+  public void testHookRestrictsType2() throws Exception {
+    testTypes("" +
+        "var a = null;" +
+        "" +
+        "var b = a ? null : a;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType3
+  public void testHookRestrictsType3() throws Exception {
+    testTypes("" +
+        "var a;" +
+        "" +
+        "var b = (!a) ? a : null;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType4
+  public void testHookRestrictsType4() throws Exception {
+    testTypes("" +
+        "var a;" +
+        "" +
+        "var b = a != null ? a : true;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType5
+  public void testHookRestrictsType5() throws Exception {
+    testTypes("" +
+        "var a;" +
+        "" +
+        "var b = a == null ? a : undefined;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType6
+  public void testHookRestrictsType6() throws Exception {
+    testTypes("" +
+        "var a;" +
+        "" +
+        "var b = a == null ? 5 : a;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHookRestrictsType7
+  public void testHookRestrictsType7() throws Exception {
+    testTypes("" +
+        "var a;" +
+        "" +
+        "var b = a == undefined ? 5 : a;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testWhileRestrictsType1
+  public void testWhileRestrictsType1() throws Exception {
+    testTypes(" function g(x) {}" +
+        "\n" +
+        "function f(x) {\n" +
+        "while (x) {\n" +
+        "if (g(x)) { x = 1; }\n" +
+        "x = x-1;\n}\n}",
+        "actual parameter 1 of g does not match formal parameter\n" +
+        "found   : number\n" +
+        "required: null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testWhileRestrictsType2
+  public void testWhileRestrictsType2() throws Exception {
+    testTypes("\n" +
+        "function f(x) {\nvar y = 0;" +
+        "while (x) {\n" +
+        "y = x;\n" +
+        "x = x-1;\n}\n" +
+        "return y;}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHigherOrderFunctions1
+  public void testHigherOrderFunctions1() throws Exception {
+    testTypes(
+        "var f;" +
+        "f(true);",
+        "actual parameter 1 of f does not match formal parameter\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHigherOrderFunctions2
+  public void testHigherOrderFunctions2() throws Exception {
+    testTypes(
+        "var f;" +
+        "var a = f();",
+        "initializing variable\n" +
+        "found   : Date\n" +
+        "required: boolean");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHigherOrderFunctions3
+  public void testHigherOrderFunctions3() throws Exception {
+    testTypes(
+        "var f; new f",
+        "cannot instantiate non-constructor");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testHigherOrderFunctions4
+  public void testHigherOrderFunctions4() throws Exception {
+    testTypes(
+        "var f; new f",
+        "cannot instantiate non-constructor");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias1
+  public void testConstructorAlias1() throws Exception {
+    testTypes(
+        " var Foo = function() {};" +
+        " Foo.prototype.bar = 3;" +
+        " var FooAlias = Foo;" +
+        " function foo() { " +
+        "  return (new FooAlias()).bar; }",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias2
+  public void testConstructorAlias2() throws Exception {
+    testTypes(
+        " var Foo = function() {};" +
+        " var FooAlias = Foo;" +
+        " FooAlias.prototype.bar = 3;" +
+        " function foo() { " +
+        "  return (new Foo()).bar; }",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias3
+  public void testConstructorAlias3() throws Exception {
+    testTypes(
+        " var Foo = function() {};" +
+        " Foo.prototype.bar = 3;" +
+        "var FooAlias = Foo;" +
+        " function foo() { " +
+        "  return (new FooAlias()).bar; }",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias4
+  public void testConstructorAlias4() throws Exception {
+    testTypes(
+        " var Foo = function() {};" +
+        "var FooAlias = Foo;" +
+        " FooAlias.prototype.bar = 3;" +
+        " function foo() { " +
+        "  return (new Foo()).bar; }",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias5
+  public void testConstructorAlias5() throws Exception {
+    testTypes(
+        " var Foo = function() {};" +
+        " var FooAlias = Foo;" +
+        " function foo() { " +
+        "  return new Foo(); }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias6
+  public void testConstructorAlias6() throws Exception {
+    testTypes(
+        " var Foo = function() {};" +
+        " var FooAlias = Foo;" +
+        " function foo() { " +
+        "  return new FooAlias(); }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias7
+  public void testConstructorAlias7() throws Exception {
+    testTypes(
+        "var goog = {};" +
+        " goog.Foo = function() {};" +
+        " goog.FooAlias = goog.Foo;" +
+        " function foo() { " +
+        "  return new goog.FooAlias(); }",
+        "inconsistent return type\n" +
+        "found   : goog.Foo\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias8
+  public void testConstructorAlias8() throws Exception {
+    testTypes(
+        "var goog = {};" +
+        " goog.Foo = function(x) {};" +
+        " goog.FooAlias = goog.Foo;" +
+        " function foo() { " +
+        "  return new goog.FooAlias(1); }",
+        "inconsistent return type\n" +
+        "found   : goog.Foo\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias9
+  public void testConstructorAlias9() throws Exception {
+    testTypes(
+        "var goog = {};" +
+        " goog.Foo = function(x) {};" +
+        " goog.FooAlias = goog.Foo;" +
+        " function foo() { " +
+        "  return new goog.FooAlias(1); }",
+        "inconsistent return type\n" +
+        "found   : goog.Foo\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testConstructorAlias10
+  public void testConstructorAlias10() throws Exception {
+    testTypes(
+        " var Foo = function(x) {};" +
+        " var FooAlias = Foo;" +
+        " function foo() { " +
+        "  return new FooAlias(1); }",
+        "inconsistent return type\n" +
+        "found   : Foo\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testClosure1
+  public void testClosure1() throws Exception {
+    testClosureTypes(
+        CLOSURE_DEFS +
+        "var a;" +
+        "" +
+        "var b = goog.isDef(a) ? a : 'default';",
+        null);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testClosure2
+  public void testClosure2() throws Exception {
+    testClosureTypes(
+        CLOSURE_DEFS +
+        "var a;" +
+        "" +
+        "var b = goog.isNull(a) ? 'default' : a;",
+        null);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testClosure3
+  public void testClosure3() throws Exception {
+    testClosureTypes(
+        CLOSURE_DEFS +
+        "var a;" +
+        "" +
+        "var b = goog.isDefAndNotNull(a) ? a : 'default';",
+        null);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testClosure4
+  public void testClosure4() throws Exception {
+    testClosureTypes(
+        CLOSURE_DEFS +
+        "var a;" +
+        "" +
+        "var b = !goog.isDef(a) ? 'default' : a;",
+        null);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testClosure5
+  public void testClosure5() throws Exception {
+    testClosureTypes(
+        CLOSURE_DEFS +
+        "var a;" +
+        "" +
+        "var b = !goog.isNull(a) ? a : 'default';",
+        null);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testClosure6
+  public void testClosure6() throws Exception {
+    testClosureTypes(
+        CLOSURE_DEFS +
+        "var a;" +
+        "" +
+        "var b = !goog.isDefAndNotNull(a) ? 'default' : a;",
+        null);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn1
+  public void testReturn1() throws Exception {
+    testTypes("function foo(){ return 3; }",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn2
+  public void testReturn2() throws Exception {
+    testTypes("function foo(){ return; }",
+        "inconsistent return type\n" +
+        "found   : undefined\n" +
+        "required: Number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn3
+  public void testReturn3() throws Exception {
+    testTypes("function foo(){ return 'abc'; }",
+        "inconsistent return type\n" +
+        "found   : string\n" +
+        "required: Number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn4
+  public void testReturn4() throws Exception {
+    testTypes("\n function a(){return new Array();}",
+        "inconsistent return type\n" +
+        "found   : Array\n" +
+        "required: Number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn5
+  public void testReturn5() throws Exception {
+    testTypes("function n(n){return};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn6
+  public void testReturn6() throws Exception {
+    testTypes(
+        "" +
+        "function a(opt_a) { return opt_a }",
+        "inconsistent return type\n" +
+        "found   : (number|undefined)\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn7
+  public void testReturn7() throws Exception {
+    testTypes("var A = function() {};\n" +
+        "var B = function() {};\n" +
+        "A.f = function() { return 1; };",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: B");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testReturn8
+  public void testReturn8() throws Exception {
+    testTypes("var A = function() {};\n" +
+        "var B = function() {};\n" +
+        "A.prototype.f = function() { return 1; };",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: B");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis1
+  public void testThis1() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.A = function(){};" +
+        "goog.A.prototype.n = function() { return this };",
+        "inconsistent return type\n" +
+        "found   : goog.A\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis2
+  public void testThis2() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.A = function(){" +
+        "  this.foo = null;" +
+        "};" +
+        "" +
+        "goog.A.prototype.n = function() { return this.foo };",
+        "inconsistent return type\n" +
+        "found   : null\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis3
+  public void testThis3() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.A = function(){" +
+        "  this.foo = null;" +
+        "  this.foo = 5;" +
+        "};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis4
+  public void testThis4() throws Exception {
+    testTypes("var goog = {};" +
+        "goog.A = function(){" +
+        "  this.foo = null;" +
+        "};" +
+        "goog.A.prototype.n = function() {" +
+        "  return this.foo };",
+        "inconsistent return type\n" +
+        "found   : (null|string)\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis5
+  public void testThis5() throws Exception {
+    testTypes("function h() { return this }",
+        "inconsistent return type\n" +
+        "found   : Date\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis6
+  public void testThis6() throws Exception {
+    testTypes("var goog = {};" +
+        "" +
+        "goog.A = function(){ return this };",
+        "inconsistent return type\n" +
+        "found   : goog.A\n" +
+        "required: Date");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis7
+  public void testThis7() throws Exception {
+    testTypes("function A(){};" +
+        "A.prototype.n = function() { return this };",
+        "inconsistent return type\n" +
+        "found   : A\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis8
+  public void testThis8() throws Exception {
+    testTypes("function A(){" +
+        "  this.foo = null;" +
+        "};" +
+        "A.prototype.n = function() {" +
+        "  return this.foo };",
+        "inconsistent return type\n" +
+        "found   : (null|string)\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis9
+  public void testThis9() throws Exception {
+    
+    testTypes("function A(){};" +
+        "A.prototype.foo = 3;" +
+        " A.bar = function() { return this.foo; };");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testThis10
+  public void testThis10() throws Exception {
+    
+    testTypes("function A(){};" +
+        "A.prototype.foo = 3;" +
+        "" +
+        "A.bar = function() { return this.foo; };",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGlobalThis1
+  public void testGlobalThis1() throws Exception {
+    testTypes(" function Window() {}" +
+        " " +
+        "Window.prototype.alert = function(msg) {};" +
+        "this.alert(3);",
+        "actual parameter 1 of Window.prototype.alert " +
+        "does not match formal parameter\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGlobalThis2
+  public void testGlobalThis2() throws Exception {
+    testTypes(" function Bindow() {}" +
+        " " +
+        "Bindow.prototype.alert = function(msg) {};" +
+        "this.alert = 3;" +
+        "(new Bindow()).alert(this.alert)",
+        "actual parameter 1 of Bindow.prototype.alert " +
+        "does not match formal parameter\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGlobalThis3
+  public void testGlobalThis3() throws Exception {
+    testTypes(
+        " " +
+        "function alert(msg) {};" +
+        "this.alert(3);",
+        "actual parameter 1 of this.alert " +
+        "does not match formal parameter\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGlobalThis4
+  public void testGlobalThis4() throws Exception {
+    testTypes(
+        " " +
+        "var alert = function(msg) {};" +
+        "this.alert(3);",
+        "actual parameter 1 of this.alert " +
+        "does not match formal parameter\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGlobalThis5
+  public void testGlobalThis5() throws Exception {
+    testTypes(
+        "function f() {" +
+        "   " +
+        "  var alert = function(msg) {};" +
+        "}" +
+        "this.alert(3);",
+        "Property alert never defined on this");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testGlobalThis6
+  public void testGlobalThis6() throws Exception {
+    testTypes(
+        " " +
+        "var alert = function(msg) {};" +
+        "var x = 3;" +
+        "x = 'msg';" +
+        "this.alert(this.x);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType1
+  public void testControlFlowRestrictsType1() throws Exception {
+    testTypes(" function f() { return null; }" +
+        " var a = f();" +
+        " var b = new String('foo');" +
+        " var c = null;" +
+        "if (a) {" +
+        "  b = a;" +
+        "} else {" +
+        "  c = a;" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType2
+  public void testControlFlowRestrictsType2() throws Exception {
+    testTypes(" function f() { return null; }" +
+        " var a = f();" +
+        " var b = 'foo';" +
+        " var c = null;" +
+        "if (a) {" +
+        "  b = a;" +
+        "} else {" +
+        "  c = a;" +
+        "}",
+        "assignment\n" +
+        "found   : (null|string)\n" +
+        "required: null");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType3
+  public void testControlFlowRestrictsType3() throws Exception {
+    testTypes("" +
+        "var a;" +
+        "" +
+        "var b = 'foo';" +
+        "if (a) {" +
+        "  b = a;" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType4
+  public void testControlFlowRestrictsType4() throws Exception {
+    testTypes(" function f(a){}" +
+        " var a;" +
+        "a && f(a);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType5
+  public void testControlFlowRestrictsType5() throws Exception {
+    testTypes(" function f(a){}" +
+        " var a;" +
+        "a || f(a);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType6
+  public void testControlFlowRestrictsType6() throws Exception {
+    testTypes(" function f(x) {}" +
+        " var a;" +
+        "a && f(a);",
+        "actual parameter 1 of f does not match formal parameter\n" +
+        "found   : string\n" +
+        "required: undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType7
+  public void testControlFlowRestrictsType7() throws Exception {
+    testTypes(" function f(x) {}" +
+        " var a;" +
+        "a && f(a);",
+        "actual parameter 1 of f does not match formal parameter\n" +
+        "found   : string\n" +
+        "required: undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType8
+  public void testControlFlowRestrictsType8() throws Exception {
+    testTypes(" function f(a){}" +
+        " var a;" +
+        "if (a || f(a)) {}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testControlFlowRestrictsType9
+  public void testControlFlowRestrictsType9() throws Exception {
+    testTypes("\n" +
+        "var f = function(x) {\n" +
+        "if (!x || x == 1) { return 1; } else { return x; }\n" +
+        "};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSwitchCase3
+  public void testSwitchCase3() throws Exception {
+    testTypes("" +
+        "var a = new String('foo');" +
+        "switch (a) { case 'A': }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSwitchCase4
+  public void testSwitchCase4() throws Exception {
+    testTypes("" +
+        "var a = 'foo';" +
+        "switch (a) { case 'A':break; case null:break; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSwitchCase5
+  public void testSwitchCase5() throws Exception {
+    testTypes("" +
+        "var a = new String('foo');" +
+        "switch (a) { case 'A':break; case null:break; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testSwitchCase6
+  public void testSwitchCase6() throws Exception {
+    testTypes("" +
+        "var a = new Number(5);" +
+        "switch (a) { case 5:break; case null:break; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck1
+  public void testNoTypeCheck1() throws Exception {
+    testTypes("function foo() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck2
+  public void testNoTypeCheck2() throws Exception {
+    testTypes("var foo = function() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck3
+  public void testNoTypeCheck3() throws Exception {
+    testTypes("var foo = function bar() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck4
+  public void testNoTypeCheck4() throws Exception {
+    testTypes("var foo;" +
+        "foo = function() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck5
+  public void testNoTypeCheck5() throws Exception {
+    testTypes("var foo;" +
+        "foo = function() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck6
+  public void testNoTypeCheck6() throws Exception {
+    testTypes("var foo;" +
+        "foo = function bar() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck7
+  public void testNoTypeCheck7() throws Exception {
+    testTypes("var foo;" +
+        "foo = function bar() { new 4 }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNoTypeCheck8
+  public void testNoTypeCheck8() throws Exception {
+    testTypes(" var foo;" +
+        "var bar = 3;  function f(x) {} f(bar);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testImplicitCast
+  public void testImplicitCast() throws Exception {
+    testTypes(" function Element() {};\n" +
+             "" +
+             "Element.prototype.innerHTML;",
+             "(new Element).innerHTML = new Array();", null, false);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testImplicitCastSubclassAccess
+  public void testImplicitCastSubclassAccess() throws Exception {
+    testTypes(" function Element() {};\n" +
+             "" +
+             "Element.prototype.innerHTML;" +
+             "" +
+             "function DIVElement() {};",
+             "(new DIVElement).innerHTML = new Array();", null, false);
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testImplicitCastNotInExterns
+  public void testImplicitCastNotInExterns() throws Exception {
+    testTypes(" function Element() {};\n" +
+             "" +
+             "Element.prototype.innerHTML;" +
+             "(new Element).innerHTML = new Array();",
+             new String[] {
+               "Illegal annotation on innerHTML. @implicitCast may only be " +
+               "used in externs.",
+               "assignment to property innerHTML of Element\n" +
+               "found   : Array\n" +
+               "required: string"});
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNumberNode
+  public void testNumberNode() throws Exception {
+    Node n = typeCheck(Node.newNumber(0));
+
+    assertEquals(NUMBER_TYPE, n.getJSType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStringNode
+  public void testStringNode() throws Exception {
+    Node n = typeCheck(Node.newString("hello"));
+
+    assertEquals(STRING_TYPE, n.getJSType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBooleanNodeTrue
+  public void testBooleanNodeTrue() throws Exception {
+    Node trueNode = typeCheck(new Node(Token.TRUE));
+
+    assertEquals(BOOLEAN_TYPE, trueNode.getJSType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBooleanNodeFalse
+  public void testBooleanNodeFalse() throws Exception {
+    Node falseNode = typeCheck(new Node(Token.FALSE));
+
+    assertEquals(BOOLEAN_TYPE, falseNode.getJSType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testUndefinedNode
+  public void testUndefinedNode() throws Exception {
+    Node p = new Node(Token.ADD);
+    Node n = Node.newString(Token.NAME, "undefined");
+    p.addChildToBack(n);
+    p.addChildToBack(Node.newNumber(5));
+    typeCheck(p);
+
+    assertEquals(VOID_TYPE, n.getJSType());
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNumberAutoboxing
+  public void testNumberAutoboxing() throws Exception {
+    testTypes("var a = 4;",
+        "initializing variable\n" +
+        "found   : number\n" +
+        "required: (Number|null)");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testNumberUnboxing
+  public void testNumberUnboxing() throws Exception {
+    testTypes("var a = new Number(4);",
+        "initializing variable\n" +
+        "found   : Number\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStringAutoboxing
+  public void testStringAutoboxing() throws Exception {
+    testTypes("var a = 'hello';",
+        "initializing variable\n" +
+        "found   : string\n" +
+        "required: (String|null)");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testStringUnboxing
+  public void testStringUnboxing() throws Exception {
+    testTypes("var a = new String('hello');",
+        "initializing variable\n" +
+        "found   : String\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBooleanAutoboxing
+  public void testBooleanAutoboxing() throws Exception {
+    testTypes("var a = true;",
+        "initializing variable\n" +
+        "found   : boolean\n" +
+        "required: (Boolean|null)");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBooleanUnboxing
+  public void testBooleanUnboxing() throws Exception {
+    testTypes("var a = new Boolean(false);",
+        "initializing variable\n" +
+        "found   : Boolean\n" +
+        "required: boolean");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testIssue86
+  public void testIssue86() throws Exception {
+    testTypes(
+        " function I() {}" +
+        " I.prototype.get = function(){};" +
+        " function F() {}" +
+        " F.prototype.get = function() { return true; };",
+        "inconsistent return type\n" +
+        "found   : boolean\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug592170
+  public void testBug592170() throws Exception {
+    testTypes(
+        "" +
+        "function foo(opt_f) {" +
+        "  " +
+        "  return opt_f || function () {};" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug901455
+  public void testBug901455() throws Exception {
+    testTypes(" function a() { return 3; }" +
+        "var b = undefined === a()");
+    testTypes(" function a() { return 3; }" +
+        "var b = a() === undefined");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug908701
+  public void testBug908701() throws Exception {
+    testTypes("var s = new String('foo');" +
+        "var b = s.match(/a/) != null;");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug908625
+  public void testBug908625() throws Exception {
+    testTypes("function A(){}" +
+        "function B(){}" +
+        "function foo(b){return b}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug911118
+  public void testBug911118() throws Exception {
+    
+    Scope s = parseAndTypeCheckWithScope("var a = function(){};").second;
+    JSType type = s.getVar("a").getType();
+    assertEquals("function (): ?", type.toString());
+
+    
+    testTypes("function nullFunction() {};" +
+        "var foo = nullFunction;" +
+        "foo = function() {};" +
+        "foo();");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug909000
+  public void testBug909000() throws Exception {
+    testTypes("function A(){}\n" +
+        "\n" +
+        "function y(a) { return a }",
+        "inconsistent return type\n" +
+        "found   : A\n" +
+        "required: boolean");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug930117
+  public void testBug930117() throws Exception {
+    testTypes(
+        "function f(x){}" +
+        "f(null);",
+        "actual parameter 1 of f does not match formal parameter\n" +
+        "found   : null\n" +
+        "required: boolean");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1484445
+  public void testBug1484445() throws Exception {
+    testTypes(
+        " function Foo() {}" +
+        " Foo.prototype.bar = null;" +
+        " Foo.prototype.baz = null;" +
+        "" +
+        "function f(foo) {" +
+        "  while (true) {" +
+        "    if (foo.bar == null && foo.baz == null) {" +
+        "      foo.bar;" +
+        "    }" +
+        "  }" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1859535
+  public void testBug1859535() throws Exception {
+    testTypes(
+        "" +
+        "var inherits = function(childCtor, parentCtor) {" +
+        "  " +
+        "  function tempCtor() {};" +
+        "  tempCtor.prototype = parentCtor.prototype;" +
+        "  childCtor.superClass_ = parentCtor.prototype;" +
+        "  childCtor.prototype = new tempCtor();" +
+        "   childCtor.prototype.constructor = childCtor;" +
+        "};" +
+        "" +
+        "var factory = function(constructor, var_args) {" +
+        "  " +
+        "  var tempCtor = function() {};" +
+        "  tempCtor.prototype = constructor.prototype;" +
+        "  var obj = new tempCtor();" +
+        "  constructor.apply(obj, arguments);" +
+        "  return obj;" +
+        "};");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1940591
+  public void testBug1940591() throws Exception {
+    testTypes(
+        "" +
+        "var a = {};\n" +
+        "\n" +
+        "a.name = 0;\n" +
+        "\n" +
+        "a.g = function(x) { x.name = 'a'; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1942972
+  public void testBug1942972() throws Exception {
+    testTypes(
+        "var google = {\n"+
+        "  gears: {\n" +
+        "    factory: {},\n" +
+        "    workerPool: {}\n" +
+        "  }\n" +
+        "};\n" +
+        "\n" +
+        "google.gears = {factory: {}};\n");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1943776
+  public void testBug1943776() throws Exception {
+    testTypes(
+        "" +
+        "function bar() {" +
+        "  return {foo: []};" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1987544
+  public void testBug1987544() throws Exception {
+    testTypes(
+        " function foo(x) {}" +
+        "var duration;" +
+        "if (true && !(duration = 3)) {" +
+        " foo(duration);" +
+        "}",
+        "actual parameter 1 of foo does not match formal parameter\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug1940769
+  public void testBug1940769() throws Exception {
+    testTypes(
+        " " +
+        "function proto(obj) { return obj.prototype; }" +
+        " function Map() {}" +
+        "" +
+        "function Map2() { Map.call(this); };" +
+        "Map2.prototype = proto(Map);");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug2335992
+  public void testBug2335992() throws Exception {
+    testTypes(
+        " function f() { return 3; }" +
+        "var x = f();" +
+        "" +
+        "x.y = 3;",
+        "assignment to property y of x\n" +
+        "found   : number\n" +
+        "required: string");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testBug2341812
+  public void testBug2341812() throws Exception {
+    testTypes(
+        "" +
+        "function EventTarget() {}" +
+        "" +
+        "function Node() {}" +
+        " Node.prototype.index;" +
+        "" +
+        "function foo(x) { return x.index; }");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testScopedConstructors
+  public void testScopedConstructors() throws Exception {
+    testTypes(
+        "function foo1() { " +
+        "   function Bar() { " +
+        "     this.x = 3;" +
+        "  }" +
+        "}" +
+        "function foo2() { " +
+        "   function Bar() { " +
+        "     this.x = 'y';" +
+        "  }" +
+        "  " +
+        "  function baz(b) { return b.x; }" +
+        "}",
+        "inconsistent return type\n" +
+        "found   : string\n" +
+        "required: number");
+  }
+
+// com.google.javascript.jscomp.TypeCheckTest::testQualifiedNameInference1
+  public void testQualifiedNameInference1() throws Exception {
+    testTypes(
+        " function Foo() {}" +
+        " Foo.prototype.bar = null;" +
+        " Foo.prototype.baz = null;" +
+        "" +
+        "function f(foo) {" +
+        "  while (true) {" +
+        "    if (!foo.baz) break; " +
+        "    foo.bar = null;" +
+        "  }" +
+        
+        "  return foo.bar == null;" +
+        "}");
+  }

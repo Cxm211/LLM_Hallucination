@@ -1,0 +1,39 @@
+private void updateBounds() {
+    this.minimumRangeValue = Double.NaN;
+    this.maximumRangeValue = Double.NaN;
+    int rowCount = this.data.getRowCount();
+    int colCount = this.data.getColumnCount();
+    for (int r = 0; r < rowCount; r++) {
+        for (int c = 0; c < colCount; c++) {
+            BoxAndWhiskerItem item = (BoxAndWhiskerItem) this.data.getObject(r, c);
+            if (item != null) {
+                double minval = Double.NaN;
+                if (item.getMinOutlier() != null) {
+                    minval = item.getMinOutlier().doubleValue();
+                }
+                double maxval = Double.NaN;
+                if (item.getMaxOutlier() != null) {
+                    maxval = item.getMaxOutlier().doubleValue();
+                }
+                if (Double.isNaN(this.maximumRangeValue)) {
+                    this.maximumRangeValue = maxval;
+                    this.maximumRangeValueRow = r;
+                    this.maximumRangeValueColumn = c;
+                } else if (maxval > this.maximumRangeValue) {
+                    this.maximumRangeValue = maxval;
+                    this.maximumRangeValueRow = r;
+                    this.maximumRangeValueColumn = c;
+                }
+                if (Double.isNaN(this.minimumRangeValue)) {
+                    this.minimumRangeValue = minval;
+                    this.minimumRangeValueRow = r;
+                    this.minimumRangeValueColumn = c;
+                } else if (minval < this.minimumRangeValue) {
+                    this.minimumRangeValue = minval;
+                    this.minimumRangeValueRow = r;
+                    this.minimumRangeValueColumn = c;
+                }
+            }
+        }
+    }
+}

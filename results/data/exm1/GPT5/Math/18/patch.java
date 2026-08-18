@@ -1,0 +1,25 @@
+public double[] encode(final double[] x) {
+            if (boundaries == null) {
+                return x;
+            }
+            // If boundaries are unsupported (non-finite, zero/negative/overflowing range, or dim mismatch),
+            // fall back to identity mapping.
+            if (boundaries.length < 2 || boundaries[0] == null || boundaries[1] == null ||
+                boundaries[0].length != x.length || boundaries[1].length != x.length) {
+                return x;
+            }
+            for (int i = 0; i < x.length; i++) {
+                final double lo = boundaries[0][i];
+                final double hi = boundaries[1][i];
+                final double diff = hi - lo;
+                if (!Double.isFinite(lo) || !Double.isFinite(hi) || !Double.isFinite(diff) || diff <= 0.0) {
+                    return x;
+                }
+            }
+            double[] res = new double[x.length];
+            for (int i = 0; i < x.length; i++) {
+                double diff = boundaries[1][i] - boundaries[0][i];
+                res[i] = (x[i] - boundaries[0][i]) / diff;
+            }
+            return res;
+        }

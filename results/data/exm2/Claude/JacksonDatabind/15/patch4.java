@@ -1,0 +1,14 @@
+public void serialize(Object value, JsonGenerator gen, SerializerProvider provider) throws IOException
+    {
+        Object delegateValue = convertValue(value);
+        // should we accept nulls?
+        if (delegateValue == null) {
+            provider.defaultSerializeNull(gen);
+            return;
+        }
+        // 02-Apr-2015, tatu: As per [databind#731] may need to do dynamic lookup
+        if (_delegateSerializer == null) {
+            _delegateSerializer = provider.findValueSerializer(delegateValue.getClass());
+        }
+        _delegateSerializer.serialize(delegateValue, gen, provider);
+    }

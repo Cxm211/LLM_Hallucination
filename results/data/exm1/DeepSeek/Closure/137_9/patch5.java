@@ -1,0 +1,10 @@
+public void addDeclaredName(String name) {
+      if (!declarations.containsKey(name)) {
+        int id = incrementNameCount(name);
+        String newName = null;
+        if (id != 0) {
+          newName = getUniqueName(name, id);
+        }
+        declarations.put(name, newName);
+      }
+    }

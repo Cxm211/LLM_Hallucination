@@ -1,0 +1,26 @@
+// buggy function
+    public char[] expandCurrentSegment()
+    {
+        final char[] curr = _currentSegment;
+        // Let's grow by 50% by default
+        final int len = curr.length;
+        // but above intended maximum, slow to increase by 25%
+        int newLen = (len == MAX_SEGMENT_LEN) ? (MAX_SEGMENT_LEN+1) : Math.min(MAX_SEGMENT_LEN, len + (len >> 1));
+        return (_currentSegment = Arrays.copyOf(curr, newLen));
+    }
+
+// trigger testcase
+// com/fasterxml/jackson/core/util/TestTextBuffer.java::testExpand
+public void testExpand()
+      {
+          TextBuffer tb = new TextBuffer(new BufferRecycler());
+          char[] buf = tb.getCurrentSegment();
+
+          while (buf.length < 500 * 1000) {
+              char[] old = buf;
+              buf = tb.expandCurrentSegment();
+              if (old.length >= buf.length) {
+                  fail("Expected buffer of "+old.length+" to expand, did not, length now "+buf.length);
+              }
+          }
+      }

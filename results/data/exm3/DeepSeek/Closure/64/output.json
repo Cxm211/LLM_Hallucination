@@ -1,0 +1,573 @@
+We are given a buggy function `toSource(final CodeBuilder cb, final int inputSeqNum, final Node root)` and two helper functions: `String toSource(Node n)` and `private String toSource(Node n, SourceMap sourceMap)`. The trigger testcase is `testES5StrictUseStrictMultipleInputs`.
+
+First, understand what the bug is. The test case is about ES5 strict mode and 'use strict' appearing only for the first input file. The test uses `args.add("--language_in=ECMASCRIPT5_STRICT")` and compiles three strings (three inputs). It expects the output to have 'use strict' only at the beginning (first 12 characters), and then not appear again in the rest of the output. The test passes if that holds. The bug likely is that 'use strict' is being printed for each input file, not only for the first one.
+
+Look at the buggy function. Inside the `runInCompilerThread` callable, we have:
+
+```
+if (root.getJSDocInfo() != null &&
+    root.getJSDocInfo().getLicense() != null) {
+  cb.append("/*\n")
+    .append(root.getJSDocInfo().getLicense())
+    .append("*/\n");
+}
+```
+
+Then later, we compute `String code = toSource(root, sourceMap);` and append it. There's also logic about printing delimiter and source map. But where does 'use strict' get printed? It must be in `toSource(Node n, SourceMap sourceMap)` via the `CodePrinter.Builder`. Specifically, note the line:
+
+```
+builder.setTagAsStrict(
+    options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);
+```
+
+This sets a flag in the builder that likely adds 'use strict' at the top of the generated code. However, the test expects 'use strict' only for the first input when multiple inputs are concatenated. The current implementation seems to call `toSource` for each root (each input) and append the code sequentially. That means each input's code will have 'use strict' added if the language out is ECMASCRIPT5_STRICT. But the test expects only one 'use strict' at the very beginning of the concatenated output.
+
+Thus the bug is that `setTagAsStrict` is being set for every input, causing 'use strict' to be printed for each input file. The correct behavior should be: only print 'use strict' for the first input when language out is ECMASCRIPT5_STRICT.
+
+But note: the `toSource` method that takes a CodeBuilder is called for each input root. The `options.getLanguageOut()` may be ECMASCRIPT5_STRICT if language_in is ECMASCRIPT5_STRICT (or language_out is set). The test sets `--language_in=ECMASCRIPT5_STRICT`. Typically, language_out defaults to the same as language_in, so `options.getLanguageOut()` would be ECMASCRIPT5_STRICT. So for each input, the builder is set to tag as strict, causing each input's generated code to include 'use strict'.
+
+The fix: we need to ensure that 'use strict' is only added for the first input. How does the current code handle this? There is a comment: "if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict' for the first input file". However, the code does not implement that logic. The comment appears above `String code = toSource(root, sourceMap);` but there is no condition to skip the 'use strict' for subsequent inputs. In fact, the `toSource` method always builds with `setTagAsStrict` based on the language out. So we need to modify the call to `toSource` so that for subsequent inputs, we do not tag as strict.
+
+One approach: pass a flag to `toSource(Node n, SourceMap sourceMap)` indicating whether to tag as strict. But we cannot change the signature because it's private and used elsewhere? Actually, there is also the public `String toSource(Node n)` which calls `toSource(n, null)`. Changing the signature might break other uses. However, we can change the private method to accept a boolean parameter, but then we must change all callers. Let's see callers:
+
+1. `String toSource(Node n)` calls `toSource(n, null)`. We can update that to pass `true` for tagAsStrict? Actually, we need to know whether it's the first input. The method `toSource(Node n)` is used when we want to generate source for a single node without the CodeBuilder. That might be used for other purposes. For that case, we probably want to tag as strict if language out is strict. So we should keep the existing behavior for that case. The problematic case is the `toSource(final CodeBuilder cb, final int inputSeqNum, final Node root)` where we call `toSource(root, sourceMap)`. This is the one that processes multiple inputs.
+
+Thus we can modify the call in that method to conditionally set tagAsStrict only for the first input. However, `toSource(Node n, SourceMap sourceMap)` uses `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT` to set tagAsStrict. That is based on options, not on inputSeqNum. So we need to adjust that condition.
+
+We could change the private `toSource` method to take an additional boolean `tagAsStrict` parameter. But that would require changing the public `toSource(Node n)` as well. Alternatively, we can create a new private method that takes the boolean, or we can modify the builder inside the caller by setting the option temporarily? Another approach: inside `toSource(final CodeBuilder cb, ...)`, we could compute `code` differently. We could call `toSource(root, sourceMap)` but then strip the 'use strict' prefix if it's not the first input? That's hacky.
+
+Better: We can pass a flag to `toSource(Node n, SourceMap sourceMap)` indicating whether to tag as strict. Since the only other caller is `String toSource(Node n)`, which likely expects the strict tagging when language out is strict (for a single compilation unit). That caller does not have an inputSeqNum, but it should tag as strict if language out is strict. So we can keep that behavior by having `String toSource(Node n)` call `toSource(n, null, true)`? Actually, we need to decide: The private `toSource` should tag as strict only if the language out is strict AND (if it's being called from the multi-input context, only for the first input). So we could add a parameter `boolean tagAsStrict` defaulting to `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`, but let the caller override.
+
+Let's examine the code structure. The buggy function is inside a class (likely `Compiler`). The method `toSource(final CodeBuilder cb, final int inputSeqNum, final Node root)` is called for each input root. We can adjust it to pass a flag to `toSource(Node n, SourceMap sourceMap)` indicating whether to tag as strict. To avoid changing the public API, we can add an overloaded private method `toSource(Node n, SourceMap sourceMap, boolean tagAsStrict)` and have the existing private method delegate with `tagAsStrict = (options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT)`. Then in the multi-input caller, we can call the new method with `tagAsStrict = (options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT && inputSeqNum == 0)` (assuming inputSeqNum is 0-based). However, note that `inputSeqNum` is passed as parameter. The test passes three inputs, each with an inputSeqNum? In the call, `inputSeqNum` is likely the index of the input. So we can use that.
+
+But wait: The trigger test case expects 'use strict' only for the first input. However, the test concatenates three inputs into one output? Actually, the test compiles three separate strings as separate inputs, and the compiler outputs a single concatenated source. So the first input gets 'use strict', the next two should not. So we need to tag as strict only when inputSeqNum == 0.
+
+Thus we need to modify the call to `toSource` inside the `runInCompilerThread` to conditionally tag as strict. However, the `toSource` method currently uses `options.getLanguageOut()` to decide. We can change that by introducing a new parameter. Let's see if we can change the private method `toSource(Node n, SourceMap sourceMap)` to accept an additional boolean without breaking other callers. There is only one other caller: `String toSource(Node n)`. We can change that to call `toSource(n, null, true)`? Actually, we want the single-node toSource to still tag as strict if language out is strict. So we can have the two-argument method delegate to a three-argument method with a default of `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`. Then the caller with inputSeqNum can pass `inputSeqNum == 0 && options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`.
+
+But note: the two-argument method is private, so we can change its signature as long as we update all callers within the same class. That includes the two-argument method itself? Actually, it is called from the public `String toSource(Node n)` and from the buggy method. So we can change it to `private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict)` and then have the original two-argument method call it with `tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`. Then in the buggy method, we call `toSource(root, sourceMap, inputSeqNum == 0 && options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT)`.
+
+But careful: the buggy method also uses `sourceMap` which might be null or set. So we should pass the sourceMap as is.
+
+Let's outline changes:
+
+1. Change the private `toSource(Node n, SourceMap sourceMap)` method to `toSource(Node n, SourceMap sourceMap, boolean tagAsStrict)`. In its body, use `tagAsStrict` instead of checking options.
+
+2. Keep the old two-argument method but change its implementation to call the three-argument one with `tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`.
+
+3. In the buggy method, when calling `toSource`, use `toSource(root, sourceMap, inputSeqNum == 0 && options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT)`.
+
+But note: the buggy method is inside an anonymous class, and `inputSeqNum` is effectively final? It's a parameter of the enclosing method, so accessible. Good.
+
+Now, we must also consider that the `options.getLanguageOut()` might be something else. We should still only tag as strict when language out is strict. So we need to compute `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT` as part of the condition.
+
+Now, we also have to consider the comment: "if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict' for the first input file". This implies that if language out is not ECMASCRIPT5_STRICT, we should never print 'use strict'. So our condition should be: `tagAsStrict = (options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT) && (inputSeqNum == 0)`.
+
+However, what about the case where we are not in the multi-input scenario? The other caller `String toSource(Node n)` is used for a single node. In that case, there is no inputSeqNum. We want to tag as strict if language out is strict. So we should pass `true` for that condition? Actually, we want to treat it as the first (and only) input. So we should tag as strict. So the two-argument method (which is called by `String toSource(Node n)`) should use `tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`. That's what we have.
+
+Now, we need to ensure that the `toSource` method uses this flag. In the current code, `builder.setTagAsStrict` is called with a boolean computed from `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`. We need to change that to use the passed `tagAsStrict` parameter.
+
+Let's look at the private `toSource` method lines:
+
+```
+private String toSource(Node n, SourceMap sourceMap) {
+  CodePrinter.Builder builder = new CodePrinter.Builder(n);
+  builder.setPrettyPrint(options.prettyPrint);
+  builder.setLineBreak(options.lineBreak);
+  builder.setSourceMap(sourceMap);
+  builder.setSourceMapDetailLevel(options.sourceMapDetailLevel);
+  builder.setTagAsStrict(
+      options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);
+  builder.setLineLengthThreshold(options.lineLengthThreshold);
+
+  Charset charset = options.outputCharset != null ?
+      Charset.forName(options.outputCharset) : null;
+  builder.setOutputCharset(charset);
+
+  return builder.build();
+}
+```
+
+We'll change it to:
+
+```
+private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict) {
+  CodePrinter.Builder builder = new CodePrinter.Builder(n);
+  builder.setPrettyPrint(options.prettyPrint);
+  builder.setLineBreak(options.lineBreak);
+  builder.setSourceMap(sourceMap);
+  builder.setSourceMapDetailLevel(options.sourceMapDetailLevel);
+  builder.setTagAsStrict(tagAsStrict);
+  builder.setLineLengthThreshold(options.lineLengthThreshold);
+
+  Charset charset = options.outputCharset != null ?
+      Charset.forName(options.outputCharset) : null;
+  builder.setOutputCharset(charset);
+
+  return builder.build();
+}
+```
+
+And keep the two-argument version that calls this:
+
+```
+private String toSource(Node n, SourceMap sourceMap) {
+  return toSource(n, sourceMap,
+      options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);
+}
+```
+
+Now, in the buggy method, change the call from `String code = toSource(root, sourceMap);` to:
+
+```
+boolean tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT && inputSeqNum == 0;
+String code = toSource(root, sourceMap, tagAsStrict);
+```
+
+But note: the buggy method is inside `runInCompilerThread`. We need to capture `inputSeqNum` and `options`. They are accessible.
+
+Now, we must also consider that the comment said "if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict' for the first input file". However, the condition might also be affected by `options.sourceMapOutputPath`? No.
+
+Now, we also need to check if there are any other places where `toSource` is called with multiple inputs? The buggy method is likely the only place that calls `toSource` for each input. So this fix should work.
+
+But we must also consider the public `String toSource()` method that takes no arguments? There might be a `toSource()` method that returns the compiled source for all inputs. That might call the buggy method internally. We don't need to change that.
+
+Now, we need to output the fixed code for all given functions. The input includes three functions:
+
+1. The first function: `public void toSource(final CodeBuilder cb, final int inputSeqNum, final Node root) { ... }`
+2. `String toSource(Node n) { ... }`
+3. `private String toSource(Node n, SourceMap sourceMap) { ... }`
+
+We must provide fixed versions of all three. Even though the bug might only be in the first, we need to change the third and maybe the second? Actually, we changed the third and added a new overload? Wait, we changed the signature of the third function. But the input only includes the two-argument version? The third function in the input is `private String toSource(Node n, SourceMap sourceMap)`. We need to change it to the three-argument version? But we also need to keep the two-argument version because it is called from `String toSource(Node n)`. However, the input does not include the three-argument version. We must output exactly the same number of functions? The input gave three functions. We should output three functions, but we need to change the third function's signature? That would break existing callers outside of this class? Since it's private, only within this class. But the input only shows three functions, but there might be other private methods not shown. However, the instruction says: "Provide the entire corrected implementation of the function(s) (not a diff). If the bug spans multiple functions, provide fixed implementations for all of them. fixed_code must include every input function, in the same order, even if unchanged."
+
+We must include every input function. That means we must output three functions. However, we plan to change the private `toSource(Node n, SourceMap sourceMap)` to a three-argument version, but that would change its signature. But the original input only had two arguments. If we change the signature, then callers that rely on the two-argument version would break (like the public `String toSource(Node n)`). But we can instead keep the two-argument version and add a three-argument overload. However, we are only allowed to output the same set of functions as input? The input includes three functions, we cannot add a new function. So we have to work within the given functions. Thus we cannot add a new overload; we must modify the existing functions appropriately.
+
+Alternative approach: We can keep the two-argument `toSource(Node n, SourceMap sourceMap)` but change its behavior based on some external state? For example, we could pass a flag via a thread-local or an instance variable? That seems messy.
+
+Another idea: Instead of modifying the private method, we can adjust the condition in the buggy method by manipulating the `options` temporarily? Not possible.
+
+Maybe we can change the `builder.setTagAsStrict` call inside the private method to check a condition that includes `inputSeqNum`. But the private method doesn't have access to `inputSeqNum`. However, we could pass `inputSeqNum` via the `Node` object? That's hacky.
+
+We could change the buggy method to not rely on `toSource` for adding 'use strict'. Instead, we could manually add 'use strict' only for the first input before calling `toSource` for that input, and for subsequent inputs, ensure that `toSource` does not add 'use strict'. But we still need to prevent `toSource` from adding it.
+
+Given the constraints, we must modify the existing functions without adding new ones. So we need to modify the private `toSource(Node n, SourceMap sourceMap)` to conditionally tag as strict based on some additional information that can be passed from the caller. Since we cannot change the signature, we could use an instance variable to indicate whether we are in the first input. But that would be stateful and might break other concurrent calls.
+
+Alternatively, we could change the buggy method to call `toSource` with a modified `options` object? Not feasible.
+
+Let's think differently: The bug is that 'use strict' is added for each input. The test expects only one at the beginning. Could we instead, in the buggy method, after concatenating all inputs, remove extra 'use strict' occurrences? That would be more complicated.
+
+Better: We can modify the private `toSource` method to only add 'use strict' if the node is the first one in a sequence. How can it know? It could check if the node's parent is null and if it's a SCRIPT node? Not reliable.
+
+Maybe we can change the condition in `builder.setTagAsStrict` to be based on whether `sourceMap` is provided? That doesn't correlate.
+
+Wait, the buggy method already has a `sourceMap` variable that is set only if `options.sourceMapOutputPath != null`. But that's unrelated.
+
+Given the test, the bug is clear: 'use strict' appears multiple times. The simplest fix is to modify the private method to accept an additional parameter, but we cannot add a new function. However, we can change the private method's signature to have a default value for the third parameter? Java doesn't have default parameters.
+
+We could instead overload the method by adding a new method with three parameters, but we are only allowed to output the given functions. But the input includes only three functions, and we can replace the private two-argument method with a three-argument method, and then change the public `String toSource(Node n)` to call the three-argument method with the appropriate third argument. That would change the signature of the private method, but since it's private, it's okay as long as we update the callers within the class. However, the input does not include the public `String toSource(Node n)`? Yes, it does include `String toSource(Node n)`. So we have two functions that call the private method: the public `String toSource(Node n)` and the buggy method. We can change the private method to three arguments, and then update both callers accordingly. That would keep the number of functions the same (three) but change the signatures. That should be acceptable because the instructions say "fixed_code must include every input function, in the same order, even if unchanged." But we are changing the implementation, not the signature? Actually, we are changing the signature of the third function from `private String toSource(Node n, SourceMap sourceMap)` to `private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict)`. That is a different signature. Is that allowed? The input function list includes the two-argument version. We are replacing it with a three-argument version. However, there might be other callers in the codebase not shown. Since we only see these functions, we assume that these are all the functions relevant. The instruction says to fix the bug, and we are allowed to modify the functions. Changing the signature is a modification. But we must ensure that all existing callers (within the provided code) are updated. We have two callers: the public `String toSource(Node n)` and the buggy method. We will update both.
+
+Thus we will:
+
+1. In the buggy method, change the call to `toSource(root, sourceMap, inputSeqNum == 0 && options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);`.
+
+2. In the public `String toSource(Node n)`, we need to call `toSource(n, null, options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);`. But note that the public method currently calls `toSource(n, null);`. We'll change it to call the three-argument version.
+
+3. Change the private method to accept three arguments.
+
+However, the public `String toSource(Node n)` is given as a separate function. We must update its implementation accordingly.
+
+Now, we must output the fixed code for all three functions.
+
+Let's write the fixed functions:
+
+First function: `public void toSource(final CodeBuilder cb, final int inputSeqNum, final Node root)`. We'll modify the line where `toSource` is called.
+
+Second function: `String toSource(Node n)`. We'll modify its body to call the private three-argument method.
+
+Third function: `private String toSource(Node n, SourceMap sourceMap)` will be changed to `private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict)`. But wait, the input includes the two-argument version. We need to output a function with three parameters. However, the original two-argument version might still be needed if there are other callers not shown. But we are replacing it. Since we are allowed to modify the function, we can change its signature. But we must also update the callers we know about. We'll output the three-argument version.
+
+But note: the original two-argument version might be called from elsewhere in the class (not shown). However, the input only includes these three functions, so we assume that the class is limited to these. To be safe, we could keep the two-argument version as a wrapper that calls the three-argument version with the default. But we cannot output four functions. We must output exactly three. So we have to decide: either keep the two-argument signature and add a way to pass the flag via some other means, or change it to three arguments and update callers.
+
+Given the test case, the bug is about multiple inputs. Changing the signature to three arguments is a direct fix. We'll do that.
+
+Now, we must also consider that the private method might be called from other places not shown. But since the input is from a specific bug report, we assume these are the only relevant functions. We'll proceed.
+
+Let's craft the fixed code.
+
+First, the buggy function (first one). We'll change only the line where `toSource` is called. We'll compute the boolean flag.
+
+We need to be careful about the line numbers. The original code has many lines. We'll produce the entire function with the change.
+
+Original lines (with line numbers for reference):
+
+1   public void toSource(final CodeBuilder cb,
+2                        final int inputSeqNum,
+3                        final Node root) {
+4     runInCompilerThread(new Callable<Void>() {
+5       public Void call() throws Exception {
+6         if (options.printInputDelimiter) {
+7           if ((cb.getLength() > 0) && !cb.endsWith("\n")) {
+8             cb.append("\n");  // Make sure that the label starts on a new line
+9           }
+10          Preconditions.checkState(root.getType() == Token.SCRIPT);
+11
+12          String delimiter = options.inputDelimiter;
+13
+14          String sourceName = (String)root.getProp(Node.SOURCENAME_PROP);
+15          Preconditions.checkState(sourceName != null);
+16          Preconditions.checkState(!sourceName.isEmpty());
+17
+18          delimiter = delimiter.replaceAll("%name%", sourceName)
+19            .replaceAll("%num%", String.valueOf(inputSeqNum));
+20
+21          cb.append(delimiter)
+22            .append("\n");
+23        }
+24        if (root.getJSDocInfo() != null &&
+25            root.getJSDocInfo().getLicense() != null) {
+26          cb.append("/*\n")
+27            .append(root.getJSDocInfo().getLicense())
+28            .append("*/\n");
+29        }
+30
+31        // If there is a valid source map, then indicate to it that the current
+32        // root node's mappings are offset by the given string builder buffer.
+33        if (options.sourceMapOutputPath != null) {
+34          sourceMap.setStartingPosition(
+35              cb.getLineIndex(), cb.getColumnIndex());
+36        }
+37
+38        // if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict'
+39        // for the first input file
+40        String code = toSource(root, sourceMap);
+41        if (!code.isEmpty()) {
+42          cb.append(code);
+43
+44          // In order to avoid parse ambiguity when files are concatenated
+45          // together, all files should end in a semi-colon. Do a quick
+46          // heuristic check if there's an obvious semi-colon already there.
+47          int length = code.length();
+48          char lastChar = code.charAt(length - 1);
+49          char secondLastChar = length >= 2 ?
+50              code.charAt(length - 2) : '\0';
+51          boolean hasSemiColon = lastChar == ';' ||
+52              (lastChar == '\n' && secondLastChar == ';');
+53          if (!hasSemiColon) {
+54            cb.append(";");
+55          }
+56        }
+57        return null;
+58      }
+59    });
+60  }
+
+We need to change line 40 to use the three-argument version. We'll compute the boolean before.
+
+Add a line: `boolean tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT && inputSeqNum == 0;`
+
+Then change line 40 to: `String code = toSource(root, sourceMap, tagAsStrict);`
+
+But note: we also need to import LanguageMode? It's already used in the condition. We assume it's available.
+
+Now, the second function: `String toSource(Node n)`. Original:
+
+```
+  String toSource(Node n) {
+    initCompilerOptionsIfTesting();
+    return toSource(n, null);
+  }
+```
+
+We need to change it to call the three-argument version with `tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT`. So:
+
+```
+  String toSource(Node n) {
+    initCompilerOptionsIfTesting();
+    return toSource(n, null, options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);
+  }
+```
+
+Third function: `private String toSource(Node n, SourceMap sourceMap)`. We'll change it to:
+
+```
+  private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict) {
+    CodePrinter.Builder builder = new CodePrinter.Builder(n);
+    builder.setPrettyPrint(options.prettyPrint);
+    builder.setLineBreak(options.lineBreak);
+    builder.setSourceMap(sourceMap);
+    builder.setSourceMapDetailLevel(options.sourceMapDetailLevel);
+    builder.setTagAsStrict(tagAsStrict);
+    builder.setLineLengthThreshold(options.lineLengthThreshold);
+
+    Charset charset = options.outputCharset != null ?
+        Charset.forName(options.outputCharset) : null;
+    builder.setOutputCharset(charset);
+
+    return builder.build();
+  }
+```
+
+But we must also keep the two-argument version? Actually, we are replacing it. However, the buggy method now calls the three-argument version, and the public method calls the three-argument version. So we don't need the two-argument version. But the input had a two-argument version. We are outputting a three-argument version. That's fine.
+
+Now, we must ensure that the three-argument method is private. It is.
+
+Now, we need to generate additional testcases. We need to create minimal testcases that fail on buggy code and pass on fixed code, covering different branches.
+
+The provided trigger testcase covers the scenario where language_in is ECMASCRIPT5_STRICT and multiple inputs are given. It expects 'use strict' only once. The buggy code would output 'use strict' three times, causing the test to fail? Actually, the test would fail because it checks that after the first 12 characters, there is no other 'use strict'. So it would catch the bug.
+
+We need additional testcases that cover other branches/behaviors. Let's think about the code:
+
+- The condition `options.printInputDelimiter` might be true or false.
+- The condition `root.getJSDocInfo() != null && root.getJSDocInfo().getLicense() != null` might be true.
+- The condition `options.sourceMapOutputPath != null` might be true.
+- The condition `!code.isEmpty()`.
+- The heuristic for semicolon addition.
+- The condition for `tagAsStrict` depends on `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT` and `inputSeqNum == 0`.
+- Also, there is a condition about `cb.getLength() > 0` and `!cb.endsWith("\n")` when printInputDelimiter is true.
+
+We should create testcases that exercise these branches while also testing the strict mode behavior. However, the main bug is about 'use strict'. But we need to ensure our fix doesn't break other behaviors.
+
+We need to generate testcases that fail on the original buggy code. That means they must trigger the bug: extra 'use strict' appears. So any testcase with language out strict and multiple inputs will fail. But we already have a test with three inputs. We should create testcases that cover different scenarios:
+
+1. Language out is not strict: then 'use strict' should not appear at all. The buggy code would not add 'use strict' because `options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT` is false, so it would not tag as strict. So no bug. So we need a testcase where language out is strict and inputSeqNum > 0 to see extra 'use strict'. Already covered.
+
+2. Language out is strict and only one input: should have 'use strict'. That should pass in both buggy and fixed? Actually, buggy would also add 'use strict' because inputSeqNum == 0. So it's fine. But we want a testcase that fails on buggy? It wouldn't fail because buggy adds 'use strict' correctly. So not a failing test.
+
+We need failing testcases. The only failing scenario is when multiple inputs and language out strict. But we can vary other conditions.
+
+For example:
+- Set `options.printInputDelimiter` to true, and test with multiple inputs. The delimiter logic might affect the output, but the bug still appears. However, the test would still fail due to extra 'use strict'. So we can create a test that also tests delimiter.
+
+- Set `root.getJSDocInfo()` with license, and multiple inputs.
+
+- Set `options.sourceMapOutputPath` not null.
+
+- Test with empty code? If code is empty, then we don't append anything, so no 'use strict' added. But that might not fail.
+
+- Test the semicolon heuristic: ensure that semicolon is added correctly even with multiple inputs.
+
+But we need to ensure each generated testcase fails on the buggy version. That means it must exhibit the bug. The bug is only about 'use strict' appearing multiple times. So we must have at least two inputs with language out strict. That is necessary.
+
+We also want to cover branches that are not covered by the provided trigger. The provided trigger does not set printInputDelimiter, does not set JSDocInfo license, does not set sourceMapOutputPath, and the code is non-empty. So we can create testcases that combine these conditions with multiple inputs.
+
+We should generate a minimal number of testcases that cover as many different branches as possible. Perhaps we can create two additional testcases:
+
+Testcase 1: With `options.printInputDelimiter` enabled, and with JSDoc license, multiple inputs. This would test the delimiter and license branches while also checking that 'use strict' appears only once.
+
+Testcase 2: With source map output path set, and maybe code that ends with a semicolon in a tricky way, to test the semicolon heuristic and source map offset.
+
+But we need to ensure these testcases fail on buggy code. They will because of extra 'use strict'. However, we must also ensure they pass on fixed code.
+
+We need to write testcases in the style of the provided trigger. The trigger is a method in a test class `CommandLineRunnerTest`. It uses `args.add` and `compile`. We need to mimic that. But we cannot assume the exact compilation environment. However, we must create testcases that can be run in the same environment.
+
+We should generate testcases that are similar to the provided one, but with different compiler options. We can set `--language_in=ECMASCRIPT5_STRICT` (which sets language out to strict) and also set `--print_input_delimiter`? Not sure about the exact flags. But the trigger uses `args.add` to add command line arguments. We can add `--print_input_delimiter` and `--input_delimiter` something. However, we don't know the exact options. We need to be careful: we are not to invent external dependencies. We should rely only on what's present in the provided code. The provided code references `options.printInputDelimiter`, `options.inputDelimiter`, `options.sourceMapOutputPath`, etc. These are likely set via command line flags. We can use the same pattern as the trigger: `args.add("--print_input_delimiter")` and `args.add("--input_delimiter=// %name% %num%")`? But we don't know the exact flag names. However, we can look at the Google Closure Compiler source? Since we don't have it, we must avoid inventing. But the test case is from `CommandLineRunnerTest`, which likely has many existing tests. We can infer that `args` is a `List<String>` and `compile` is a helper method. We can use the same pattern.
+
+We need to produce Java code for the testcases. Since we don't have the full test class, we must rely on the given pattern. We'll create test methods that follow the same style.
+
+We'll create two additional testcases:
+
+1. Test with print input delimiter and a license comment. We'll need to inject JSDoc license? That might require adding a comment in the source. But the test inputs are just strings. JSDoc info is attached to the root node. How can we set that via command line? Probably not directly. So maybe we cannot test that branch via the command line runner. However, we could test the delimiter branch.
+
+The trigger test uses `compile(new String[] {...})`. That likely parses each string as a separate input file. We can set `--print_input_delimiter` and `--input_delimiter` to some value. The delimiter uses `%name%` and `%num%`. We can test that the delimiter is printed correctly, and that 'use strict' appears only once.
+
+But we also need to check that the bug is present. We can assert that the output contains only one 'use strict'. That will fail on buggy.
+
+2. Test with source map output. That might be harder because we need to specify a source map file. We could set `--create_source_map` maybe. We'll not invent flags. So maybe we skip that.
+
+Alternatively, we can test the semicolon heuristic: provide inputs that end with different characters to see if semicolon is added correctly. But the bug is about 'use strict', so we still need multiple inputs.
+
+Given the minimal number, maybe we only need one additional testcase that covers a different branch. But we need to maximize coverage with minimal testcases. The trigger already covers the basic multiple inputs. We can add a testcase with a single input to ensure that 'use strict' is printed when language is strict (this should pass in both, but we want to ensure our fix doesn't break that). However, that testcase would not fail on buggy, so it's not a "trigger testcase" that must fail on buggy. The requirement is that every generated testcase MUST fail on the original buggy version. So we cannot add a test that passes on buggy. So we must only add testcases that exhibit the bug.
+
+Thus we need testcases where buggy code fails. That means multiple inputs with language out strict. We can vary other conditions.
+
+Let's consider: we can set `options.printInputDelimiter` to true. How to set that via command line? In Closure Compiler, there is a flag `--print_input_delimiter`. We'll assume it exists. We'll also set `--input_delimiter` to something. We'll create a test that checks the delimiter appears and that 'use strict' appears only once.
+
+We'll also include a case where the input code is empty? Empty code might not generate 'use strict'? Actually, if the code is empty, `toSource` might return empty string, and we don't append anything. But the delimiter and license might still be printed. However, the bug about 'use strict' might not manifest because no code is appended. But we need the bug to manifest, so we need non-empty code.
+
+Given the above, we'll create one additional testcase that enables print_input_delimiter and uses a custom delimiter. This will test the branch `if (options.printInputDelimiter)` and the delimiter replacement logic. The buggy code will still have extra 'use strict', causing the test to fail.
+
+We'll also check that the delimiter is printed correctly and that there is only one 'use strict'.
+
+We'll also ensure that the test passes on our fixed code.
+
+Now, we must write the testcase code. We'll follow the pattern of the provided test:
+
+```
+public void testES5StrictUseStrictWithDelimiter() {
+    args.add("--language_in=ECMASCRIPT5_STRICT");
+    args.add("--print_input_delimiter");
+    args.add("--input_delimiter=// Input %num%: %name%");
+    Compiler compiler = compile(new String[] {"var x = 1;", "var y = 2;", "var z = 3;"});
+    String outputSource = compiler.toSource();
+    // Check that 'use strict' appears only once at the beginning
+    assertEquals("'use strict'", outputSource.substring(0, 12));
+    assertEquals(outputSource.substring(13).indexOf("'use strict'"), -1);
+    // Additionally, check that delimiters are present
+    // The delimiter for first input should be "// Input 0: " + sourceName? But sourceName might be something like "input0"?
+    // We might not know the exact source name. We'll just check that the output contains the delimiter pattern.
+    // For simplicity, we can assert that the output contains "// Input 0:" and "// Input 1:" etc.
+    // However, the source name might be a file path. We'll skip detailed checks for brevity.
+}
+```
+
+But we need to ensure the test fails on buggy. It will because of extra 'use strict'. So it's fine.
+
+We could also create a testcase with JSDoc license. But we don't know how to inject that via command line. Probably not possible. So we skip.
+
+Thus we'll generate one additional testcase.
+
+Now, we need to output the testcase with a path. The path must be one of the exact file paths of the provided trigger testcases. The provided trigger testcase path is: `com/google/javascript/jscomp/CommandLineRunnerTest.java::testES5StrictUseStrictMultipleInputs`. Actually, the path is given as `com/google/javascript/jscomp/CommandLineRunnerTest.java` and the method name is part of the code. So we need to output the file path: `com/google/javascript/jscomp/CommandLineRunnerTest.java`. We'll add a new test method in that file. So our additional testcase will be placed in the same file.
+
+We must be careful: we cannot have two methods with the same name. So we'll name the new test method `testES5StrictUseStrictWithDelimiter`.
+
+Now, we need to output the JSON with fixed_code and additional_testcases.
+
+Let's prepare the fixed functions as strings. We'll escape newlines and quotes.
+
+First function:
+
+```
+  public void toSource(final CodeBuilder cb,
+                       final int inputSeqNum,
+                       final Node root) {
+    runInCompilerThread(new Callable<Void>() {
+      public Void call() throws Exception {
+        if (options.printInputDelimiter) {
+          if ((cb.getLength() > 0) && !cb.endsWith("\n")) {
+            cb.append("\n");  // Make sure that the label starts on a new line
+          }
+          Preconditions.checkState(root.getType() == Token.SCRIPT);
+
+          String delimiter = options.inputDelimiter;
+
+          String sourceName = (String)root.getProp(Node.SOURCENAME_PROP);
+          Preconditions.checkState(sourceName != null);
+          Preconditions.checkState(!sourceName.isEmpty());
+
+          delimiter = delimiter.replaceAll("%name%", sourceName)
+            .replaceAll("%num%", String.valueOf(inputSeqNum));
+
+          cb.append(delimiter)
+            .append("\n");
+        }
+        if (root.getJSDocInfo() != null &&
+            root.getJSDocInfo().getLicense() != null) {
+          cb.append("/*\n")
+            .append(root.getJSDocInfo().getLicense())
+            .append("*/\n");
+        }
+
+        // If there is a valid source map, then indicate to it that the current
+        // root node's mappings are offset by the given string builder buffer.
+        if (options.sourceMapOutputPath != null) {
+          sourceMap.setStartingPosition(
+              cb.getLineIndex(), cb.getColumnIndex());
+        }
+
+        // if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict'
+        // for the first input file
+        boolean tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT && inputSeqNum == 0;
+        String code = toSource(root, sourceMap, tagAsStrict);
+        if (!code.isEmpty()) {
+          cb.append(code);
+
+          // In order to avoid parse ambiguity when files are concatenated
+          // together, all files should end in a semi-colon. Do a quick
+          // heuristic check if there's an obvious semi-colon already there.
+          int length = code.length();
+          char lastChar = code.charAt(length - 1);
+          char secondLastChar = length >= 2 ?
+              code.charAt(length - 2) : '\0';
+          boolean hasSemiColon = lastChar == ';' ||
+              (lastChar == '\n' && secondLastChar == ';');
+          if (!hasSemiColon) {
+            cb.append(";");
+          }
+        }
+        return null;
+      }
+    });
+  }
+```
+
+Second function:
+
+```
+  String toSource(Node n) {
+    initCompilerOptionsIfTesting();
+    return toSource(n, null, options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);
+  }
+```
+
+Third function:
+
+```
+  private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict) {
+    CodePrinter.Builder builder = new CodePrinter.Builder(n);
+    builder.setPrettyPrint(options.prettyPrint);
+    builder.setLineBreak(options.lineBreak);
+    builder.setSourceMap(sourceMap);
+    builder.setSourceMapDetailLevel(options.sourceMapDetailLevel);
+    builder.setTagAsStrict(tagAsStrict);
+    builder.setLineLengthThreshold(options.lineLengthThreshold);
+
+    Charset charset = options.outputCharset != null ?
+        Charset.forName(options.outputCharset) : null;
+    builder.setOutputCharset(charset);
+
+    return builder.build();
+  }
+```
+
+Now, we need to output these as JSON strings, escaping newlines and quotes. We'll do that programmatically later.
+
+Additional testcase:
+
+```
+public void testES5StrictUseStrictWithDelimiter() {
+    args.add("--language_in=ECMASCRIPT5_STRICT");
+    args.add("--print_input_delimiter");
+    args.add("--input_delimiter=// Input %num%: %name%");
+    Compiler compiler = compile(new String[] {"var x = 1;", "var y = 2;", "var z = 3;"});
+    String outputSource = compiler.toSource();
+    assertEquals("'use strict'", outputSource.substring(0, 12));
+    assertEquals(outputSource.substring(13).indexOf("'use strict'"), -1);
+}
+```
+
+We need to ensure the testcase is valid Java code. We'll assume imports and class are as in the original test file.
+
+Now, output JSON.
+
+Let's construct the JSON object.
+
+We'll have:
+
+{
+  "fixed_code": [
+    "  public void toSource(final CodeBuilder cb,\n                       final int inputSeqNum,\n                       final Node root) {\n    runInCompilerThread(new Callable<Void>() {\n      public Void call() throws Exception {\n        if (options.printInputDelimiter) {\n          if ((cb.getLength() > 0) && !cb.endsWith(\"\\n\")) {\n            cb.append(\"\\n\");  // Make sure that the label starts on a new line\n          }\n          Preconditions.checkState(root.getType() == Token.SCRIPT);\n\n          String delimiter = options.inputDelimiter;\n\n          String sourceName = (String)root.getProp(Node.SOURCENAME_PROP);\n          Preconditions.checkState(sourceName != null);\n          Preconditions.checkState(!sourceName.isEmpty());\n\n          delimiter = delimiter.replaceAll(\"%name%\", sourceName)\n            .replaceAll(\"%num%\", String.valueOf(inputSeqNum));\n\n          cb.append(delimiter)\n            .append(\"\\n\");\n        }\n        if (root.getJSDocInfo() != null &&\n            root.getJSDocInfo().getLicense() != null) {\n          cb.append(\"/*\\n\")\n            .append(root.getJSDocInfo().getLicense())\n            .append(\"*/\\n\");\n        }\n\n        // If there is a valid source map, then indicate to it that the current\n        // root node's mappings are offset by the given string builder buffer.\n        if (options.sourceMapOutputPath != null) {\n          sourceMap.setStartingPosition(\n              cb.getLineIndex(), cb.getColumnIndex());\n        }\n\n        // if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict'\n        // for the first input file\n        boolean tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT && inputSeqNum == 0;\n        String code = toSource(root, sourceMap, tagAsStrict);\n        if (!code.isEmpty()) {\n          cb.append(code);\n\n          // In order to avoid parse ambiguity when files are concatenated\n          // together, all files should end in a semi-colon. Do a quick\n          // heuristic check if there's an obvious semi-colon already there.\n          int length = code.length();\n          char lastChar = code.charAt(length - 1);\n          char secondLastChar = length >= 2 ?\n              code.charAt(length - 2) : '\\0';\n          boolean hasSemiColon = lastChar == ';' ||\n              (lastChar == '\\n' && secondLastChar == ';');\n          if (!hasSemiColon) {\n            cb.append(\";\");\n          }\n        }\n        return null;\n      }\n    });\n  }",
+    "  String toSource(Node n) {\n    initCompilerOptionsIfTesting();\n    return toSource(n, null, options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);\n  }",
+    "  private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict) {\n    CodePrinter.Builder builder = new CodePrinter.Builder(n);\n    builder.setPrettyPrint(options.prettyPrint);\n    builder.setLineBreak(options.lineBreak);\n    builder.setSourceMap(sourceMap);\n    builder.setSourceMapDetailLevel(options.sourceMapDetailLevel);\n    builder.setTagAsStrict(tagAsStrict);\n    builder.setLineLengthThreshold(options.lineLengthThreshold);\n\n    Charset charset = options.outputCharset != null ?\n        Charset.forName(options.outputCharset) : null;\n    builder.setOutputCharset(charset);\n\n    return builder.build();\n  }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "com/google/javascript/jscomp/CommandLineRunnerTest.java",
+      "testcase": "public void testES5StrictUseStrictWithDelimiter() {\n    args.add(\"--language_in=ECMASCRIPT5_STRICT\");\n    args.add(\"--print_input_delimiter\");\n    args.add(\"--input_delimiter=// Input %num%: %name%\");\n    Compiler compiler = compile(new String[] {\"var x = 1;\", \"var y = 2;\", \"var z = 3;\"});\n    String outputSource = compiler.toSource();\n    assertEquals(\"'use strict'\", outputSource.substring(0, 12));\n    assertEquals(outputSource.substring(13).indexOf(\"'use strict'\"), -1);\n  }"
+    }
+  ]
+}
+
+We need to escape backslashes and quotes in the strings. For JSON, we need to escape double quotes and backslashes. We'll produce the strings with appropriate escapes.
+
+We'll write the final answer.{
+  "fixed_code": [
+    "  public void toSource(final CodeBuilder cb,\n                       final int inputSeqNum,\n                       final Node root) {\n    runInCompilerThread(new Callable<Void>() {\n      public Void call() throws Exception {\n        if (options.printInputDelimiter) {\n          if ((cb.getLength() > 0) && !cb.endsWith(\"\\n\")) {\n            cb.append(\"\\n\");  // Make sure that the label starts on a new line\n          }\n          Preconditions.checkState(root.getType() == Token.SCRIPT);\n\n          String delimiter = options.inputDelimiter;\n\n          String sourceName = (String)root.getProp(Node.SOURCENAME_PROP);\n          Preconditions.checkState(sourceName != null);\n          Preconditions.checkState(!sourceName.isEmpty());\n\n          delimiter = delimiter.replaceAll(\"%name%\", sourceName)\n            .replaceAll(\"%num%\", String.valueOf(inputSeqNum));\n\n          cb.append(delimiter)\n            .append(\"\\n\");\n        }\n        if (root.getJSDocInfo() != null &&\n            root.getJSDocInfo().getLicense() != null) {\n          cb.append(\"/*\\n\")\n            .append(root.getJSDocInfo().getLicense())\n            .append(\"*/\\n\");\n        }\n\n        // If there is a valid source map, then indicate to it that the current\n        // root node's mappings are offset by the given string builder buffer.\n        if (options.sourceMapOutputPath != null) {\n          sourceMap.setStartingPosition(\n              cb.getLineIndex(), cb.getColumnIndex());\n        }\n\n        // if LanguageMode is ECMASCRIPT5_STRICT, only print 'use strict'\n        // for the first input file\n        boolean tagAsStrict = options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT && inputSeqNum == 0;\n        String code = toSource(root, sourceMap, tagAsStrict);\n        if (!code.isEmpty()) {\n          cb.append(code);\n\n          // In order to avoid parse ambiguity when files are concatenated\n          // together, all files should end in a semi-colon. Do a quick\n          // heuristic check if there's an obvious semi-colon already there.\n          int length = code.length();\n          char lastChar = code.charAt(length - 1);\n          char secondLastChar = length >= 2 ?\n              code.charAt(length - 2) : '\\0';\n          boolean hasSemiColon = lastChar == ';' ||\n              (lastChar == '\\n' && secondLastChar == ';');\n          if (!hasSemiColon) {\n            cb.append(\";\");\n          }\n        }\n        return null;\n      }\n    });\n  }",
+    "  String toSource(Node n) {\n    initCompilerOptionsIfTesting();\n    return toSource(n, null, options.getLanguageOut() == LanguageMode.ECMASCRIPT5_STRICT);\n  }",
+    "  private String toSource(Node n, SourceMap sourceMap, boolean tagAsStrict) {\n    CodePrinter.Builder builder = new CodePrinter.Builder(n);\n    builder.setPrettyPrint(options.prettyPrint);\n    builder.setLineBreak(options.lineBreak);\n    builder.setSourceMap(sourceMap);\n    builder.setSourceMapDetailLevel(options.sourceMapDetailLevel);\n    builder.setTagAsStrict(tagAsStrict);\n    builder.setLineLengthThreshold(options.lineLengthThreshold);\n\n    Charset charset = options.outputCharset != null ?\n        Charset.forName(options.outputCharset) : null;\n    builder.setOutputCharset(charset);\n\n    return builder.build();\n  }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "com/google/javascript/jscomp/CommandLineRunnerTest.java",
+      "testcase": "public void testES5StrictUseStrictWithDelimiter() {\n    args.add(\"--language_in=ECMASCRIPT5_STRICT\");\n    args.add(\"--print_input_delimiter\");\n    args.add(\"--input_delimiter=// Input %num%: %name%\");\n    Compiler compiler = compile(new String[] {\"var x = 1;\", \"var y = 2;\", \"var z = 3;\"});\n    String outputSource = compiler.toSource();\n    assertEquals(\"'use strict'\", outputSource.substring(0, 12));\n    assertEquals(outputSource.substring(13).indexOf(\"'use strict'\"), -1);\n  }"
+    }
+  ]
+}

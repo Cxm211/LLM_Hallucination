@@ -1,0 +1,1 @@
+                registry, this, objType, isNativeObjectType()));

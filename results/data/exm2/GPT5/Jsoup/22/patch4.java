@@ -1,0 +1,10 @@
+public Node previousSibling() {
+    if (parentNode == null) return null;
+    List<Node> siblings = parentNode.childNodes;
+    Integer index = siblingIndex();
+    Validate.notNull(index);
+    if (index > 0)
+        return siblings.get(index-1);
+    else
+        return null;
+}

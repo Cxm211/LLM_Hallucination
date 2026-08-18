@@ -1,0 +1,33 @@
+// buggy code
+  private void checkInterfaceConflictProperties(NodeTraversal t, Node n,
+      String functionName, HashMap<String, ObjectType> properties,
+      HashMap<String, ObjectType> currentProperties,
+      ObjectType interfaceType) {
+    ObjectType implicitProto = interfaceType.getImplicitPrototype();
+    Set<String> currentPropertyNames;
+      // This can be the case if interfaceType is proxy to a non-existent
+      // object (which is a bad type annotation, but shouldn't crash).
+      currentPropertyNames = (implicitProto != null)
+          ? implicitProto.getOwnPropertyNames()
+          : java.util.Collections.<String>emptySet();
+    for (String name : currentPropertyNames) {
+      ObjectType oType = properties.get(name);
+      if (oType != null) {
+        if (!interfaceType.getPropertyType(name).isEquivalentTo(
+            oType.getPropertyType(name))) {
+          compiler.report(
+              t.makeError(n, INCOMPATIBLE_EXTENDED_PROPERTY_TYPE,
+                  functionName, name, oType.toString(),
+                  interfaceType.toString()));
+        }
+      }
+      currentProperties.put(name, interfaceType);
+    }
+    Iterable<ObjectType> extended = interfaceType.getCtorExtendedInterfaces();
+    if (extended != null) {
+      for (ObjectType iType : extended) {
+        checkInterfaceConflictProperties(t, n, functionName, properties,
+            currentProperties, iType);
+      }
+    }
+  }

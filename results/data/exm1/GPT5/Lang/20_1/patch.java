@@ -1,0 +1,22 @@
+public static String join(Object[] array, char separator, int startIndex, int endIndex) {
+        if (array == null) {
+            return null;
+        }
+        int noOfItems = (endIndex - startIndex);
+        if (noOfItems <= 0) {
+            return EMPTY;
+        }
+        String first = String.valueOf(array[startIndex]);
+        int initialCapacity = (first == null ? 16 : first.length()) + 1;
+        StringBuilder buf = new StringBuilder(initialCapacity);
+
+        for (int i = startIndex; i < endIndex; i++) {
+            if (i > startIndex) {
+                buf.append(separator);
+            }
+            if (array[i] != null) {
+                buf.append(array[i]);
+            }
+        }
+        return buf.toString();
+    }

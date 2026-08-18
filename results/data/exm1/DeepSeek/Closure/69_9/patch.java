@@ -1,0 +1,28 @@
+private void visitCall(NodeTraversal t, Node n) {
+    Node child = n.getFirstChild();
+    JSType childType = getJSType(child).restrictByNotNullOrUndefined();
+
+    if (!childType.canBeCalled()) {
+      report(t, n, NOT_CALLABLE, childType.toString());
+      ensureTyped(t, n);
+      return;
+    }
+
+    // A couple of types can be called as if they were functions.
+    // If it is a function type, then validate parameters.
+    if (childType instanceof FunctionType) {
+      FunctionType functionType = (FunctionType) childType;
+
+      // Functions with explcit 'this' types must be called in a GETPROP
+      // or GETELEM.
+
+      visitParameterList(t, n, functionType);
+      ensureTyped(t, n, functionType.getReturnType());
+    } else {
+      ensureTyped(t, n);
+    }
+
+    // TODO: Add something to check for calls of RegExp objects, which is not
+    // supported by IE.  Either say something about the return type or warn
+    // about the non-portability of the call or both.
+  }

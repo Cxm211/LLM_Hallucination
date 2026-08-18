@@ -1,0 +1,361 @@
+We need to analyze the buggy function `parsePaxHeaders` in the source. The function is provided; it reads pax headers from an InputStream. The bug is likely in how it computes the remaining bytes to read (restLen) and how it handles the reading of the keyword and value. Let's examine the code.
+
+The format: "length keyword=value\n". The length includes the entire line including the trailing newline? Typically, the length is the number of bytes of the entire header line including the trailing newline. The code reads:
+
+- Reads characters to get `len` until space.
+- Then reads keyword until '=', then computes `restLen = len - read`. But `read` counts total bytes read so far (inclusive of space and keyword characters). At the point after reading the '=', `read` includes the space and the keyword and the '='. Then restLen is len - read, which should be the number of bytes remaining for the value and the trailing newline. Then it reads exactly restLen bytes into a byte array, and then uses `restLen - 1` to strip the trailing newline when constructing value.
+
+Potential bug: The `read` variable is not reset between pax header lines? Actually, `read` is declared inside the while loop, so it is reset each iteration. Good.
+
+But there is a subtle issue: The code reads the length characters, but it uses `len *= 10; len += ch - '0';` inside the inner while loop that reads until space. However, note that `read` is incremented for each character read, including the length digits. Then after the space, it reads the keyword and increments `read` for each character. Then when it hits '=', it computes restLen. That seems correct.
+
+However, there is a problem: The code doesn't handle the case where the length itself is zero or malformed? Possibly not.
+
+Let's look at the test methods that are relevant to `parsePaxHeaders`. The test methods are in `TarArchiveInputStreamTest`:
+
+- `readSimplePaxHeader`
+- `secondEntryWinsWhenPaxHeaderContainsDuplicateKey`
+- `paxHeaderEntryWithEmptyValueRemovesKey`
+- `readPaxHeaderWithEmbeddedNewline`
+- `readNonAsciiPaxHeader`
+
+Those test methods call `parsePaxHeaders` directly. The buggy function is `parsePaxHeaders` in `TarArchiveInputStream`.
+
+Now, examine test `paxHeaderEntryWithEmptyValueRemovesKey`. It provides input: "11 foo=bar\n7 foo=\n". The first header line "11 foo=bar\n" has length 11 bytes? Let's compute: "11 foo=bar\n" -> characters: '1','1',' ','f','o','o','=','b','a','r','\n' -> that's 11 bytes. Correct. The second header line "7 foo=\n" -> '7',' ','f','o','o','=','\n' -> that's 7 bytes? Actually: 7 (1), space (2), f(3),o(4),o(5),=(6), newline(7) -> yes 7 bytes. So the second header has empty value (just newline after =). The code: restLen = len - read. For second header: len=7; after reading digits (read=1) then space (read=2), then keyword "foo" (read=5), then '=' (read=6). So restLen = 7-6=1. Then it goes to if (restLen == 1) { headers.remove(keyword); } else { ... }. So it removes the key. That works correctly.
+
+Now test `readPaxHeaderWithEmbeddedNewline`: input: "28 comment=line1\nline2\nand3\n". Let's compute length. The line is: "28 comment=line1\nline2\nand3\n". Count bytes: 2 digits, space, "comment=" (8 chars), then "line1\nline2\nand3\n" (including 3 newlines). Actually let's count total: "28 comment=line1\nline2\nand3\n" => 2+1+8+ (line1 is 5 chars, newline is 1 -> 6) + (line2 is 5 chars + newline =6) + (and3 is 4 chars + newline =5) = 2+1+8+6+6+5 = 28. So len=28. After reading digits (2), space (3), keyword "comment" (10), '=' (11). read=11. restLen=28-11=17. The value should be "line1\nline2\nand3\n" (17 chars: 5+1+5+1+4+1=17). Then the code creates byte array of size restLen, reads 17 bytes, then constructs value using `new String(rest, 0, restLen - 1, ...)`. Since restLen=17, restLen-1=16, so it drops the trailing newline. But the expected value according to test is "line1\nline2\nand3" (without trailing newline). So that works.
+
+But wait: The test expects "line1\nline2\nand3", which is 16 characters? Actually "line1\nline2\nand3" length: 5+1+5+1+4 = 16. So dropping the last newline gives that. Good.
+
+Now test `readNonAsciiPaxHeader`: provides "11 path=ä\n". The string has length 11 in UTF-8? Let's check: "11 path=ä\n". In ASCII, '1','1',' ','p','a','t','h','=' are 8 bytes. 'ä' in UTF-8 is 2 bytes (0xC3 0xA4). newline is 1 byte. Total 11 bytes. So len=11. After reading digits (2), space (3), keyword "path" (7), '=' (8). read=8. restLen=3. The rest bytes are 'ä' (2) and newline (1). Then value constructed with restLen-1=2, so it takes only the first 2 bytes -> that's the UTF-8 bytes for 'ä'. That works.
+
+Now test `secondEntryWinsWhenPaxHeaderContainsDuplicateKey`: input: "11 foo=bar\n11 foo=baz\n". len=11 for each. After first: reads "11 foo=bar\n". len=11, after reading keyword 'foo' and '=', read=?, digits (2), space (3), 'f' (4),'o'(5),'o'(6),'='(7). So read=7, restLen=4, value is "bar\n", strip newline -> "bar". Then headers.put("foo","bar"). Second: same process, value "baz\n" -> "baz", put overrides. So final map has "foo"->"baz". Test expects that. Good.
+
+Now let's examine the test `workaroundForBrokenTimeHeader`? That test doesn't directly call parsePaxHeaders but uses TarArchiveInputStream to parse a tar file, which may use pax headers internally. But it's not directly testing parsePaxHeaders.
+
+Most of the other tests are not directly related to parsePaxHeaders; they test other functionality. The buggy function may be called indirectly via `TarArchiveInputStream.getNextTarEntry()` when reading pax headers. Many tests that read tar archives with pax headers might be affected.
+
+We need to determine which test methods actually expose the bug. The bug is likely in `parsePaxHeaders`. Let's think about potential bugs:
+
+One known bug in commons-compress versions is that the parsing of pax headers incorrectly handles the length when the length includes spaces or when the length is not properly computed because of the way `read` is incremented. Actually, there is a known issue: The code reads the length digit-by-digit until a space. But it does not account for the possibility that the length digits themselves are part of the counted bytes? Actually, the length is the total number of bytes in the header line including the length digits, space, keyword, =, value, and newline. The code reads the length digits, then reads the rest. But it uses `read` to count bytes read so far, and then computes `restLen = len - read`. Initially, after reading the length digits and the space, `read` includes those. Then it reads keyword and '=', incrementing `read`. So `read` includes everything up to and including the '='. That seems correct.
+
+But there is a subtle bug: The input stream is `i` which is the pax header input stream (usually a ByteArrayInputStream). The while loop reads characters one by one. However, the code uses `i.read()` which returns an int. It checks `ch == -1` for EOF and breaks. But inside the inner loops, if EOF occurs prematurely, it might not handle gracefully. But the test inputs are well-formed.
+
+Another potential bug: The code does not handle the case where the length value might be less than the number of characters already read (i.e., malformed). But not relevant.
+
+I recall a known bug in Commons Compress: The `parsePaxHeaders` method incorrectly handles the reading of the length when the length is large (e.g., > 9 digits?) Not likely.
+
+Maybe the bug is in the calculation of `restLen` when there are multiple header lines? The `read` variable is local to the outer while loop, so it's reset each iteration. That seems fine.
+
+Wait: There is a bug in the code: If the value contains an '=' character, the inner while loop that reads keyword stops at the first '='. That's correct. But what if the keyword contains '='? That would be invalid.
+
+Perhaps the bug is that the code does not handle the case where the header line has no space after the length? But that would be malformed.
+
+Let's look at test `readSimplePaxHeader`: input "30 atime=1321711775.972059463\n". Length 30. Let's verify: "30 atime=1321711775.972059463\n". Count: digits '3','0' (2), space (3), "atime=" (6+1=7? Actually "atime" is 5, plus '=' is 6, so total up to = is 2+1+5+1=9), then value "1321711775.972059463" that's 20 characters? Let's count: 1321711775.972059463: digits: 10 digits then dot then 9 digits = 20? Actually "1321711775" is 10, "." is 1, "972059463" is 9, total 20. Plus newline 1 gives total 2+1+5+1+20+1=30. So restLen = 30 - read (read includes digits=2, space=1, keyword=5, '='=1 => read=9) = 21. restLen is 21, then reads 21 bytes (value + newline), then constructs value with restLen-1=20 -> strips newline. The expected value is "1321711775.972059463". That works.
+
+Now consider test `survivesBlankLinesInPaxHeader`: It uses a file "COMPRESS-355.tar". That test expects that blank lines in pax header are handled correctly. The bug might be that the current code does not handle blank lines (i.e., header lines with length 0? Actually blank lines might be just newline? That would be malformed but need to handle gracefully). The test expects the archive to be read correctly. This test indirectly calls parsePaxHeaders. If parsePaxHeaders throws an exception or skips incorrectly, the test might fail.
+
+Another potential issue: The while loop condition `while(true)` with break when ch==-1. But if there is a blank line (just newline), the outer loop will read the newline? Actually the format expects length keyword=value\n. A blank line would be just a newline, which when read as first character is '\n' (ch=10). The inner while loop to read length will treat that as a digit? No, because it checks for space to end length reading. It will read newline, then ch is not space and not digits? Actually it does `while((ch = i.read()) != -1) { read++; if (ch == ' '){ ... break; } len *= 10; len += ch - '0'; }`. If ch is newline (10), then ch - '0' = 10 - 48 = -38, len becomes negative garbage. That will cause problems. So if there are blank lines (just newlines) in the pax header, the code will misinterpret them.
+
+The test `survivesBlankLinesInPaxHeader` suggests that there might be blank lines in the pax header of COMPRESS-355.tar. So the bug is that the code doesn't skip blank lines. The fix should skip empty lines or lines that don't start with a digit.
+
+Also, consider the test `readPaxHeaderWithEmbeddedNewline`. The value contains newlines, but the header line itself is a single line with the length indicating the total bytes including those newlines. That is handled.
+
+But the blank line issue is likely the bug. Let's verify by analyzing the code: The outer while reads a character to start. The inner while reads until space. If the line starts with a newline, ch will be '\n' (10). Then inside the inner while, it will compute len *= 10; len += 10 - 48 = -38. Then it continues reading next characters, but len is negative. It might cause infinite loop or incorrect behavior. So blank lines are not handled.
+
+The test `survivesBlankLinesInPaxHeader` likely expects that the parser can handle blank lines. Therefore, the bug is that `parsePaxHeaders` does not skip blank lines.
+
+Also, there might be an issue with how the length is parsed when there are leading zeros or something, but not likely.
+
+Now, we need to determine which test methods expose this bug. The direct pax header tests (`readSimplePaxHeader`, `secondEntryWinsWhenPaxHeaderContainsDuplicateKey`, `paxHeaderEntryWithEmptyValueRemovesKey`, `readPaxHeaderWithEmbeddedNewline`, `readNonAsciiPaxHeader`) do not include blank lines, so they probably pass. But the test `survivesBlankLinesInPaxHeader` does. That test is in `TarArchiveInputStreamTest`. Also, any test that reads a tar archive with pax headers that contain blank lines could be affected. But among the provided test methods, the only one that explicitly tests survival of blank lines is `survivesBlankLinesInPaxHeader`. Also, other tests like `testCompress197`, `readsArchiveCompletely_COMPRESS245`, `shouldThrowAnExceptionOnTruncatedEntries`, etc., might use archives that don't have blank lines.
+
+But also, the test `workaroundForBrokenTimeHeader` might use a tar with pax headers? Possibly.
+
+However, the instruction says: "Determine which testcase methods actually expose the bug." We need to be careful: The bug may cause failures in multiple tests if they read archives that have blank lines in pax headers. From the list, `survivesBlankLinesInPaxHeader` is the only one that explicitly mentions surviving blank lines. Others may also be impacted if their test archives contain blank lines, but we don't have that information. We should assume that only the tests that directly check for blank line handling (or that are known to fail) trigger the bug.
+
+Perhaps there is also a bug in the handling of the length when it is not followed by a space? But all test examples have a space.
+
+Let's search for known bugs in Commons Compress version 1.8 or so. There is a known bug: "parsePaxHeaders fails when pax header contains blank lines" (COMPRESS-355). So the bug is indeed that blank lines cause problems. The test `survivesBlankLinesInPaxHeader` was added to verify the fix. So that test would have been failing before the fix.
+
+Therefore, the trigger method is `survivesBlankLinesInPaxHeader`.
+
+Now, what about other tests? Some tests that indirectly call `parsePaxHeaders` via `getNextTarEntry` might also fail if the tar file contains blank lines. For example, `testCompress197` or `readsArchiveCompletely_COMPRESS245` might use tars with blank lines? Unlikely. Without evidence, we should only include the test that specifically tests this behavior.
+
+Also, note that the buggy function is `parsePaxHeaders`. The test `survivesBlankLinesInPaxHeader` is the only one that directly tests the behavior of parsing pax headers with blank lines in the file. It uses a file "COMPRESS-355.tar". That file likely contains blank lines in the pax header.
+
+Thus, the trigger method is `org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest.survivesBlankLinesInPaxHeader`.
+
+Now, for the fix: We need to produce the minimal correct fix for `parsePaxHeaders`. The fix should skip blank lines (lines that start with a newline) or handle them gracefully. How to fix? The outer while loop should skip any leading whitespace (including newlines) before reading the length. Or, after reading the first character, if it is a newline, skip it and continue. But careful: The length digits are expected to be the first non-whitespace. The standard says pax headers are formatted as "length keyword=value\n" without blank lines. However, some implementations may include blank lines, so we should ignore them.
+
+One approach: At the start of the outer while loop, read characters until we get a non-newline character. But we must not skip spaces because space is used to end the length. So skip only newlines (or maybe also carriage returns). So we can add a loop before reading length to skip any leading newline characters.
+
+Alternatively, in the inner while loop, if we encounter a newline before a space, it's likely a blank line. We could detect that and restart.
+
+Simpler: Add a check right after reading the first character of the length: if it is '\n' (or '\r'), then it's a blank line, so skip the rest of the line (until next newline) and continue.
+
+But the code reads one character at a time for length. If ch is '\n', then it's a blank line. We could break out of the inner while and continue the outer loop. However, the outer loop expects to read a length. So we need to handle that case.
+
+The minimal fix: In the outer while, before reading the length digits, we should skip any newline characters. We can add a loop that reads and discards while ch is '\n' or '\r'.
+
+Let's write the fix:
+
+```java
+Map<String, String> parsePaxHeaders(final InputStream i) throws IOException {
+    final Map<String, String> headers = new HashMap<String, String>(globalPaxHeaders);
+    // Format is "length keyword=value\n";
+    while(true) {
+        // skip blank lines
+        int ch;
+        do {
+            ch = i.read();
+            if (ch == -1) {
+                return headers;
+            }
+        } while (ch == '\n' || ch == '\r');
+        
+        int len = 0;
+        int read = 0;
+        // the first character is already read (ch)
+        len = ch - '0';
+        read++;
+        // read remaining digits of the length until space
+        while ((ch = i.read()) != -1) {
+            read++;
+            if (ch == ' ') {
+                // Get keyword ...
+                // rest of existing code
+                // but need to adjust because the first digit already read
+                // Actually, modify to use existing structure but incorporate skipping
+            }
+            len *= 10;
+            len += ch - '0';
+        }
+        // ...
+    }
+}
+```
+
+But that would require restructuring. A simpler fix is to adjust the existing inner while to skip lines that start with newline. We can add a condition inside the inner while: if the first character is newline, then we should skip the rest of the line and start a new iteration.
+
+Original code:
+
+```java
+while(true){
+    int ch;
+    int len = 0;
+    int read = 0;
+    while((ch = i.read()) != -1) {
+        read++;
+        if (ch == ' '){
+            // process header
+            break;
+        }
+        len *= 10;
+        len += ch - '0';
+    }
+    if (ch == -1){
+        break;
+    }
+}
+```
+
+If the first character after entering the inner while is a newline, then ch = '\n', which is not a digit. It will compute len = 0*10 + '\n' - '0' = 10 - 48 = -38. That's wrong. So we need to detect that case and skip the line.
+
+Fix: Inside the inner while, before processing ch as digit, check if ch == '\n' or ch == '\r'. If so, we are on a blank line; we should skip the rest of the line (read until newline) and then continue the outer while. But careful: The outer while loop reads the first character as part of the inner while. If it's a newline, we can read the rest of the line (until next newline) and then restart the outer loop.
+
+Alternatively, we can move the first character read outside the inner while, so we can check for newline before entering the digit loop.
+
+I think the minimal fix is to add a check for newline at the beginning of the inner while. If ch is newline, read until the next newline (or EOF) and then continue the outer loop (i.e., break out of the inner while without processing the header, and then continue the outer while). But we must be careful not to break the outer loop.
+
+Simpler: In the outer while, before starting the inner while, read a character and check if it is newline. If it is, skip the rest of the line and continue.
+
+We can modify as follows:
+
+```java
+while(true) {
+    int ch;
+    int len = 0;
+    int read = 0;
+    // Read first character of the length
+    ch = i.read();
+    if (ch == -1) {
+        break;
+    }
+    read++;
+    // Skip blank lines
+    if (ch == '\n' || ch == '\r') {
+        // read until end of line
+        while (ch != -1 && ch != '\n' && ch != '\r') {
+            ch = i.read();
+        }
+        continue;
+    }
+    // now ch is a digit (the first digit of length)
+    len = ch - '0';
+    while ((ch = i.read()) != -1) {
+        read++;
+        if (ch == ' ') {
+            // process header
+            ...
+        }
+        len *= 10;
+        len += ch - '0';
+    }
+    if (ch == -1) {
+        break;
+    }
+}
+```
+
+But we also need to handle the case where the first digit is read, then we continue with the original inner while. However, the original code did not separate the first digit; it read all digits inside the inner while. So we need to adjust. To minimize changes, we can keep the original structure but add a check inside the inner while for newline and skip the line.
+
+Alternative fix: Inside the inner while, after reading ch, if ch is newline, we treat it as a blank line: read until the next newline (or EOF) and then break out of the inner while with a flag to continue outer loop. But we must not process the header.
+
+Since we need minimal fix, we can add a check at the beginning of the inner while: if ch == '\n' or ch == '\r', then read until next newline and then set ch to something to cause the outer loop to continue? Actually, if ch is newline, we should skip the entire line. The inner while will exit when it encounters a newline? Not really, because it's looking for space. We can add a conditional before processing as digit: if ch is newline, then skip rest of line and then break out of the inner while (so that outer while can continue). But we need to ensure that after skipping, the outer while doesn't try to process a header.
+
+Simplest: Add a loop before the inner while that reads and discards any leading newline characters from the input. That way, the next character is always a digit.
+
+Let's implement:
+
+```java
+while(true) {
+    int ch;
+    // skip leading newlines
+    do {
+        ch = i.read();
+        if (ch == -1) {
+            return headers;
+        }
+    } while (ch == '\n' || ch == '\r');
+    
+    int len = 0;
+    int read = 0;
+    // Process this line: start with ch being the first digit
+    read++;
+    len = ch - '0';
+    while ((ch = i.read()) != -1) {
+        read++;
+        if (ch == ' ') {
+            // process header as before
+            ...
+        }
+        len *= 10;
+        len += ch - '0';
+    }
+    if (ch == -1) {
+        break;
+    }
+}
+```
+
+But this changes the logic slightly: The original code read the first digit inside the inner while. Now we read it outside. However, the rest of the code (processing keyword, value) relies on `read` being the count of bytes read so far. Since we incremented `read` for the first digit, it should be consistent. Also, the while loop for reading remaining digits now continues.
+
+We need to ensure that when we break on space, we have correct `read`. Yes, because we already included the first digit.
+
+But note: The original code had `len *= 10; len += ch - '0';` for each digit, including the first. Since we set `len = ch - '0'` initially, and then for subsequent digits we do `len *= 10; len += ch - '0'`, that matches the original behavior if we entered the inner while with the first digit and did `len *= 10; len += ch - '0'` for it? Actually original: len starts at 0, then for each digit it does len *= 10; len += ch - '0'. For the first digit, len becomes 10*0 + digit = digit. Then for the second digit, len becomes 10*digit + second, etc. So by setting len = first digit and then multiplying by 10 and adding for subsequent digits, we get the same result. But careful: If the length has multiple digits, we need to multiply the existing len by 10 before adding the next digit, which we do. For the second digit (the first subsequent), we do len *= 10; len += ch - '0'; that gives 10*first + second. Correct.
+
+Thus this fix is correct.
+
+Now we need to implement the rest of the code for processing keyword and value. The original code is inside the block where ch == ' '. We need to keep that block as is. Also, after processing, we need to break out of the inner while and continue outer loop. The original code has a break after processing the header, and then after the inner while, it checks if ch == -1 to break. That should still work.
+
+But there is a subtlety: In the original code, when the inner while ends due to EOF (ch == -1), it breaks out of inner while, then checks if (ch == -1) and breaks outer while. In our new code, if we encounter EOF in the leading-skip do-while, we return headers. If we encounter EOF inside the inner while, it will break and then check if ch == -1. That's fine.
+
+Now, we must ensure that the rest of the code for processing header is unchanged. So we will insert the do-while loop for skipping newlines right after the while(true) and before declaring len and read.
+
+Now we need to produce the fixed function as a JSON string. Also, we need to output the trigger methods.
+
+But we must consider: Are there any other tests that fail due to this bug? Possibly the test `workaroundForBrokenTimeHeader` might also be affected if the tar uses pax headers with blank lines? Don't know. The instruction says "Determine which testcase methods actually expose the bug." We should be conservative and only include the one that is explicitly about blank lines. The list of tests also includes `testCompress197` which might have a similar issue but not mentioned. Since we don't have analysis of the test data, we rely on the test names.
+
+Also, note that the test `survivesBlankLinesInPaxHeader` is in `TarArchiveInputStreamTest`. The full path: `org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest.survivesBlankLinesInPaxHeader`.
+
+Now, about other test cases: The test `secondEntryWinsWhenPaxHeaderContainsDuplicateKey` seems to work fine; it doesn't involve blank lines.
+
+Thus the trigger method list: ["org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest.survivesBlankLinesInPaxHeader"]
+
+Now, for the fixed_code: We need to output the full corrected implementation of `parsePaxHeaders` as a JSON string. The input function is the one provided. We will output the corrected version.
+
+Let's write the corrected function.
+
+We'll modify the function as described. Keep the rest of the code same. Use tabs? The original uses 4 spaces per indent? We'll preserve similar formatting.
+
+We'll produce the fixed code as a single string.
+
+Also note: The function uses `globalPaxHeaders` which is a field, and `CharsetNames.UTF_8`, `IOUtils.readFully`. These are external; we don't change them.
+
+Thus, the fixed code:
+
+```java
+Map<String, String> parsePaxHeaders(final InputStream i) throws IOException {
+    final Map<String, String> headers = new HashMap<String, String>(globalPaxHeaders);
+    // Format is "length keyword=value\n";
+    while(true) {
+        // get length
+        int ch;
+        // skip any blank lines (newlines) that may appear before a header
+        do {
+            ch = i.read();
+            if (ch == -1) {
+                return headers;
+            }
+        } while (ch == '\n' || ch == '\r');
+        int len = 0;
+        int read = 0;
+        read++;
+        len = ch - '0';
+        while((ch = i.read()) != -1) {
+            read++;
+            if (ch == ' '){
+                // Get keyword
+                final ByteArrayOutputStream coll = new ByteArrayOutputStream();
+                while((ch = i.read()) != -1) {
+                    read++;
+                    if (ch == '='){ // end of keyword
+                        final String keyword = coll.toString(CharsetNames.UTF_8);
+                        // Get rest of entry
+                        final int restLen = len - read;
+                        if (restLen == 1) { // only NL
+                            headers.remove(keyword);
+                        } else {
+                            final byte[] rest = new byte[restLen];
+                            final int got = IOUtils.readFully(i, rest);
+                            if (got != restLen) {
+                                throw new IOException("Failed to read "
+                                                      + "Paxheader. Expected "
+                                                      + restLen
+                                                      + " bytes, read "
+                                                      + got);
+                            }
+                            // Drop trailing NL
+                            final String value = new String(rest, 0,
+                                                      restLen - 1, CharsetNames.UTF_8);
+                            headers.put(keyword, value);
+                        }
+                        break;
+                    }
+                    coll.write((byte) ch);
+                }
+                break; // Processed single header
+            }
+            len *= 10;
+            len += ch - '0';
+        }
+        if (ch == -1){ // EOF
+            break;
+        }
+    }
+    return headers;
+}
+```
+
+We need to ensure proper indentation and format as a JSON string. We'll escape newlines and quotes properly.
+
+The output JSON must have "trigger_method" as an array of strings, and "fixed_code" as an array of strings (one for each function; here only one function). So fixed_code array will contain the single string of the corrected function.
+
+Now produce the final JSON.{
+  "trigger_method": [
+    "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest.survivesBlankLinesInPaxHeader"
+  ],
+  "fixed_code": [
+    "    Map<String, String> parsePaxHeaders(final InputStream i)\n        throws IOException {\n        final Map<String, String> headers = new HashMap<String, String>(globalPaxHeaders);\n        // Format is \"length keyword=value\\n\";\n        while(true){ \n            int ch;\n            // skip blank lines\n            do {\n                ch = i.read();\n                if (ch == -1) {\n                    return headers;\n                }\n            } while (ch == '\\n' || ch == '\\r');\n\n            int len = 0;\n            int read = 0;\n            read++;\n            len = ch - '0';\n            while((ch = i.read()) != -1) {\n                read++;\n                if (ch == ' '){\n                    // Get keyword\n                    final ByteArrayOutputStream coll = new ByteArrayOutputStream();\n                    while((ch = i.read()) != -1) {\n                        read++;\n                        if (ch == '='){ // end of keyword\n                            final String keyword = coll.toString(CharsetNames.UTF_8);\n                            // Get rest of entry\n                            final int restLen = len - read;\n                            if (restLen == 1) { // only NL\n                                headers.remove(keyword);\n                            } else {\n                                final byte[] rest = new byte[restLen];\n                                final int got = IOUtils.readFully(i, rest);\n                                if (got != restLen) {\n                                    throw new IOException(\"Failed to read \"\n                                                          + \"Paxheader. Expected \"\n                                                          + restLen\n                                                          + \" bytes, read \"\n                                                          + got);\n                                }\n                                // Drop trailing NL\n                                final String value = new String(rest, 0,\n                                                          restLen - 1, CharsetNames.UTF_8);\n                                headers.put(keyword, value);\n                            }\n                            break;\n                        }\n                        coll.write((byte) ch);\n                    }\n                    break; // Processed single header\n                }\n                len *= 10;\n                len += ch - '0';\n            }\n            if (ch == -1){ // EOF\n                break;\n            }\n        }\n        return headers;\n    }"
+  ]
+}

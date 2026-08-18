@@ -1,0 +1,288 @@
+We are given a buggy code snippet at the beginning:
+
+```
+    private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+        InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+        InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+        // matches invocation for verification
+        for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+            if (container.getInvocationForStubbing().matches(stubbedInvocationMatcher.getInvocation())) {
+                return stubbedInvocationMatcher.answer(invocation);
+            }
+        }
+
+        // record deep stub answer
+        return recordDeepStubAnswer(
+                newDeepStubMock(returnTypeGenericMetadata),
+                container
+        );
+    }
+
+    private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata) {
+        return mockitoCore().mock(
+                returnTypeGenericMetadata.rawType(),
+                withSettingsUsing(returnTypeGenericMetadata)
+        );
+    }
+
+    private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata) {
+        MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?
+                withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())
+                : withSettings();
+
+        return mockSettings.serializable()
+                .defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));
+    }
+```
+
+The problem: The method `deepStub` checks `container.getInvocationForStubbing().matches(stubbedInvocationMatcher.getInvocation())`. It uses `getInvocationForStubbing()` which is intended for stubbing, not verification. The bug is that during verification (e.g., when verifying deep stubs), it incorrectly tries to check matches against stubbed invocations using the invocation for stubbing, which is likely the wrong invocation object. Actually, looking at the code: it iterates over `container.getStubbedInvocations()` and checks if `container.getInvocationForStubbing()` matches the stubbed invocation's invocation. This is problematic because `getInvocationForStubbing()` returns the last invocation that was being stubbed, which may be null or irrelevant during verification. The purpose is to reuse the same deep stub mock across multiple invocations that match the same stubbing pattern. But the logic is flawed: it should compare the current invocation (the one passed to deepStub) with the stubbed invocations, not the container's "invocation for stubbing".
+
+In the context of deep stubbing with `RETURNS_DEEP_STUBS`, when a method is called on a mock that returns a deep stub, the deepStub method is invoked to get the answer. It should check if there is already a stubbed invocation that matches the current invocation (the one being answered). The current implementation uses `container.getInvocationForStubbing()` which is not correct for verification; it should use `invocation` from the parameter. That appears to be the bug.
+
+Let's examine the flow: In `deepStub`, we have `invocation` (the current invocation on the mock). The code wants to check if there's already a stubbed answer for this particular invocation. It looks at `container.getStubbedInvocations()` (the list of all stubbings). For each stubbed invocation matcher, it checks if `container.getInvocationForStubbing().matches(stubbedInvocationMatcher.getInvocation())`. `getInvocationForStubbing()` is likely the last invocation that was used in a `when()` call. That is not the same as the current invocation being answered. So the comparison is wrong. It should be `invocation.matches(stubbedInvocationMatcher.getInvocation())` or preferably `stubbedInvocationMatcher.matches(invocation)`.
+
+Thus, the fix should replace `container.getInvocationForStubbing().matches(...)` with something like `invocation.getMock().equals(...)` and check if the stubbed matcher matches the current invocation. Typically, `StubbedInvocationMatcher` has a `matches` method that checks if an invocation matches the stubbed one. The correct approach is to use `stubbedInvocationMatcher.matches(invocation)`.
+
+Also note that the code casts `handler.getInvocationContainer()` to `InvocationContainerImpl`, which might be fine.
+
+Therefore, the minimal fix is to change the condition inside the for loop:
+
+```java
+if (stubbedInvocationMatcher.matches(invocation)) {
+    return stubbedInvocationMatcher.answer(invocation);
+}
+```
+
+But need to ensure that `stubbedInvocationMatcher.matches` exists and is appropriate. In Mockito's codebase, `StubbedInvocationMatcher` has a `matches` method that delegates to its invocation matcher. That should work.
+
+Now, we need to identify which test methods actually trigger this bug. The bug is in `deepStub` which is part of the `ReturnsDeepStubs` answer. The only tests that use `RETURNS_DEEP_STUBS` are the ones in `DeepStubbingTest`, `DeepStubsSerializableTest`, and possibly others. But note that the bug is in the logic that attempts to reuse deep stubs based on matching stubbed invocations. However, the test cases that exercise deep stubbing and verification of deep stubs would expose this bug. For example, verification of deep stubs using `verify` might trigger the bug because during verification, `deepStub` is called again? Actually, verification does not call `deepStub`; only stubbing and answering do. The bug manifests when a deep stub mock is used to answer an invocation, and it checks against the container's invocation for stubbing instead of the actual invocation. This might cause incorrect matching and potentially fail to return the stubbed value, or return a wrong value. But most of the deep stubbing test cases do stubbing and then calling; they might still work if the invocation for stubbing happens to match? Possibly not.
+
+Let's think: In many deep stubbing tests, they first stub with `when(something.deepStub()).thenReturn(value)`. During stubbing, `deepStub` is called as part of the answer? Actually, when you do `when(sf.createSocket().getOutputStream()).thenReturn(out)`, the first call `sf.createSocket()` triggers deep stubbing: the mock `sf` returns a deep stub mock for `Socket`. But during stubbing, the invocation for stubbing is set. Later, when you call `sf.createSocket().getOutputStream()`, the `sf.createSocket()` again triggers deep stubbing, which goes into `deepStub`. There, it tries to find if there's a matching stubbed invocation. The bug is that it uses `container.getInvocationForStubbing()` which at the time of answering may be null or different. In many cases, the stubbing might actually work because `getInvocationForStubbing()` might still point to the stub invocation? But that seems fragile.
+
+Actually, looking at the code more: After stubbing, the `container.invocationForStubbing` is cleared. So during answering, it's likely null, causing a NullPointerException when calling `.matches()`. Or it might be null if not set. That would cause a NullPointerException. So the bug may cause an exception when deep stubs are used.
+
+But in the provided test list, there are many tests that use deep stubbing: 
+- `myTest`, `simpleCase`, `oneLevelDeep`, `interactions`, `withArguments`, `withAnyPatternArguments`, `withComplexPatternArguments`, `withSimplePrimitive`, `withPatternPrimitive`, `shouldStubbingBasicallyWorkFine`, `shouldVerificationBasicallyWorkFine`, `verification_work_with_argument_Matchers_in_nested_calls`, `deep_stub_return_same_mock_instance_if_invocation_matchers_matches`, `times_never_atLeast_atMost_verificationModes_should_work`, `inOrder_only_work_on_the_very_last_mock_but_it_works`, `verificationMode_only_work_on_the_last_returned_mock`, `shouldFailGracefullyWhenClassIsFinal`, and serialization tests with deep stubs.
+
+However, the bug is in the `deepStub` method, which is only called when using `RETURNS_DEEP_STUBS`. So we need to identify which of those test methods actually fail due to the bug. We can simulate: if we run those tests, which would fail? The bug likely causes `container.getInvocationForStubbing()` to be null, leading to NPE. So any test that triggers deep answer (i.e., call a method that returns a deep stub) will hit this. But some tests might not have calls that go through `deepStub`? Actually, all deep stubbing tests do call methods that return deep stubs, so they would hit it. However, some tests might be written in a way that avoids hitting the bug because of some other condition? Let's analyze the code again.
+
+In `deepStub`:
+- It gets the handler and container.
+- It iterates over stubbed invocations.
+- For each, it checks `container.getInvocationForStubbing().matches(...)`.
+
+If `getInvocationForStubbing()` returns null, then calling `.matches()` on null throws NPE. So any call to a method that goes through `deepStub` will cause NPE if there are stubbed invocations (even if none match) because the code tries to call `container.getInvocationForStubbing().matches(...)` without null check. If there are no stubbed invocations, the loop doesn't execute, and it goes to record deep stub answer. So it would only fail if there is at least one stubbed invocation in the container. In many deep stubbing tests, the container likely has stubbed invocations from previous stubbings. So many tests will fail.
+
+But let's look at `withSettingsUsing` also. That seems fine.
+
+Thus, all deep stubbing tests are likely affected. However, we are only asked to output the test methods that actually trigger the bug. We should examine each test method from the provided list that uses deep stubbing. But the list of tests is enormous; we need to identify which test methods are relevant. The problem statement says: "Given: 1. Source: The complete functions where an error occurs. If multiple functions are buggy, all will be provided. 2. Testcases: All relevant testcases." And the source file includes many test methods. The buggy functions are only those three methods (deepStub, newDeepStubMock, withSettingsUsing). So we need to look at all test methods that are in the source file? But the source file is not a test class; it's a code snippet. The testcases are listed after the buggy code. They are from various test classes. The bug is in the deep stubbing mechanism. So only those tests that involve deep stubbing (i.e., use `RETURNS_DEEP_STUBS`) would potentially trigger it.
+
+From the list, the following test classes include deep stubbing:
+- `org.mockitousage.stubbing.DeepStubbingTest`
+- `org.mockitousage.serialization.DeepStubsSerializableTest`
+
+All methods in those classes are candidates. Also, there is a test `myTest` in `DeepStubbingTest`. So we should include all those.
+
+Additionally, there might be other tests that indirectly use deep stubbing, but those are not visible in the provided list? The list includes many test methods from various classes; we need to be thorough.
+
+Let's manually list all test methods from the source that belong to deep stubbing classes:
+
+From `DeepStubbingTest`:
+- myTest
+- simpleCase
+- oneLevelDeep
+- interactions
+- withArguments
+- withAnyPatternArguments
+- withComplexPatternArguments
+- withSimplePrimitive
+- withPatternPrimitive
+- shouldStubbingBasicallyWorkFine
+- shouldVerificationBasicallyWorkFine
+- verification_work_with_argument_Matchers_in_nested_calls
+- deep_stub_return_same_mock_instance_if_invocation_matchers_matches
+- times_never_atLeast_atMost_verificationModes_should_work
+- inOrder_only_work_on_the_very_last_mock_but_it_works
+- verificationMode_only_work_on_the_last_returned_mock
+- shouldFailGracefullyWhenClassIsFinal
+
+From `DeepStubsSerializableTest`:
+- should_serialize_and_deserialize_mock_created_with_deep_stubs
+- should_serialize_and_deserialize_parameterized_class_mocked_with_deep_stubs
+- should_discard_generics_metadata_when_serialized_then_disabling_deep_stubs_with_generics
+
+Also, there is a test in `org.mockitousage.stubbing.DeepStubbingTest` called `shouldStubbingWorkWithDeepStubs`? Actually not listed, but the above are all.
+
+Additionally, the test `should_stub_only_not_verifiable` uses `withSettings().stubOnly()` but not deep stubs.
+
+There is also `should_serialize_and_deserialize_mock_created_with_deep_stubs` etc.
+
+So we need to output the full method paths for those. The format is `full_trigger_method_path1` e.g., "org.mockitousage.stubbing.DeepStubbingTest.myTest". We need to include the fully qualified class name and method.
+
+Now, we must also produce the fixed code. The fix is to change the condition in `deepStub` to use `invocation` instead of `container.getInvocationForStubbing()`. Also, we should ensure that `newDeepStubMock` and `withSettingsUsing` are correct; they seem fine. But we might need to adjust the cast? No, it's okay.
+
+Thus, the fixed code for the three functions:
+
+1. deepStub: modify the for loop condition.
+2. newDeepStubMock: unchanged.
+3. withSettingsUsing: unchanged.
+
+But we must output the full functions as they appear in the input (preserving order). So we will output all three, with deepStub corrected.
+
+Now, we need to ensure that the fix is correct. Let's write the corrected deepStub:
+
+```
+private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+    InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+    InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+    // matches invocation for verification
+    for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+        if (stubbedInvocationMatcher.matches(invocation)) {
+            return stubbedInvocationMatcher.answer(invocation);
+        }
+    }
+
+    // record deep stub answer
+    return recordDeepStubAnswer(
+            newDeepStubMock(returnTypeGenericMetadata),
+            container
+    );
+}
+```
+
+The other methods remain unchanged.
+
+Now, we must consider if there is any other bug in those functions. The `withSettingsUsing` method calls `returnsDeepStubsAnswerUsing(returnTypeGenericMetadata)`. That method is not provided in the source, so it's assumed to exist. No change needed.
+
+Thus, the output JSON should contain the trigger methods and the fixed code.
+
+We need to list all test methods that actually trigger the bug. Since the bug is in `deepStub` and it is called every time a deep stub is answered, all deep stubbing tests will be affected. We should include all of them.
+
+But note that some deep stubbing tests might not actually trigger the bug if they never have any stubbed invocations in the container before calling the method. For example, `simpleCase` stubs `socket.getOutputStream()` first, then calls `socket.getOutputStream()`. During the call, `socket.getOutputStream()` triggers deepStub? Actually, `socket` is mocked with default answer, not deep stubs. `simpleCase` uses `mock(Socket.class)` without deep stubs, so it does not use `ReturnsDeepStubs`. Wait, `simpleCase` does: `Socket socket = mock(Socket.class);` that's plain mock, not deep stub. Then `when(socket.getOutputStream()).thenReturn(out);` that's normal stubbing. Then `socket.getOutputStream()` is called, which returns `out` directly. No deep stubbing. So `simpleCase` does NOT trigger deepStub. Only tests that use `RETURNS_DEEP_STUBS` as default answer will trigger `deepStub`. So we need to filter out tests that do not use `RETURNS_DEEP_STUBS`.
+
+Look at each deep stubbing test: `oneLevelDeep` uses `mock(SocketFactory.class, RETURNS_DEEP_STUBS)`. `interactions` also uses `RETURNS_DEEP_STUBS`. `myTest` uses `RETURNS_DEEP_STUBS`. `withArguments`, `withAnyPatternArguments`, etc. all use `RETURNS_DEEP_STUBS`. So those are fine.
+
+But `simpleCase` does not. So I'll exclude `simpleCase`. Similarly, `shouldStubbingBasicallyWorkFine` uses `given(person.getAddress().getStreet().getName())` – that's deep stubbing? `person` is likely mocked with `RETURNS_DEEP_STUBS`? Not shown, but the test name suggests it uses deep stubs. Typically, in that test, `person` is mocked with `RETURNS_DEEP_STUBS`. So it should be included.
+
+To be safe, we'll include all methods from `DeepStubbingTest` except those that clearly do not set up deep stubs. But from the list, only `simpleCase` and maybe `shouldFailGracefullyWhenClassIsFinal` uses `mock(..., RETURNS_DEEP_STUBS)`? Actually `shouldFailGracefullyWhenClassIsFinal` uses `given(person.getFinalClass()).willReturn(value);` but `person` is presumably a deep stub mock. So include it.
+
+Now, from `DeepStubsSerializableTest`, all three methods use `withSettings().defaultAnswer(RETURNS_DEEP_STUBS)`, so they are included.
+
+Thus, the trigger methods are:
+
+- org.mockitousage.stubbing.DeepStubbingTest.myTest
+- org.mockitousage.stubbing.DeepStubbingTest.oneLevelDeep
+- org.mockitousage.stubbing.DeepStubbingTest.interactions
+- org.mockitousage.stubbing.DeepStubbingTest.withArguments
+- org.mockitousage.stubbing.DeepStubbingTest.withAnyPatternArguments
+- org.mockitousage.stubbing.DeepStubbingTest.withComplexPatternArguments
+- org.mockitousage.stubbing.DeepStubbingTest.withSimplePrimitive
+- org.mockitousage.stubbing.DeepStubbingTest.withPatternPrimitive
+- org.mockitousage.stubbing.DeepStubbingTest.shouldStubbingBasicallyWorkFine
+- org.mockitousage.stubbing.DeepStubbingTest.shouldVerificationBasicallyWorkFine
+- org.mockitousage.stubbing.DeepStubbingTest.verification_work_with_argument_Matchers_in_nested_calls
+- org.mockitousage.stubbing.DeepStubbingTest.deep_stub_return_same_mock_instance_if_invocation_matchers_matches
+- org.mockitousage.stubbing.DeepStubbingTest.times_never_atLeast_atMost_verificationModes_should_work
+- org.mockitousage.stubbing.DeepStubbingTest.inOrder_only_work_on_the_very_last_mock_but_it_works
+- org.mockitousage.stubbing.DeepStubbingTest.verificationMode_only_work_on_the_last_returned_mock
+- org.mockitousage.stubbing.DeepStubbingTest.shouldFailGracefullyWhenClassIsFinal
+- org.mockitousage.serialization.DeepStubsSerializableTest.should_serialize_and_deserialize_mock_created_with_deep_stubs
+- org.mockitousage.serialization.DeepStubsSerializableTest.should_serialize_and_deserialize_parameterized_class_mocked_with_deep_stubs
+- org.mockitousage.serialization.DeepStubsSerializableTest.should_discard_generics_metadata_when_serialized_then_disabling_deep_stubs_with_generics
+
+We should also check if there are any other tests that use `RETURNS_DEEP_STUBS` not in these classes. Looking through the list, I see `org.mockitousage.stubbing.DeepStubbingTest` is the main one. There is also `org.mockitousage.serialization.DeepStubsSerializableTest`. There might be others like `org.mockitousage.stubbing.CloningParameterTest` but that uses `ClonesArguments`, not deep stubs. `org.mockitousage.stubbing.SmartNullsStubbingTest` uses `RETURNS_SMART_NULLS`, not deep stubs. So these are the only ones.
+
+We have also `org.mockitousage.stubbing.DeepStubbingTest.simpleCase` excluded.
+
+Thus, we'll output those trigger methods.
+
+Now, the fixed_code: we need to output the three functions exactly as they appear, but with the fix applied to deepStub. We'll keep the original formatting but fix the condition. Also, note that the input code has a trailing comment "// buggy code", but that's not part of the method. We should output just the method bodies? The format expects full function as a JSON string, including signature, body, and closing braces. So we'll copy the original code but modify only the deepStub method.
+
+Let's construct the fixed_code array:
+
+1. The first function: deepStub (fixed).
+2. The second function: newDeepStubMock (unchanged).
+3. The third function: withSettingsUsing (unchanged).
+
+We'll include them in the same order as provided.
+
+Now, we must ensure the JSON is valid and has no extra spaces or newlines? The format says "full fixed_function1 as a JSON string", meaning the entire function code as a string. We'll use escaped newlines and quotes properly.
+
+Let's write the fixed deepStub:
+
+```
+    private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+        InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+        InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+        // matches invocation for verification
+        for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+            if (stubbedInvocationMatcher.matches(invocation)) {
+                return stubbedInvocationMatcher.answer(invocation);
+            }
+        }
+
+        // record deep stub answer
+        return recordDeepStubAnswer(
+                newDeepStubMock(returnTypeGenericMetadata),
+                container
+        );
+    }
+```
+
+The newDeepStubMock:
+
+```
+    private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata) {
+        return mockitoCore().mock(
+                returnTypeGenericMetadata.rawType(),
+                withSettingsUsing(returnTypeGenericMetadata)
+        );
+    }
+```
+
+The withSettingsUsing:
+
+```
+    private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata) {
+        MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?
+                withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())
+                : withSettings();
+
+        return mockSettings.serializable()
+                .defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));
+    }
+```
+
+We'll combine them into a JSON array of strings.
+
+Now, output the JSON.{
+  "trigger_method": [
+    "org.mockitousage.stubbing.DeepStubbingTest.myTest",
+    "org.mockitousage.stubbing.DeepStubbingTest.oneLevelDeep",
+    "org.mockitousage.stubbing.DeepStubbingTest.interactions",
+    "org.mockitousage.stubbing.DeepStubbingTest.withArguments",
+    "org.mockitousage.stubbing.DeepStubbingTest.withAnyPatternArguments",
+    "org.mockitousage.stubbing.DeepStubbingTest.withComplexPatternArguments",
+    "org.mockitousage.stubbing.DeepStubbingTest.withSimplePrimitive",
+    "org.mockitousage.stubbing.DeepStubbingTest.withPatternPrimitive",
+    "org.mockitousage.stubbing.DeepStubbingTest.shouldStubbingBasicallyWorkFine",
+    "org.mockitousage.stubbing.DeepStubbingTest.shouldVerificationBasicallyWorkFine",
+    "org.mockitousage.stubbing.DeepStubbingTest.verification_work_with_argument_Matchers_in_nested_calls",
+    "org.mockitousage.stubbing.DeepStubbingTest.deep_stub_return_same_mock_instance_if_invocation_matchers_matches",
+    "org.mockitousage.stubbing.DeepStubbingTest.times_never_atLeast_atMost_verificationModes_should_work",
+    "org.mockitousage.stubbing.DeepStubbingTest.inOrder_only_work_on_the_very_last_mock_but_it_works",
+    "org.mockitousage.stubbing.DeepStubbingTest.verificationMode_only_work_on_the_last_returned_mock",
+    "org.mockitousage.stubbing.DeepStubbingTest.shouldFailGracefullyWhenClassIsFinal",
+    "org.mockitousage.serialization.DeepStubsSerializableTest.should_serialize_and_deserialize_mock_created_with_deep_stubs",
+    "org.mockitousage.serialization.DeepStubsSerializableTest.should_serialize_and_deserialize_parameterized_class_mocked_with_deep_stubs",
+    "org.mockitousage.serialization.DeepStubsSerializableTest.should_discard_generics_metadata_when_serialized_then_disabling_deep_stubs_with_generics"
+  ],
+  "fixed_code": [
+    "    private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {\n        InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());\n        InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();\n\n        // matches invocation for verification\n        for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {\n            if (stubbedInvocationMatcher.matches(invocation)) {\n                return stubbedInvocationMatcher.answer(invocation);\n            }\n        }\n\n        // record deep stub answer\n        return recordDeepStubAnswer(\n                newDeepStubMock(returnTypeGenericMetadata),\n                container\n        );\n    }",
+    "    private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata) {\n        return mockitoCore().mock(\n                returnTypeGenericMetadata.rawType(),\n                withSettingsUsing(returnTypeGenericMetadata)\n        );\n    }",
+    "    private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata) {\n        MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?\n                withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())\n                : withSettings();\n\n        return mockSettings.serializable()\n                .defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));\n    }"
+  ]
+}

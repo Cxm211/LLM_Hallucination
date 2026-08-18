@@ -1,0 +1,217 @@
+We are given a Java source file that contains a buggy function `_hasCustomHandlers` and many test methods. The task is to determine which test method(s) actually expose the bug, and then produce a minimal fix.
+
+The buggy function:
+```java
+private boolean _hasCustomHandlers(JavaType t) {
+    if (t.isContainerType()) {
+        // First: value types may have both value and type handlers
+        JavaType ct = t.getContentType();
+        if (ct != null) {
+            return (ct.getValueHandler() != null) || (ct.getTypeHandler() != null);
+        // Second: map(-like) types may have value handler for key (but not type; keys are untyped)
+        }
+    }
+    return false;
+}
+```
+
+The comment indicates that for map-like types we also need to check key handlers. However, the bug is that after checking content type, if the type is a map, we should also check the key handler. The code currently only checks content type's value/type handlers, but for maps, the key may have a custom handler. The comment says "Second: map(-like) types may have value handler for key (but not type; keys are untyped)", implying that we should check `ct.getKeyHandler()?` Actually, in JavaType, there is `getKeyType()` for map types, and `getKeyHandler()`. But here they are using `getContentType()` which returns the value type. For maps, the key type is separate. So the bug is that the method does not check if the key type has a custom handler.
+
+The correct implementation should check both content and key handlers if the type is a container that has a key type (i.e., map-like). The comment says "map(-like) types may have value handler for key (but not type; keys are untyped)", but actually keys can have custom handlers. So we need to extend the check.
+
+Now, which test methods expose this bug? The method `_hasCustomHandlers` is likely called during deserialization, perhaps to decide whether to use a custom deserializer or something. Without more context, we need to infer from the test methods. Many tests are unrelated to this method. However, there are tests involving setterless properties (TestSetterlessProperties) that might be related because setterless properties rely on getters as setters, and custom handlers might affect that.
+
+Specifically, the test methods in `TestSetterlessProperties`:
+- testSimpleSetterlessMapOk
+- testSimpleSetterlessMapFailure
+- testSetterlessPrecedence
+
+These tests involve maps and setterless properties. The bug in `_hasCustomHandlers` might cause a map with custom key handlers to be incorrectly handled. For example, if a map has a custom key deserializer, the method might return false incorrectly, leading to deserialization failures.
+
+Also, there are tests like `testOverrideKeyClassValid` and `testOverrideKeyClassInvalid` under `TestValueAnnotations` that involve custom key handlers. Those might trigger the bug.
+
+Additionally, tests like `testCachedSerialize` in `MapDeserializerCachingTest` involve custom key serializers/deserializers.
+
+But we need to be precise: The bug is that `_hasCustomHandlers` only checks content type handlers, not key handlers for maps. So any test that uses a map with a custom key handler (or key serializer/deserializer) that would cause the method to return false when it should return true, might fail.
+
+Let's look at the test `testOverrideKeyClassValid`:
+```java
+public void testOverrideKeyClassValid() throws Exception {
+    ObjectMapper m = new ObjectMapper();
+    MapKeyHolder result = m.readValue("{ \"map\" : { \"xxx\" : \"yyy\" } }", MapKeyHolder.class);
+    // ... asserts that key is StringWrapper with custom deserializer
+}
+```
+Here, the map key type is overridden to `StringWrapper` which has a custom deserializer. This would involve a custom key handler. The `_hasCustomHandlers` method would be called during deserialization setup. If it returns false incorrectly, it might cause issues like not using the custom key deserializer. But would it cause a test failure? Possibly the test passes because the custom deserializer is still used via a different path, but maybe not.
+
+However, the test `testOverrideKeyClassInvalid` expects a failure because the specified key type is invalid. That might also depend on `_hasCustomHandlers`.
+
+Another test is `testOverrideContentClassValid` which is about content type, not key, so it might not be affected.
+
+The test `testCachedSerialize` in `MapDeserializerCachingTest`:
+```java
+public void testCachedSerialize() throws IOException {
+    ObjectMapper mapper = new ObjectMapper();
+    String json = aposToQuotes("{'data':{'1st':'onedata','2nd':'twodata'}}");
+    NonAnnotatedMapHolderClass ignored = mapper.readValue(json, NonAnnotatedMapHolderClass.class);
+    assertTrue(ignored.data.containsKey("1st"));
+    assertTrue(ignored.data.containsKey("2nd"));
+    MapHolder model2 = mapper.readValue(json, MapHolder.class);
+    if (!model2.data.containsKey("1st (CUSTOM)")
+        || !model2.data.containsKey("2nd (CUSTOM)")) {
+        fail("Not using custom key deserializer for input: ...");
+    }
+}
+```
+This test specifically checks that custom key deserializers are used. The `MapHolder` class likely has a custom key deserializer applied via annotation or module. The bug in `_hasCustomHandlers` could cause the custom key deserializer to be ignored, making the test fail. So this test is likely affected.
+
+Also, tests like `testSetterlessPrecedence` involve setterless properties with a list, not a map, so maybe not. But `testSimpleSetterlessMapOk` and `testSimpleSetterlessMapFailure` involve setterless maps. In those tests, the map is deserialized using setterless properties (i.e., via getter). Custom handlers on the map's key or value might affect whether the setterless property is used correctly. The bug might cause the setterless map to not be handled properly if there are custom handlers on the key type. However, in those tests, the map is `Map<String,Integer>` with no custom handlers, so they probably pass even with the bug. So they are unlikely triggers.
+
+Let's analyze the code flow: `_hasCustomHandlers` is likely used in `BeanDeserializerFactory` or similar to decide whether to create a custom deserializer for a container type. If it returns false but there are custom handlers (e.g., key handler), the deserializer might not be properly configured, leading to a failure when reading the JSON with custom key handling.
+
+The most direct test that seems to rely on key handlers is `testCachedSerialize` from `MapDeserializerCachingTest`. Also, `testOverrideKeyClassValid` and `testOverrideKeyClassInvalid` from `TestValueAnnotations` involve key type overrides, which typically require custom key deserializers. But `testOverrideKeyClassValid` uses `@JsonDeserialize(keyAs=StringWrapper.class)` on a map property, which will cause a custom key deserializer to be needed. If `_hasCustomHandlers` returns false for that map, it might cause issues.
+
+However, the test `testOverrideKeyClassValid` might still pass if the custom key deserializer is still used via a different check. We need to determine which tests actually fail due to this bug.
+
+Given the nature of the bug, it would cause a map with a custom key handler to be treated as not having custom handlers, so the deserializer creation might not include the custom key handler, leading to a failure when deserializing the keys (e.g., trying to create a key object without proper deserializer). That would typically cause a `JsonMappingException` with a message about not being able to deserialize the key. That might be caught in `testOverrideKeyClassInvalid` (which expects a failure but for a different reason) or `testCachedSerialize` would fail because the custom key transformation ("1st" -> "1st (CUSTOM)") would not happen.
+
+Looking at the test `testCachedSerialize`, it first deserializes into `NonAnnotatedMapHolderClass` which has no custom key deserializer, then into `MapHolder` which has a custom key deserializer. The test expects that for `MapHolder`, the keys are transformed to "1st (CUSTOM)" etc. If the custom key deserializer is not used because `_hasCustomHandlers` returned false incorrectly, then the keys would remain "1st" and "2nd", causing the test to fail. So this test likely triggers the bug.
+
+Similarly, `testOverrideKeyClassValid` expects the key class to be `StringWrapper` with value "xxx". If the custom key deserializer is not used, the key would be a plain string "xxx" instead of `StringWrapper`, and the assertion `assertEquals(StringWrapper.class, key.getClass())` would fail. So that test would also fail.
+
+Therefore, both `testCachedSerialize` and `testOverrideKeyClassValid` are likely triggers. `testOverrideKeyClassInvalid` might not be a trigger because it expects an exception anyway, and the bug might cause a different exception or no exception, but it's still a test that could be affected.
+
+Let's also consider `testCachedSerialize` is explicitly about caching and custom key deserializers, which matches the bug description.
+
+Now, what about the other tests? Many tests are unrelated. For example, tests in `TestSetterlessProperties` might not involve custom handlers. Tests in `TestUntypedDeserialization` are about deserializing to `Object` or untyped, not about custom handlers on maps.
+
+Thus, the most relevant tests are those involving custom key handlers for maps.
+
+Given the list, we need to output the full method paths of the tests that trigger the bug. The paths are like "com.fasterxml.jackson.databind.deser.TestSetterlessProperties::testSimpleSetterlessMapOk" etc. But the instructions say: "full_trigger_method_path1" should be the fully qualified method path. In the input, the test methods are given with a comment like "// com.fasterxml.jackson.databind.deser.TestSetterlessProperties::testSimpleSetterlessMapOk". So we should use that format.
+
+Now, which ones? Let's list all test methods that involve map key custom handlers:
+- TestValueAnnotations::testOverrideKeyClassValid
+- TestValueAnnotations::testOverrideKeyClassInvalid
+- MapDeserializerCachingTest::testCachedSerialize
+
+Also, maybe `TestSetterlessProperties::testSimpleSetterlessMapOk` and `testSimpleSetterlessMapFailure`? They do not involve custom handlers, so likely not.
+
+Also, `TestValueAnnotations::testOverrideContentClassValid` is about content, not key, so not.
+
+Another test: `TestValueAnnotations::testOverrideMapContents`? That's about map content values, not keys.
+
+What about `TestDefaultForMaps` tests? They might involve default typing but not custom key handlers per se.
+
+Therefore, the three tests above are the most likely.
+
+However, we should verify that the bug is actually exposed by these tests. The bug is that `_hasCustomHandlers` does not check key handlers for maps. For a map with a custom key deserializer, the method should return true, but it returns false. This false return might cause the deserializer creation to skip some initialization that is needed for custom key handlers. But could it also affect other logic? Possibly the method is used to decide whether to use a "creator-based" deserializer or something else. Without more context, we assume the bug causes deserialization failures for maps with custom key handlers.
+
+Since the test `testOverrideKeyClassValid` expects successful deserialization with custom key, if the bug causes it to fail, it would be a trigger. Similarly, `testCachedSerialize` expects success and custom key transformation, so if it fails, it's a trigger. `testOverrideKeyClassInvalid` expects a failure, but the bug might cause it to either succeed (if custom key handler is not used, then the invalid key type might be ignored) or fail with a different exception; but the test expects `JsonMappingException` with "not subtype of". If the bug causes a different behavior, it could also be a trigger. However, the description says "determine which testcase methods actually expose the bug". We should only include those that would fail due to the bug. So if `testOverrideKeyClassInvalid` still fails (maybe with a different message) or passes, it might not be a trigger. Since the test expects a specific exception, if the bug changes the exception message, the test might still fail. But if the bug causes the invalid key to be silently ignored, the test would not throw an exception and would fail. So it could be a trigger.
+
+Given the ambiguity, we need to be precise. Let's think about the code after the fix.
+
+The minimal fix is to add a check for key handlers if the container type is a map-like type. The fixed code:
+
+```java
+private boolean _hasCustomHandlers(JavaType t) {
+    if (t.isContainerType()) {
+        JavaType ct = t.getContentType();
+        if (ct != null) {
+            if (ct.getValueHandler() != null || ct.getTypeHandler() != null) {
+                return true;
+            }
+        }
+        // Also check key handlers for map types
+        if (t.isMapLikeType()) {
+            JavaType keyType = t.getKeyType();
+            if (keyType != null) {
+                if (keyType.getValueHandler() != null || keyType.getTypeHandler() != null) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+```
+
+Or more simply, we can check both content and key handlers in one loop.
+
+Now, which tests would pass with this fix? The ones that involve custom key handlers.
+
+After the fix, `testOverrideKeyClassValid` should pass, `testCachedSerialize` should pass, and `testOverrideKeyClassInvalid` should still fail (if it was failing before) or now fail correctly. So all three are likely triggered.
+
+But we need to be sure about `testOverrideKeyClassInvalid`. It expects a failure because the specified key class is not a subtype of the expected type. If the bug caused the custom key handler to not be used, the deserialization might succeed (because the key is just a string) and the test would fail because no exception is thrown. So that test would expose the bug. Therefore, it is a trigger.
+
+Thus, I'll include all three.
+
+Now, what about `testCachedSerialize`? It is from `MapDeserializerCachingTest`. The full package path is `com.fasterxml.jackson.databind.deser.jdk.MapDeserializerCachingTest`? The comment says "// com.fasterxml.jackson.databind.deser.jdk.MapDeserializerCachingTest::testCachedSerialize". So we'll use that.
+
+Similarly, `testOverrideKeyClassValid` and `testOverrideKeyClassInvalid` are from `com.fasterxml.jackson.databind.deser.TestValueAnnotations`.
+
+So the trigger methods are:
+- "com.fasterxml.jackson.databind.deser.TestValueAnnotations::testOverrideKeyClassValid"
+- "com.fasterxml.jackson.databind.deser.TestValueAnnotations::testOverrideKeyClassInvalid"
+- "com.fasterxml.jackson.databind.deser.jdk.MapDeserializerCachingTest::testCachedSerialize"
+
+Are there any others? What about tests that use `@JsonDeserialize(keyUsing=...)` or custom key serializer/deserializer modules? There might be other tests, but from the given list, these are the ones that explicitly involve custom key handling.
+
+Also, note that the bug is in `_hasCustomHandlers`, which is used in deserialization. Tests like `testSimpleSetterlessMapOk` do not involve custom handlers, so they would pass even with the bug. So they are not triggers.
+
+We should also consider `testSetterlessPrecedence` from `TestSetterlessProperties`. It involves setterless with a list, not a map, so no.
+
+Therefore, the trigger methods are as above.
+
+Now, we need to produce the fixed code. The fixed code should include the full corrected implementation of `_hasCustomHandlers`. Also, according to the instructions, we must output every function from the input, in the same order. But here, the input only contains one function `_hasCustomHandlers`. So the fixed_code array will contain just that fixed function as a JSON string (escaped).
+
+The output format: 
+{
+  "trigger_method": ["path1", "path2", ...],
+  "fixed_code": ["code1", "code2", ...]
+}
+
+Since only one function, we have one code string.
+
+Let's produce the fix.
+
+We'll modify the method to check both content and key handlers. Also, we need to consider that `t.isMapLikeType()` might be available. In Jackson's JavaType, there is `isMapLikeType()` method. Alternatively, we can check `t.isContainerType() && t.containedTypeCount() > 1` or check `t.getKeyType() != null`. Common practice is to use `t.isMapLikeType()`. I'll use that.
+
+Fixed method:
+
+```java
+private boolean _hasCustomHandlers(JavaType t) {
+    if (t.isContainerType()) {
+        JavaType ct = t.getContentType();
+        if (ct != null) {
+            if (ct.getValueHandler() != null || ct.getTypeHandler() != null) {
+                return true;
+            }
+        }
+        // Also check key handlers for map-like types
+        if (t.isMapLikeType()) {
+            JavaType kt = t.getKeyType();
+            if (kt != null) {
+                if (kt.getValueHandler() != null || kt.getTypeHandler() != null) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+```
+
+Note: The original comment said "Second: map(-like) types may have value handler for key (but not type; keys are untyped)", but we are also checking typeHandler for key, which is fine.
+
+Now, we need to escape the code as a JSON string. So we replace all double quotes with backslash double quotes and escape newlines as \n.
+
+Let's produce the final JSON.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.deser.TestValueAnnotations::testOverrideKeyClassValid",
+    "com.fasterxml.jackson.databind.deser.TestValueAnnotations::testOverrideKeyClassInvalid",
+    "com.fasterxml.jackson.databind.deser.jdk.MapDeserializerCachingTest::testCachedSerialize"
+  ],
+  "fixed_code": [
+    "private boolean _hasCustomHandlers(JavaType t) {\n    if (t.isContainerType()) {\n        JavaType ct = t.getContentType();\n        if (ct != null) {\n            if (ct.getValueHandler() != null || ct.getTypeHandler() != null) {\n                return true;\n            }\n        }\n        if (t.isMapLikeType()) {\n            JavaType kt = t.getKeyType();\n            if (kt != null) {\n                if (kt.getValueHandler() != null || kt.getTypeHandler() != null) {\n                    return true;\n                }\n            }\n        }\n    }\n    return false;\n}"
+  ]
+}

@@ -1,0 +1,45 @@
+JSType resolveInternal(ErrorReporter t, StaticScope<JSType> scope) {
+    setResolvedTypeInternal(this);
+
+    call = (ArrowType) safeResolve(call, t, scope);
+    prototype = (FunctionPrototypeType) safeResolve(prototype, t, scope);
+
+    JSType maybeTypeOfThis = safeResolve(typeOfThis, t, scope);
+    if (maybeTypeOfThis != null) {
+      maybeTypeOfThis = maybeTypeOfThis.restrictByNotNullOrUndefined();
+      if (maybeTypeOfThis.isUnionType()) {
+        boolean allObjectTypes = true;
+        for (JSType alternate : maybeTypeOfThis.toMaybeUnionType().getAlternates()) {
+          if (!(alternate instanceof ObjectType)) {
+            allObjectTypes = false;
+            break;
+          }
+        }
+        if (allObjectTypes && maybeTypeOfThis.toMaybeUnionType().getAlternates().size() == 1) {
+          typeOfThis = (ObjectType) maybeTypeOfThis.toMaybeUnionType().getAlternates().iterator().next();
+        }
+      } else if (maybeTypeOfThis instanceof ObjectType) {
+        typeOfThis = (ObjectType) maybeTypeOfThis;
+      }
+    }
+
+    boolean changed = false;
+    ImmutableList.Builder<ObjectType> resolvedInterfaces =
+        ImmutableList.builder();
+    for (ObjectType iface : implementedInterfaces) {
+      ObjectType resolvedIface = (ObjectType) iface.resolve(t, scope);
+      resolvedInterfaces.add(resolvedIface);
+      changed |= (resolvedIface != iface);
+    }
+    if (changed) {
+      implementedInterfaces = resolvedInterfaces.build();
+    }
+
+    if (subTypes != null) {
+      for (int i = 0; i < subTypes.size(); i++) {
+        subTypes.set(i, (FunctionType) subTypes.get(i).resolve(t, scope));
+      }
+    }
+
+    return super.resolveInternal(t, scope);
+  }

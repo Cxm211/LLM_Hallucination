@@ -1,0 +1,1 @@
+boolean process(Token t, HtmlTreeBuilder tb) { // InTableBody process method as in original }

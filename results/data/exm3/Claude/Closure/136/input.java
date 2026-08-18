@@ -1,0 +1,137 @@
+// buggy function
+  private void addPossibleSignature(String name, Node node, NodeTraversal t) {
+    boolean signatureAdded = false;
+    if (node.getType() == Token.FUNCTION) {
+      // The node we're looking at is a function, so we can add it directly
+      addSignature(name, node, t.getSourceName());
+      signatureAdded = true;
+    } else if (node.getType() == Token.NAME) {
+      String functionName = node.getString();
+      Scope.Var v = t.getScope().getVar(functionName);
+      if (v == null) {
+        if (compiler.isIdeMode()) {
+          return;
+        } else {
+          throw new IllegalStateException(
+              "VarCheck should have caught this undefined function");
+        }
+      }
+      Node function = v.getInitialValue();
+      if (function != null &&
+          function.getType() == Token.FUNCTION) {
+        addSignature(name, function, v.getInputName());
+        signatureAdded = true;
+      }
+    }
+    if (!signatureAdded) {
+      nonMethodProperties.add(name);
+    }
+  }
+
+    public void visit(NodeTraversal t, Node n, Node parent) {
+      if (n.getType() != Token.NAME) {
+        return;
+      }
+
+      String name = n.getString();
+
+      // Ignore anonymous functions
+      if (name.length() == 0) {
+        return;
+      }
+
+      // Is this local or Global?
+      Scope.Var var = t.getScope().getVar(name);
+      boolean local = (var != null) && var.isLocal();
+
+      // Are we renaming global variables?
+      if (!local && localRenamingOnly) {
+        reservedNames.add(name);
+        return;
+      }
+
+      // Are we renaming anonymous function names?
+      if (preserveAnonymousFunctionNames
+          && var != null
+          && NodeUtil.isAnonymousFunction(var.getParentNode())) {
+        reservedNames.add(name);
+        return;
+      }
+
+      // Check if we can rename this.
+      if (!okToRenameVar(name, local)) {
+          // Blindly de-uniquify for the Prototype library for issue 103.
+        return;
+      }
+
+      if (isExternsPass_) {
+        // Keep track of extern globals.
+        if (!local) {
+          externNames.add(name);
+        }
+        return;
+      }
+
+      if (local) {
+        // Local var: assign a new name
+        String tempName = LOCAL_VAR_PREFIX + var.getLocalVarIndex();
+        incCount(tempName, null);
+        localNameNodes.add(n);
+        localTempNames.add(tempName);
+      } else if (var != null) {  // Not an extern
+        // If it's global, increment global count
+        incCount(name, var.input);
+        globalNameNodes.add(n);
+      }
+    }
+
+// trigger testcase
+// com/google/javascript/jscomp/InlineGettersTest.java::testIssue2508576_1
+public void testIssue2508576_1() {
+    // Method defined by an extern should be left alone.
+    String externs = "function alert(a) {}";
+    testSame(externs, "({a:alert,b:alert}).a(\"a\")", null);
+  }
+
+// com/google/javascript/jscomp/InlineGettersTest.java::testIssue2508576_3
+public void testIssue2508576_3() {
+    // Anonymous object definition without side-effect should be removed.
+    test("({a:function(){},b:alert}).a(\"a\")", "");
+  }
+
+// com/google/javascript/jscomp/MethodCheckTest.java::testSeparateMethods
+public void testSeparateMethods() {
+    testSame("var f = new Foo();f.oneOrTwoArg2(1);");
+    testSame("var f = new Baz();f.oneOrTwoArg2(1, 2);");
+    testSame("Boz.staticMethod1(1);");
+    testSame("Boz.staticMethod2(1, 2);");
+
+    // Can't detect these incorrect usuages as they are defined indirectly.
+    testSame("var f = new Bar();f.oneOrTwoArg2(1, 2, 3);");
+    testSame("Boz.staticMethod1(1, 2);");
+    testSame("Boz.staticMethod2(1);");
+  }
+
+// com/google/javascript/jscomp/RenameVarsTest.java::testDollarSignSuperExport2
+public void testDollarSignSuperExport2() {
+    boolean normalizedExpectedJs = false;
+    super.enableNormalize(false);
+
+    useGoogleCodingConvention = false;
+    // See http://code.google.com/p/closure-compiler/issues/detail?id=32
+    test("var x = function($super,duper,$fantastic){};" +
+            "var y = function($super,duper){};",
+         "var c = function($super,    a,         b){};" +
+            "var d = function($super,    a){};");
+
+    localRenamingOnly = false;
+    test("var $super = 1", "var a = 1");
+
+    useGoogleCodingConvention = true;
+    test("var x = function($super,duper,$fantastic){};" +
+            "var y = function($super,duper){};",
+         "var d = function(a,     b,    c         ){};" +
+            "var e = function(     a,    b){};");
+
+    super.disableNormalize();
+  }

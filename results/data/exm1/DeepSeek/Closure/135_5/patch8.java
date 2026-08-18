@@ -1,0 +1,1 @@
+      if (NodeUtil.isThis(child)) {

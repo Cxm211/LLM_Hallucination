@@ -1,0 +1,9 @@
+public long set(long instant, int value) {
+        // lenient needs to handle time zone chronologies
+        // so we do the calculation using local milliseconds
+        long localInstant = iBase.getZone().convertUTCToLocal(instant);
+        long difference = FieldUtils.safeSubtract(value, get(instant));
+        localInstant = getType().getField(iBase.withUTC()).add(localInstant, difference);
+        int offset = iBase.getZone().getOffset(instant);
+        return iBase.getZone().convertLocalToUTC(localInstant, false, offset);
+    }

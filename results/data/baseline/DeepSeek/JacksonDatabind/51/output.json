@@ -1,0 +1,61 @@
+We need to analyze the buggy code. The function _findDeserializer is from Jackson Databind. The bug likely relates to the logic around handling typeId and the use of _idResolver.typeFromId(ctxt, typeId). In some versions, the type resolver may return null, but there is a fallback to _handleUnknownTypeId. The bug might be that when type is not null, the code checks if _baseType is not null and if the class of _baseType equals the class of type (i.e., same JavaType subclass). But this check may be too restrictive. There is a known issue [databind#1270] where custom type resolvers may return full generic type, and the code should retain them. The current code only narrows if the JavaType subclass matches, but perhaps it should always construct specialized type if possible, but also consider if the type already has generic parameters? Actually, the fix for #1270 was to check if the type from resolver already has generic parameters; if so, use it directly instead of narrowing. Let's examine the code: at line where it says "// 19-Jun-2016, tatu: As per [databind#1270] we may actually get full generic type with custom type resolvers. If so, should try to retain them." The comment indicates that the code should try to retain the full generic type. However, the current implementation still goes into the if block and constructs specialized type, which might lose generic info. The fix probably is to check if the type from resolver already has type parameters (i.e., is fully resolved) and if so, use it directly without narrowing. The common fix for #1270 is something like:
+
+if (type.hasGenericTypes()) {
+    // use as is
+} else {
+    // narrow from base
+}
+
+But the input code does not have that check. So the bug is that when type is not null and _baseType is not null, it always constructs specialized type, potentially losing generic info. The fix should be to add a condition: if type does not have generic types, then narrow; otherwise use type directly.
+
+Additionally, there might be another bug: the check `_baseType.getClass() == type.getClass()` might be too restrictive; perhaps it should be `_baseType.getClass().isAssignableFrom(type.getClass())` or removed. But the comment "09-Aug-2015, tatu: Not sure if the second part of the check makes sense; but it appears to check that JavaType impl class is the same" suggests it's fragile. However, the main issue is the loss of generic type.
+
+Let's see the exact line: 
+```
+if ((_baseType != null)
+        && _baseType.getClass() == type.getClass()) {
+    // ...
+    type = ctxt.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());
+}
+```
+This only narrows if the JavaType implementation class is the same. But if type is a fully generic type (e.g., Map<String, Integer>), its JavaType class might be MapType, while _baseType might be SimpleType (if base is Object). So the condition would be false, and type would remain as is. That might be okay. But if both are the same class (e.g., both SimpleType), then it narrows, possibly losing generic info if the type already had it. But SimpleType cannot have generic info. So the problem might be when _baseType is a container type like MapType and type is also MapType, but type might already have specific key/value types. Then constructSpecializedType would take _baseType (which might have generic params) and specialize it using the raw class of type, thus preserving the base's generic params? Actually, constructSpecializedType creates a specialized type from a base type, using the raw class. If the base type has generic parameters, they are retained? I need to check Jackson's implementation. Typically, constructSpecializedType will create a new type that is a subtype of base with the raw class, but the type parameters are taken from the base. For example, if _baseType is Map<String, String> and type is HashMap (raw), then the result would be HashMap<String, String>. That is correct. But if type already has generic parameters (e.g., HashMap<String, Integer>), and we do constructSpecializedType from base Map<String,String>, we would lose the Integer part. So the fix should check if type already has generic types and if so, use it as is. So the condition should be something like:
+
+if ((_baseType != null) && !type.hasGenericTypes() && _baseType.getClass() == type.getClass()) {
+    type = ctxt.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());
+}
+
+But also the class comparison might be too strict. Some fixed versions simply do:
+
+if (_baseType != null && _baseType.getClass() == type.getClass()) {
+    type = ctxt.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());
+}
+
+And add a check for generic types. I'll look at the actual fix in Jackson 2.9? The bug was #1270. The fix was to add a condition like:
+
+if (!type.hasGenericTypes()) {
+    type = ctxt.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());
+}
+
+I'll implement that.
+
+Also, note that the code has a comment "19-Jun-2016, tatu: As per [databind#1270] we may actually get full generic type with custom type resolvers. If so, should try to retain them." So the fix is to add the check for generic types.
+
+Thus, modify the condition inside the else block where type != null to:
+
+if ((_baseType != null) && _baseType.getClass() == type.getClass() && !type.hasGenericTypes()) {
+    type = ctxt.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());
+}
+
+That retains full generic type when present.
+
+Alternatively, some versions also remove the class equality check. But to be minimal, we keep it and add the generic check.
+
+I'll produce the fixed code accordingly.
+
+Also, ensure the function signature remains same.
+
+Now produce JSON output.{
+  "fixed_code": [
+    "protected final JsonDeserializer<Object> _findDeserializer(DeserializationContext ctxt,\n            String typeId) throws IOException\n    {\n        JsonDeserializer<Object> deser = _deserializers.get(typeId);\n        if (deser == null) {\n            /* As per [Databind#305], need to provide contextual info. But for\n             * backwards compatibility, let's start by only supporting this\n             * for base class, not via interface. Later on we can add this\n             * to the interface, assuming deprecation at base class helps.\n             */\n            JavaType type = _idResolver.typeFromId(ctxt, typeId);\n            if (type == null) {\n                // As per [JACKSON-614], use the default impl if no type id available:\n                deser = _findDefaultImplDeserializer(ctxt);\n                if (deser == null) {\n                    // 10-May-2016, tatu: We may get some help...\n                    JavaType actual = _handleUnknownTypeId(ctxt, typeId, _idResolver, _baseType);\n                    if (actual == null) { // what should this be taken to mean?\n                        // TODO: try to figure out something better\n                        return null;\n                    }\n                    // ... would this actually work?\n                    deser = ctxt.findContextualValueDeserializer(actual, _property);\n                }\n            } else {\n                /* 16-Dec-2010, tatu: Since nominal type we get here has no (generic) type parameters,\n                 *   we actually now need to explicitly narrow from base type (which may have parameterization)\n                 *   using raw type.\n                 *\n                 *   One complication, though; can not change 'type class' (simple type to container); otherwise\n                 *   we may try to narrow a SimpleType (Object.class) into MapType (Map.class), losing actual\n                 *   type in process (getting SimpleType of Map.class which will not work as expected)\n                 */\n                if ((_baseType != null)\n                        && _baseType.getClass() == type.getClass()) {\n                    /* 09-Aug-2015, tatu: Not sure if the second part of the check makes sense;\n                     *   but it appears to check that JavaType impl class is the same which is\n                     *   important for some reason?\n                     *   Disabling the check will break 2 Enum-related tests.\n                     */\n                    // 19-Jun-2016, tatu: As per [databind#1270] we may actually get full\n                    //   generic type with custom type resolvers. If so, should try to retain them.\n                    //  Whether this is sufficient to avoid problems remains to be seen, but for\n                    //  now it should improve things.\n                    if (!type.hasGenericTypes()) {\n                        type = ctxt.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());\n                    }\n                }\n                deser = ctxt.findContextualValueDeserializer(type, _property);\n            }\n            _deserializers.put(typeId, deser);\n        }\n        return deser;\n    }"
+  ]
+}

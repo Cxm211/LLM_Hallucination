@@ -1,0 +1,1 @@
+        public ShortSerializer() { super(Short.class, JsonParser.NumberType.INT, "number"); }

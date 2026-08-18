@@ -1,0 +1,37 @@
+public void serializeWithType(Object bean, JsonGenerator gen, SerializerProvider provider,
+            TypeSerializer typeSer0) throws IOException
+    {
+        // Regardless of other parts, first need to find value to serialize:
+        Object value = null;
+        try {
+            value = _accessorMethod.getValue(bean);
+            // and if we got null, can also just write it directly
+            if (value == null) {
+                provider.defaultSerializeNull(gen);
+                return;
+            }
+            JsonSerializer<Object> ser = _valueSerializer;
+            if (ser == null) { // no serializer yet? Need to fetch
+                ser = provider.findValueSerializer(value.getClass(), _property);
+            }
+            // Always write type information for the logical type (bean), but serialize
+            // actual contents using value serializer
+            typeSer0.writeTypePrefixForScalar(bean, gen);
+            ser.serialize(value, gen, provider);
+            typeSer0.writeTypeSuffixForScalar(bean, gen);
+        } catch (IOException ioe) {
+            throw ioe;
+        } catch (Exception e) {
+            Throwable t = e;
+            // Need to unwrap this specific type, to see infinite recursion...
+            while (t instanceof InvocationTargetException && t.getCause() != null) {
+                t = t.getCause();
+            }
+            // Errors shouldn't be wrapped (and often can't, as well)
+            if (t instanceof Error) {
+                throw (Error) t;
+            }
+            // let's try to indicate the path best we can...
+            throw JsonMappingException.wrapWithPath(t, bean, _accessorMethod.getName() + "()");
+        }
+    }

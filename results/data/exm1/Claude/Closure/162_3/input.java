@@ -1,0 +1,3585 @@
+// buggy code
+  public Iterator<Var> getVars() {
+    return vars.values().iterator();
+  }
+
+    public void enterScope(NodeTraversal t) {
+      Node n = t.getCurrentNode().getParent();
+      if (n != null && isCallToScopeMethod(n)) {
+        transformation = transformationHandler.logAliasTransformation(
+            n.getSourceFileName(), getSourceRegion(n));
+      }
+    }
+
+    private void report(NodeTraversal t, Node n, DiagnosticType error,
+        String... arguments) {
+      compiler.report(t.makeError(n, error, arguments));
+      hasErrors = true;
+    }
+
+    public void visit(NodeTraversal t, Node n, Node parent) {
+      if (isCallToScopeMethod(n)) {
+        validateScopeCall(t, n, n.getParent());
+      }
+
+
+
+      // Validate the top level of the goog.scope block.
+      if (t.getScopeDepth() == 2) {
+        int type = n.getType();
+        if (type == Token.NAME && parent.getType() == Token.VAR) {
+          if (n.hasChildren() && n.getFirstChild().isQualifiedName()) {
+            String name = n.getString();
+            Var aliasVar = t.getScope().getVar(name);
+            aliases.put(name, aliasVar);
+            aliasDefinitionsInOrder.add(n);
+
+            String qualifiedName =
+                aliasVar.getInitialValue().getQualifiedName();
+            transformation.addAlias(name, qualifiedName);
+            // Return early, to ensure that we don't record a definition
+            // twice.
+            return;
+          } else {
+            report(t, n, GOOG_SCOPE_NON_ALIAS_LOCAL, n.getString());
+          }
+        }
+        if (type == Token.NAME && NodeUtil.isAssignmentOp(parent) &&
+            n == parent.getFirstChild()) {
+            report(t, n, GOOG_SCOPE_ALIAS_REDEFINED, n.getString());
+        }
+
+        if (type == Token.RETURN) {
+          report(t, n, GOOG_SCOPE_USES_RETURN);
+        } else if (type == Token.THIS) {
+          report(t, n, GOOG_SCOPE_REFERENCES_THIS);
+        } else if (type == Token.THROW) {
+          report(t, n, GOOG_SCOPE_USES_THROW);
+        }
+      }
+
+      // Validate all descendent scopes of the goog.scope block.
+      if (t.getScopeDepth() >= 2) {
+        // Check if this name points to an alias.
+        if (n.getType() == Token.NAME) {
+          String name = n.getString();
+          Var aliasVar = aliases.get(name);
+          if (aliasVar != null &&
+              t.getScope().getVar(name) == aliasVar) {
+          // Note, to support the transitive case, it's important we don't
+          // clone aliasedNode here.  For example,
+          // var g = goog; var d = g.dom; d.createElement('DIV');
+          // The node in aliasedNode (which is "g") will be replaced in the
+          // changes pass above with "goog".  If we cloned here, we'd end up
+          // with <code>g.dom.createElement('DIV')</code>.
+          Node aliasedNode = aliasVar.getInitialValue();
+          aliasUsages.add(new AliasedNode(n, aliasedNode));
+          }
+        }
+
+        JSDocInfo info = n.getJSDocInfo();
+        if (info != null) {
+          for (Node node : info.getTypeNodes()) {
+            fixTypeNode(node);
+          }
+        }
+
+        // TODO(robbyw): Error for goog.scope not at root.
+      }
+    }
+
+// relevant test
+// com.google.javascript.jscomp.DeadAssignmentsEliminationTest::testIssue384d
+  public void testIssue384d() {
+    inFunction(
+            " var a, b;\n" +
+            " (f(b = true) || f(b = false)) && (a = b);\n" +
+            " return a;");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewritePrototypeMethods1
+  public void testRewritePrototypeMethods1() throws Exception {
+    
+    disableTypeCheck();
+    checkTypes(RewritePrototypeMethodTestInput.INPUT,
+               RewritePrototypeMethodTestInput.EXPECTED,
+               RewritePrototypeMethodTestInput.EXPECTED_TYPE_CHECKING_OFF);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewritePrototypeMethods2
+  public void testRewritePrototypeMethods2() throws Exception {
+    
+    enableTypeCheck(CheckLevel.ERROR);
+    checkTypes(RewritePrototypeMethodTestInput.INPUT,
+               RewritePrototypeMethodTestInput.EXPECTED,
+               RewritePrototypeMethodTestInput.EXPECTED_TYPE_CHECKING_ON);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteChained
+  public void testRewriteChained() throws Exception {
+    String source = newlineJoin(
+        "A.prototype.foo = function(){return this.b};",
+        "B.prototype.bar = function(){};",
+        "o.foo().bar()");
+
+    String expected = newlineJoin(
+        "var JSCompiler_StaticMethods_foo = ",
+        "function(JSCompiler_StaticMethods_foo$self) {",
+        "  return JSCompiler_StaticMethods_foo$self.b",
+        "};",
+        "var JSCompiler_StaticMethods_bar = ",
+        "function(JSCompiler_StaticMethods_bar$self) {",
+        "};",
+        "JSCompiler_StaticMethods_bar(JSCompiler_StaticMethods_foo(o))");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteDeclIsExpressionStatement
+  public void testRewriteDeclIsExpressionStatement() throws Exception {
+    test(semicolonJoin(NoRewriteDeclarationUsedAsRValue.DECL,
+                       NoRewriteDeclarationUsedAsRValue.CALL),
+         "var JSCompiler_StaticMethods_foo =" +
+         "function(JSCompiler_StaticMethods_foo$self) {};" +
+         "JSCompiler_StaticMethods_foo(o)");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteDeclUsedAsAssignmentRhs
+  public void testNoRewriteDeclUsedAsAssignmentRhs() throws Exception {
+    testSame(semicolonJoin("var c = " + NoRewriteDeclarationUsedAsRValue.DECL,
+                           NoRewriteDeclarationUsedAsRValue.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteDeclUsedAsCallArgument
+  public void testNoRewriteDeclUsedAsCallArgument() throws Exception {
+    testSame(semicolonJoin("f(" + NoRewriteDeclarationUsedAsRValue.DECL + ")",
+                           NoRewriteDeclarationUsedAsRValue.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteInGlobalScope
+  public void testRewriteInGlobalScope() throws Exception {
+    String expected = newlineJoin(
+        "function a(){}",
+        "var JSCompiler_StaticMethods_foo = ",
+        "function(JSCompiler_StaticMethods_foo$self) {",
+        "  return JSCompiler_StaticMethods_foo$self.x",
+        "};",
+        "var o = new a;",
+        "JSCompiler_StaticMethods_foo(o);");
+
+    test(NoRewriteIfNotInGlobalScopeTestInput.INPUT, expected);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteIfNotInGlobalScope1
+  public void testNoRewriteIfNotInGlobalScope1() throws Exception {
+    testSame("if(true){" + NoRewriteIfNotInGlobalScopeTestInput.INPUT + "}");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteIfNotInGlobalScope2
+  public void testNoRewriteIfNotInGlobalScope2() throws Exception {
+    testSame("function enclosingFunction() {" +
+             NoRewriteIfNotInGlobalScopeTestInput.INPUT +
+             "}");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteNamespaceFunctions
+  public void testNoRewriteNamespaceFunctions() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.foo = function() {return this.x};",
+        "a.foo()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteSingleDefinition1
+  public void testRewriteSingleDefinition1() throws Exception {
+    test(semicolonJoin(NoRewriteMultipleDefinitionTestInput.SOURCE_A,
+                       NoRewriteMultipleDefinitionTestInput.CALL),
+         NoRewriteMultipleDefinitionTestInput.SINGLE_DEFINITION_EXPECTED);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteSingleDefinition2
+  public void testRewriteSingleDefinition2() throws Exception {
+    test(semicolonJoin(NoRewriteMultipleDefinitionTestInput.SOURCE_B,
+                       NoRewriteMultipleDefinitionTestInput.CALL),
+         NoRewriteMultipleDefinitionTestInput.SINGLE_DEFINITION_EXPECTED);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteMultipleDefinition1
+  public void testNoRewriteMultipleDefinition1() throws Exception {
+    testSame(semicolonJoin(NoRewriteMultipleDefinitionTestInput.SOURCE_A,
+                           NoRewriteMultipleDefinitionTestInput.SOURCE_A,
+                           NoRewriteMultipleDefinitionTestInput.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteMultipleDefinition2
+  public void testNoRewriteMultipleDefinition2() throws Exception {
+    testSame(semicolonJoin(NoRewriteMultipleDefinitionTestInput.SOURCE_B,
+                           NoRewriteMultipleDefinitionTestInput.SOURCE_B,
+                           NoRewriteMultipleDefinitionTestInput.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteMultipleDefinition3
+  public void testNoRewriteMultipleDefinition3() throws Exception {
+    testSame(semicolonJoin(NoRewriteMultipleDefinitionTestInput.SOURCE_A,
+                           NoRewriteMultipleDefinitionTestInput.SOURCE_B,
+                           NoRewriteMultipleDefinitionTestInput.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewritePrototypeNoObjectLiterals
+  public void testRewritePrototypeNoObjectLiterals() throws Exception {
+    test(semicolonJoin(NoRewritePrototypeObjectLiteralsTestInput.REGULAR,
+                       NoRewritePrototypeObjectLiteralsTestInput.CALL),
+         "var JSCompiler_StaticMethods_foo = " +
+         "function(JSCompiler_StaticMethods_foo$self) {};" +
+         "JSCompiler_StaticMethods_foo(o)");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewritePrototypeObjectLiterals1
+  public void testNoRewritePrototypeObjectLiterals1() throws Exception {
+    testSame(semicolonJoin(NoRewritePrototypeObjectLiteralsTestInput.OBJ_LIT,
+                           NoRewritePrototypeObjectLiteralsTestInput.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewritePrototypeObjectLiterals2
+  public void testNoRewritePrototypeObjectLiterals2() throws Exception {
+    testSame(semicolonJoin(NoRewritePrototypeObjectLiteralsTestInput.OBJ_LIT,
+                           NoRewritePrototypeObjectLiteralsTestInput.REGULAR,
+                           NoRewritePrototypeObjectLiteralsTestInput.CALL));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteExternalMethods1
+  public void testNoRewriteExternalMethods1() throws Exception {
+    testSame("a.externalMethod()");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteExternalMethods2
+  public void testNoRewriteExternalMethods2() throws Exception {
+    testSame("A.prototype.externalMethod = function(){}; o.externalMethod()");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteCodingConvention
+  public void testNoRewriteCodingConvention() throws Exception {
+    
+    testSame("a.prototype._foo = function() {};");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteNoVarArgs
+  public void testRewriteNoVarArgs() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return args};",
+        "var o = new a;",
+        "o.foo()");
+
+    String expected = newlineJoin(
+        "function a(){}",
+        "var JSCompiler_StaticMethods_foo = ",
+        "  function(JSCompiler_StaticMethods_foo$self, args) {return args};",
+        "var o = new a;",
+        "JSCompiler_StaticMethods_foo(o)");
+
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteVarArgs
+  public void testNoRewriteVarArgs() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(var_args) {return arguments};",
+        "var o = new a;",
+        "o.foo()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteCallReference
+  public void testRewriteCallReference() throws Exception {
+    String expected = newlineJoin(
+        "function a(){}",
+        "var JSCompiler_StaticMethods_foo = ",
+        "function(JSCompiler_StaticMethods_foo$self) {",
+        "  return JSCompiler_StaticMethods_foo$self.x",
+        "};",
+        "var o = new a;",
+        "JSCompiler_StaticMethods_foo(o);");
+
+    test(NoRewriteNonCallReferenceTestInput.BASE + "o.foo()", expected);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteNoReferences
+  public void testNoRewriteNoReferences() throws Exception {
+    testSame(NoRewriteNonCallReferenceTestInput.BASE);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteNonCallReference
+  public void testNoRewriteNonCallReference() throws Exception {
+    testSame(NoRewriteNonCallReferenceTestInput.BASE + "o.foo && o.foo()");
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteNoNestedFunction
+  public void testRewriteNoNestedFunction() throws Exception {
+    test(semicolonJoin(
+             NoRewriteNestedFunctionTestInput.PREFIX + "}",
+             NoRewriteNestedFunctionTestInput.SUFFIX,
+             NoRewriteNestedFunctionTestInput.INNER),
+         semicolonJoin(
+             NoRewriteNestedFunctionTestInput.EXPECTED_PREFIX + "}",
+             NoRewriteNestedFunctionTestInput.EXPECTED_SUFFIX,
+             "var JSCompiler_StaticMethods_bar=" +
+             "function(JSCompiler_StaticMethods_bar$self){}",
+             "JSCompiler_StaticMethods_bar(o)"));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteNestedFunction
+  public void testNoRewriteNestedFunction() throws Exception {
+    test(NoRewriteNestedFunctionTestInput.PREFIX +
+         NoRewriteNestedFunctionTestInput.INNER + "};" +
+         NoRewriteNestedFunctionTestInput.SUFFIX,
+         NoRewriteNestedFunctionTestInput.EXPECTED_PREFIX +
+         NoRewriteNestedFunctionTestInput.INNER + "};" +
+         NoRewriteNestedFunctionTestInput.EXPECTED_SUFFIX);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteImplementedMethod
+  public void testRewriteImplementedMethod() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return args};",
+        "var o = new a;",
+        "o.foo()");
+    String expected = newlineJoin(
+        "function a(){}",
+        "var JSCompiler_StaticMethods_foo = ",
+        "  function(JSCompiler_StaticMethods_foo$self, args) {return args};",
+        "var o = new a;",
+        "JSCompiler_StaticMethods_foo(o)");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteImplementedMethod2
+  public void testRewriteImplementedMethod2() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype['foo'] = function(args) {return args};",
+        "var o = new a;",
+        "o.foo()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteImplementedMethod3
+  public void testRewriteImplementedMethod3() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return args};",
+        "var o = new a;",
+        "o['foo']");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteImplementedMethod4
+  public void testRewriteImplementedMethod4() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype['foo'] = function(args) {return args};",
+        "var o = new a;",
+        "o['foo']");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteImplementedMethodInObj
+  public void testRewriteImplementedMethodInObj() throws Exception {
+    
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype = {foo: function(args) {return args}};",
+        "var o = new a;",
+        "o.foo()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteGet1
+  public void testNoRewriteGet1() throws Exception {
+    
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype = {get foo(){return f}};",
+        "var o = new a;",
+        "o.foo()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteGet2
+  public void testNoRewriteGet2() throws Exception {
+    
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype = {get foo(){return 1}};",
+        "var o = new a;",
+        "o.foo");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteSet1
+  public void testNoRewriteSet1() throws Exception {
+    
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype = {set foo(a){}};",
+        "var o = new a;",
+        "o.foo()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteSet2
+  public void testNoRewriteSet2() throws Exception {
+    
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype = {set foo(a){}};",
+        "var o = new a;",
+        "o.foo = 1");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteNotImplementedMethod
+  public void testNoRewriteNotImplementedMethod() throws Exception {
+    testSame(newlineJoin("function a(){}",
+                         "var o = new a;",
+                         "o.foo()"));
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteSameModule1
+  public void testRewriteSameModule1() throws Exception {
+    JSModule[] modules = createModuleStar(
+        
+        semicolonJoin(ModuleTestInput.DEFINITION,
+                      ModuleTestInput.USE),
+        
+        "");
+
+    test(modules, new String[] {
+        
+        semicolonJoin(ModuleTestInput.REWRITTEN_DEFINITION,
+                      ModuleTestInput.REWRITTEN_USE),
+        
+        "",
+      });
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteSameModule2
+  public void testRewriteSameModule2() throws Exception {
+    JSModule[] modules = createModuleStar(
+        
+        "",
+        
+        semicolonJoin(ModuleTestInput.DEFINITION,
+                      ModuleTestInput.USE));
+
+    test(modules, new String[] {
+        
+        "",
+        
+        semicolonJoin(ModuleTestInput.REWRITTEN_DEFINITION,
+                      ModuleTestInput.REWRITTEN_USE)
+      });
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteSameModule3
+  public void testRewriteSameModule3() throws Exception {
+    JSModule[] modules = createModuleStar(
+        
+        semicolonJoin(ModuleTestInput.USE,
+                      ModuleTestInput.DEFINITION),
+        
+        "");
+
+    test(modules, new String[] {
+        
+        semicolonJoin(ModuleTestInput.REWRITTEN_USE,
+                      ModuleTestInput.REWRITTEN_DEFINITION),
+        
+        ""
+      });
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testRewriteDefinitionBeforeUse
+  public void testRewriteDefinitionBeforeUse() throws Exception {
+    JSModule[] modules = createModuleStar(
+        
+        ModuleTestInput.DEFINITION,
+        
+        ModuleTestInput.USE);
+
+    test(modules, new String[] {
+        
+        ModuleTestInput.REWRITTEN_DEFINITION,
+        
+        ModuleTestInput.REWRITTEN_USE
+      });
+  }
+
+// com.google.javascript.jscomp.DevirtualizePrototypeMethodsTest::testNoRewriteUseBeforeDefinition
+  public void testNoRewriteUseBeforeDefinition() throws Exception {
+    JSModule[] modules = createModuleStar(
+        
+        ModuleTestInput.USE,
+        
+        ModuleTestInput.DEFINITION);
+
+    testSame(modules);
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testOneType1
+  public void testOneType1() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;";
+    testSets(false, js, js, "{a=[[Foo.prototype]]}");
+    testSets(true, js, js, "{a=[[Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testOneType2
+  public void testOneType2() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype = {a: 0};\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;";
+    String expected = "{a=[[Foo.prototype]]}";
+    testSets(false, js, js, expected);
+    testSets(true, js, js, expected);
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testOneType3
+  public void testOneType3() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype = { get a() {return  0},"
+        + "                  set a(b) {} };\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;";
+    String expected = "{a=[[Foo.prototype]]}";
+    testSets(false, js, js, expected);
+    testSets(true, js, js, expected);
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testPrototypeAndInstance
+  public void testPrototypeAndInstance() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;";
+    testSets(false, js, js, "{a=[[Foo.prototype]]}");
+    testSets(true, js, js, "{a=[[Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTwoTypes1
+  public void testTwoTypes1() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;"
+        + "\n"
+        + "var B = new Bar;\n"
+        + "B.a = 0;";
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype.Foo_prototype$a=0;"
+        + "var F=new Foo;"
+        + "F.Foo_prototype$a=0;"
+        + "function Bar(){}"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "var B=new Bar;"
+        + "B.Bar_prototype$a=0";
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTwoTypes2
+  public void testTwoTypes2() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype = {a: 0};"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;"
+        + " function Bar() {}\n"
+        + "Bar.prototype = {a: 0};"
+        + "\n"
+        + "var B = new Bar;\n"
+        + "B.a = 0;";
+
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype = {Foo_prototype$a: 0};"
+        + "var F=new Foo;"
+        + "F.Foo_prototype$a=0;"
+        + "function Bar(){}"
+        + "Bar.prototype = {Bar_prototype$a: 0};"
+        + "var B=new Bar;"
+        + "B.Bar_prototype$a=0";
+
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTwoTypes3
+  public void testTwoTypes3() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype = { get a() {return  0},"
+        + "                  set a(b) {} };\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;"
+        + " function Bar() {}\n"
+        + "Bar.prototype = { get a() {return  0},"
+        + "                  set a(b) {} };\n"
+        + "\n"
+        + "var B = new Bar;\n"
+        + "B.a = 0;";
+
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype = { get Foo_prototype$a() {return  0},"
+        + "                  set Foo_prototype$a(b) {} };\n"
+        + "var F=new Foo;"
+        + "F.Foo_prototype$a=0;"
+        + "function Bar(){}"
+        + "Bar.prototype = { get Bar_prototype$a() {return  0},"
+        + "                  set Bar_prototype$a(b) {} };\n"
+        + "var B=new Bar;"
+        + "B.Bar_prototype$a=0";
+
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTwoFields
+  public void testTwoFields() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;"
+        + "Foo.prototype.b = 0;"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;"
+        + "F.b = 0;";
+    String output = "function Foo(){}Foo.prototype.a=0;Foo.prototype.b=0;"
+        + "var F=new Foo;F.a=0;F.b=0";
+    testSets(false, js, output, "{a=[[Foo.prototype]], b=[[Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Foo.prototype]], b=[[Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTwoSeparateFieldsTwoTypes
+  public void testTwoSeparateFieldsTwoTypes() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;"
+        + "Foo.prototype.b = 0;"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 0;"
+        + "F.b = 0;"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;"
+        + "Bar.prototype.b = 0;"
+        + "\n"
+        + "var B = new Bar;\n"
+        + "B.a = 0;"
+        + "B.b = 0;";
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype.Foo_prototype$a=0;"
+        + "Foo.prototype.Foo_prototype$b=0;"
+        + "var F=new Foo;"
+        + "F.Foo_prototype$a=0;"
+        + "F.Foo_prototype$b=0;"
+        + "function Bar(){}"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "Bar.prototype.Bar_prototype$b=0;"
+        + "var B=new Bar;"
+        + "B.Bar_prototype$a=0;"
+        + "B.Bar_prototype$b=0";
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]],"
+                                + " b=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Bar.prototype], [Foo.prototype]],"
+                               + " b=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnionType
+  public void testUnionType() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;"
+        + "\n"
+        + "var B = new Bar;\n"
+        + "B.a = 0;\n"
+        + "B = new Foo;\n"
+        + "B.a = 0;\n"
+        + " function Baz() {}\n"
+        + "Baz.prototype.a = 0;\n";
+    testSets(false, js,
+             "{a=[[Bar.prototype, Foo.prototype], [Baz.prototype]]}");
+    testSets(true, js, "{a=[[Bar.prototype, Foo.prototype], [Baz.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testIgnoreUnknownType
+  public void testIgnoreUnknownType() {
+    String js = ""
+        + "\n"
+        + "function Foo() {}\n"
+        + "Foo.prototype.blah = 3;\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.blah = 0;\n"
+        + "var U = function() { return {} };\n"
+        + "U().blah();";
+    String expected = ""
+        + "function Foo(){}Foo.prototype.blah=3;var F = new Foo;F.blah=0;"
+        + "var U=function(){return{}};U().blah()";
+    testSets(false, js, expected, "{}");
+    testSets(true, BaseJSTypeTestCase.ALL_NATIVE_EXTERN_TYPES,
+        js, expected, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnionTypeTwoFields
+  public void testUnionTypeTwoFields() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;\n"
+        + "Foo.prototype.b = 0;\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;\n"
+        + "Bar.prototype.b = 0;\n"
+        + "\n"
+        + "var B = new Bar;\n"
+        + "B.a = 0;\n"
+        + "B.b = 0;\n"
+        + "B = new Foo;\n"
+        + " function Baz() {}\n"
+        + "Baz.prototype.a = 0;\n"
+        + "Baz.prototype.b = 0;\n";
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype.Bar_prototype$a=0;"
+        + "Foo.prototype.Bar_prototype$b=0;"
+        + "function Bar(){}"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "Bar.prototype.Bar_prototype$b=0;"
+        + "var B=new Bar;"
+        + "B.Bar_prototype$a=0;"
+        + "B.Bar_prototype$b=0;"
+        + "function Baz(){}"
+        + "Baz.prototype.a$Baz_prototype=0;"
+        + "Baz.prototype.b$Baz_prototype=0;";
+    testSets(false, js, "{a=[[Bar.prototype, Foo.prototype], [Baz.prototype]],"
+                 + " b=[[Bar.prototype, Foo.prototype], [Baz.prototype]]}");
+    testSets(true, js, "{a=[[Bar.prototype, Foo.prototype], [Baz.prototype]],"
+                 + " b=[[Bar.prototype, Foo.prototype], [Baz.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testCast
+  public void testCast() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "((F)).a = 0;";
+    String output = ""
+        + "function Foo(){}Foo.prototype.Foo_prototype$a=0;"
+        + "function Bar(){}Bar.prototype.Bar_prototype$a=0;"
+        + "var F=new Foo;F.Bar_prototype$a=0;";
+    String ttOutput = ""
+        + "function Foo(){}Foo.prototype.Foo_prototype$a=0;"
+        + "function Bar(){}Bar.prototype.Bar_prototype$a=0;"
+        + "var F=new Foo;F.Unique$1$a=0;";
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, ttOutput,
+        "{a=[[Bar.prototype], [Foo.prototype], [Unique$1]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testConstructorFields
+  public void testConstructorFields() {
+    String js = ""
+      + "\n"
+      + "var Foo = function() { this.a = 0; };\n"
+      + " function Bar() {}\n"
+      + "Bar.prototype.a = 0;"
+      + "new Foo";
+    String output = ""
+        + "var Foo=function(){this.Foo$a=0};"
+        + "function Bar(){}"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "new Foo";
+    String ttOutput = ""
+        + "var Foo=function(){this.Foo_prototype$a=0};"
+        + "function Bar(){}"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "new Foo";
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo]]}");
+    testSets(true, js, ttOutput, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testStaticProperty
+  public void testStaticProperty() {
+    String js = ""
+      + " function Foo() {} \n"
+      + " function Bar() {}\n"
+      + "Foo.a = 0;"
+      + "Bar.a = 0;";
+    String output = ""
+        + "function Foo(){}"
+        + "function Bar(){}"
+        + "Foo.function__new_Foo___undefined$a = 0;"
+        + "Bar.function__new_Bar___undefined$a = 0;";
+
+    testSets(false, js, output,
+        "{a=[[function (new:Bar): undefined]," +
+        " [function (new:Foo): undefined]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSupertypeWithSameField
+  public void testSupertypeWithSameField() {
+    String js = ""
+      + " function Foo() {}\n"
+      + "Foo.prototype.a = 0;\n"
+      + " function Bar() {}\n"
+      + "\n"
+      + "Bar.prototype.a = 0;\n"
+      + " var B = new Bar;\n"
+      + "B.a = 0;"
+      + " function Baz() {}\n"
+      + "Baz.prototype.a = function(){};\n";
+
+    String output = ""
+        + "function Foo(){}Foo.prototype.Foo_prototype$a=0;"
+        + "function Bar(){}Bar.prototype.Foo_prototype$a=0;"
+        + "var B = new Bar;B.Foo_prototype$a=0;"
+        + "function Baz(){}Baz.prototype.Baz_prototype$a=function(){};";
+    String ttOutput = ""
+        + "function Foo(){}Foo.prototype.Foo_prototype$a=0;"
+        + "function Bar(){}Bar.prototype.Bar_prototype$a=0;"
+        + "var B = new Bar;B.Bar_prototype$a=0;"
+        + "function Baz(){}Baz.prototype.Baz_prototype$a=function(){};";
+    testSets(false, js, output, "{a=[[Baz.prototype], [Foo.prototype]]}");
+    testSets(true, js, ttOutput,
+        "{a=[[Bar.prototype], [Baz.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testScopedType
+  public void testScopedType() {
+    String js = ""
+        + "var g = {};\n"
+        + " g.Foo = function() {}\n"
+        + "g.Foo.prototype.a = 0;"
+        + " g.Bar = function() {}\n"
+        + "g.Bar.prototype.a = 0;";
+    String output = ""
+        + "var g={};"
+        + "g.Foo=function(){};"
+        + "g.Foo.prototype.g_Foo_prototype$a=0;"
+        + "g.Bar=function(){};"
+        + "g.Bar.prototype.g_Bar_prototype$a=0;";
+    testSets(false, js, output, "{a=[[g.Bar.prototype], [g.Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[g.Bar.prototype], [g.Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnresolvedType
+  public void testUnresolvedType() {
+    
+    String js = ""
+        + "var g = {};"
+        + " "
+        + "var Foo = function() {};\n"
+        + "Foo.prototype.a = 0;"
+        + " var Bar = function() {};\n"
+        + "Bar.prototype.a = 0;";
+    String output = ""
+        + "var g={};"
+        + "var Foo=function(){};"
+        + "Foo.prototype.Foo_prototype$a=0;"
+        + "var Bar=function(){};"
+        + "Bar.prototype.Bar_prototype$a=0;";
+    testSets(false, BaseJSTypeTestCase.ALL_NATIVE_EXTERN_TYPES,
+        js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, BaseJSTypeTestCase.ALL_NATIVE_EXTERN_TYPES,
+        js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testNamedType
+  public void testNamedType() {
+    String js = ""
+        + "var g = {};"
+        + " var Foo = function() {}\n"
+        + "Foo.prototype.a = 0;"
+        + " var Bar = function() {}\n"
+        + "Bar.prototype.a = 0;"
+        + " g.Late = function() {}";
+    String output = ""
+        + "var g={};"
+        + "var Foo=function(){};"
+        + "Foo.prototype.Foo_prototype$a=0;"
+        + "var Bar=function(){};"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "g.Late = function(){}";
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnknownType
+  public void testUnknownType() {
+    String js = ""
+        + " var Foo = function() {};\n"
+        + " var Bar = function() {};\n"
+        + " function fun() {}\n"
+        + "Foo.prototype.a = fun();\n"
+        + "fun().a;\n"
+        + "Bar.prototype.a = 0;";
+    String ttOutput = ""
+        + "var Foo=function(){};\n"
+        + "var Bar=function(){};\n"
+        + "function fun(){}\n"
+        + "Foo.prototype.Foo_prototype$a=fun();\n"
+        + "fun().Unique$1$a;\n"
+        + "Bar.prototype.Bar_prototype$a=0;";
+    testSets(false, js, js, "{}");
+    testSets(true, BaseJSTypeTestCase.ALL_NATIVE_EXTERN_TYPES, js, ttOutput,
+             "{a=[[Bar.prototype], [Foo.prototype], [Unique$1]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testEnum
+  public void testEnum() {
+    String js = ""
+        + " var En = {\n"
+        + "  A: 'first',\n"
+        + "  B: 'second'\n"
+        + "};\n"
+        + "var EA = En.A;\n"
+        + "var EB = En.B;\n"
+        + " function Foo(){};\n"
+        + "Foo.prototype.A = 0;\n"
+        + "Foo.prototype.B = 0;\n";
+    String output = ""
+        + "var En={A:'first',B:'second'};"
+        + "var EA=En.A;"
+        + "var EB=En.B;"
+        + "function Foo(){};"
+        + "Foo.prototype.Foo_prototype$A=0;"
+        + "Foo.prototype.Foo_prototype$B=0";
+    String ttOutput = ""
+        + "var En={A:'first',B:'second'};"
+        + "var EA=En.A;"
+        + "var EB=En.B;"
+        + "function Foo(){};"
+        + "Foo.prototype.Foo_prototype$A=0;"
+        + "Foo.prototype.Foo_prototype$B=0";
+    testSets(false, js, output, "{A=[[Foo.prototype]], B=[[Foo.prototype]]}");
+    testSets(true, js, ttOutput, "{A=[[Foo.prototype]], B=[[Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testEnumOfObjects
+  public void testEnumOfObjects() {
+    String js = ""
+        + " function Formatter() {}"
+        + "Formatter.prototype.format = function() {};"
+        + " function Unrelated() {}"
+        + "Unrelated.prototype.format = function() {};"
+        + " var Enum = {\n"
+        + "  A: new Formatter()\n"
+        + "};\n"
+        + "Enum.A.format();\n";
+    String output = ""
+        + " function Formatter() {}"
+        + "Formatter.prototype.Formatter_prototype$format = function() {};"
+        + " function Unrelated() {}"
+        + "Unrelated.prototype.Unrelated_prototype$format = function() {};"
+        + " var Enum = {\n"
+        + "  A: new Formatter()\n"
+        + "};\n"
+        + "Enum.A.Formatter_prototype$format();\n";
+    testSets(false, js, output,
+        "{format=[[Formatter.prototype], [Unrelated.prototype]]}");
+
+    
+    
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testEnumOfObjects2
+  public void testEnumOfObjects2() {
+    String js = ""
+        + " function Formatter() {}"
+        + "Formatter.prototype.format = function() {};"
+        + " function Unrelated() {}"
+        + "Unrelated.prototype.format = function() {};"
+        + " var Enum = {\n"
+        + "  A: new Formatter(),\n"
+        + "  B: new Formatter()\n"
+        + "};\n"
+        + "function f() {\n"
+        + "  var formatter = window.toString() ? Enum.A : Enum.B;\n"
+        + "  formatter.format();\n"
+        + "}";
+    String output = ""
+        + " function Formatter() {}"
+        + "Formatter.prototype.format = function() {};"
+        + " function Unrelated() {}"
+        + "Unrelated.prototype.format = function() {};"
+        + " var Enum = {\n"
+        + "  A: new Formatter(),\n"
+        + "  B: new Formatter()\n"
+        + "};\n"
+        + "function f() {\n"
+        + "  var formatter = window.toString() ? Enum.A : Enum.B;\n"
+        + "  formatter.format();\n"
+        + "}";
+    testSets(false, js, output, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testEnumOfObjects3
+  public void testEnumOfObjects3() {
+    String js = ""
+        + " function Formatter() {}"
+        + "Formatter.prototype.format = function() {};"
+        + " function Unrelated() {}"
+        + "Unrelated.prototype.format = function() {};"
+        + " var Enum = {\n"
+        + "  A: new Formatter(),\n"
+        + "  B: new Formatter()\n"
+        + "};\n"
+        + " var SubEnum = {\n"
+        + "  C: Enum.A\n"
+        + "};\n"
+        + "function f() {\n"
+        + "  var formatter = SubEnum.C\n"
+        + "  formatter.format();\n"
+        + "}";
+    String output = ""
+        + " function Formatter() {}"
+        + "Formatter.prototype.Formatter_prototype$format = function() {};"
+        + " function Unrelated() {}"
+        + "Unrelated.prototype.Unrelated_prototype$format = function() {};"
+        + " var Enum = {\n"
+        + "  A: new Formatter(),\n"
+        + "  B: new Formatter()\n"
+        + "};\n"
+        + " var SubEnum = {\n"
+        + "  C: Enum.A\n"
+        + "};\n"
+        + "function f() {\n"
+        + "  var formatter = SubEnum.C\n"
+        + "  formatter.Formatter_prototype$format();\n"
+        + "}";
+    testSets(false, js, output,
+        "{format=[[Formatter.prototype], [Unrelated.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUntypedExterns
+  public void testUntypedExterns() {
+    String externs =
+        BaseJSTypeTestCase.ALL_NATIVE_EXTERN_TYPES
+        + "var window;"
+        + "window.alert = function() {x};";
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;\n"
+        + "Foo.prototype.alert = 0;\n"
+        + "Foo.prototype.window = 0;\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;\n"
+        + "Bar.prototype.alert = 0;\n"
+        + "Bar.prototype.window = 0;\n"
+        + "window.alert();";
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype.Foo_prototype$a=0;"
+        + "Foo.prototype.alert=0;"
+        + "Foo.prototype.Foo_prototype$window=0;"
+        + "function Bar(){}"
+        + "Bar.prototype.Bar_prototype$a=0;"
+        + "Bar.prototype.alert=0;"
+        + "Bar.prototype.Bar_prototype$window=0;"
+        + "window.alert();";
+
+    testSets(false, externs, js, output, "{a=[[Bar.prototype], [Foo.prototype]]"
+             + ", window=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, externs, js, output, "{a=[[Bar.prototype], [Foo.prototype]],"
+             + " window=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnionTypeInvalidation
+  public void testUnionTypeInvalidation() {
+    String externs = ""
+        + " function Baz() {}"
+        + "Baz.prototype.a";
+    String js = ""
+        + " function Ind() {this.a=0}\n"
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;\n"
+        + "\n"
+        + "var F = new Foo;\n"
+        + "F.a = 1\n;"
+        + "F = new Bar;\n"
+        + "\n"
+        + "var Z = new Baz;\n"
+        + "Z.a = 1\n;"
+        + "\n"
+        + "var B = new Baz;\n"
+        + "B.a = 1;\n"
+        + "B = new Bar;\n";
+    
+    
+    String output = ""
+        + "function Ind() { this.Ind$a = 0; }"
+        + "function Foo() {}"
+        + "Foo.prototype.a = 0;"
+        + "function Bar() {}"
+        + "Bar.prototype.a = 0;"
+        + "var F = new Foo;"
+        + "F.a = 1;"
+        + "F = new Bar;"
+        + "var Z = new Baz;"
+        + "Z.a = 1;"
+        + "var B = new Baz;"
+        + "B.a = 1;"
+        + "B = new Bar;";
+    String ttOutput = ""
+        + "function Ind() { this.Unique$1$a = 0; }"
+        + "function Foo() {}"
+        + "Foo.prototype.a = 0;"
+        + "function Bar() {}"
+        + "Bar.prototype.a = 0;"
+        + "var F = new Foo;"
+        + "F.a = 1;"
+        + "F = new Bar;"
+        + "var Z = new Baz;"
+        + "Z.a = 1;"
+        + "var B = new Baz;"
+        + "B.a = 1;"
+        + "B = new Bar;";
+    testSets(false, externs, js, output, "{a=[[Ind]]}");
+    testSets(true, externs, js, ttOutput, "{a=[[Unique$1]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnionAndExternTypes
+  public void testUnionAndExternTypes() {
+    String externs = ""
+      + " function Foo() { }"
+      + "Foo.prototype.a = 4;\n";
+    String js = ""
+      + " function Bar() { this.a = 2; }\n"
+      + " function Baz() { this.a = 3; }\n"
+      + " function Buz() { this.a = 4; }\n"
+      + " function T1() { this.a = 3; }\n"
+      + " function T2() { this.a = 3; }\n"
+      + " var b;\n"
+      + " var c;\n"
+      + " var d;\n"
+      + "b.a = 5; c.a = 6; d.a = 7;";
+    String output = ""
+      + " function Bar() { this.a = 2; }\n"
+      + " function Baz() { this.a = 3; }\n"
+      + " function Buz() { this.a = 4; }\n"
+      + " function T1() { this.T1$a = 3; }\n"
+      + " function T2() { this.T2$a = 3; }\n"
+      + " var b;\n"
+      + " var c;\n"
+      + " var d;\n"
+      + "b.a = 5; c.a = 6; d.a = 7;";
+
+    
+    
+    testSets(false, externs, js, output, "{a=[[T1], [T2]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTypedExterns
+  public void testTypedExterns() {
+    String externs = ""
+        + " function Window() {};\n"
+        + "Window.prototype.alert;"
+        + ""
+        + "var window;";
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.alert = 0;\n"
+        + "window.alert('blarg');";
+    String output = ""
+        + "function Foo(){}"
+        + "Foo.prototype.Foo_prototype$alert=0;"
+        + "window.alert('blarg');";
+    testSets(false, externs, js, output, "{alert=[[Foo.prototype]]}");
+    testSets(true, externs, js, output, "{alert=[[Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSubtypesWithSameField
+  public void testSubtypesWithSameField() {
+    String js = ""
+        + " function Top() {}\n"
+        + " function Foo() {}\n"
+        + "Foo.prototype.a;\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a;\n"
+        + ""
+        + "function foo(top) {\n"
+        + "  var x = top.a;\n"
+        + "}\n"
+        + "foo(new Foo);\n"
+        + "foo(new Bar);\n";
+    testSets(false, js, "{}");
+    testSets(true, js, "{a=[[Bar.prototype, Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSupertypeReferenceOfSubtypeProperty
+  public void testSupertypeReferenceOfSubtypeProperty() {
+    String externs = ""
+        + " function Ext() {}"
+        + "Ext.prototype.a;";
+    String js = ""
+        + " function Foo() {}\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a;\n"
+        + ""
+        + "function foo(foo) {\n"
+        + "  var x = foo.a;\n"
+        + "}\n";
+    String result = ""
+        + "function Foo() {}\n"
+        + "function Bar() {}\n"
+        + "Bar.prototype.Bar_prototype$a;\n"
+        + "function foo(foo) {\n"
+        + "  var x = foo.Bar_prototype$a;\n"
+        + "}\n";
+    testSets(false, externs, js, result, "{a=[[Bar.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testObjectLiteralNotRenamed
+  public void testObjectLiteralNotRenamed() {
+    String js = ""
+        + "var F = {a:'a', b:'b'};"
+        + "F.a = 'z';";
+    testSets(false, js, js, "{}");
+    testSets(true, js, js, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testObjectLiteralReflected
+  public void testObjectLiteralReflected() {
+    String js = ""
+        + "var goog = {};"
+        + "goog.reflect = {};"
+        + "goog.reflect.object = function(x, y) { return y; };"
+        + " function F() {}"
+        + " F.prototype.foo = 3;"
+        + " function G() {}"
+        + " G.prototype.foo = 3;"
+        + "goog.reflect.object(F, {foo: 5});";
+    String result = ""
+        + "var goog = {};"
+        + "goog.reflect = {};"
+        + "goog.reflect.object = function(x, y) { return y; };"
+        + "function F() {}"
+        + "F.prototype.F_prototype$foo = 3;"
+        + "function G() {}"
+        + "G.prototype.G_prototype$foo = 3;"
+        + "goog.reflect.object(F, {F_prototype$foo: 5});";
+    testSets(false, js, result, "{foo=[[F.prototype], [G.prototype]]}");
+    testSets(true, js, result, "{foo=[[F.prototype], [G.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testObjectLiteralLends
+  public void testObjectLiteralLends() {
+    String js = ""
+        + "var mixin = function(x) { return x; };"
+        + " function F() {}"
+        + " F.prototype.foo = 3;"
+        + " function G() {}"
+        + " G.prototype.foo = 3;"
+        + "mixin( ({foo: 5}));";
+    String result = ""
+        + "var mixin = function(x) { return x; };"
+        + "function F() {}"
+        + "F.prototype.F_prototype$foo = 3;"
+        + "function G() {}"
+        + "G.prototype.G_prototype$foo = 3;"
+        + "mixin( ({F_prototype$foo: 5}));";
+    testSets(false, js, result, "{foo=[[F.prototype], [G.prototype]]}");
+    testSets(true, js, result, "{foo=[[F.prototype], [G.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testClosureInherits
+  public void testClosureInherits() {
+    String js = ""
+        + "var goog = {};"
+        + "\n"
+        + "goog.inherits = function(childCtor, parentCtor) {\n"
+        + "  \n"
+        + "  function tempCtor() {};\n"
+        + "  tempCtor.prototype = parentCtor.prototype;\n"
+        + "  childCtor.superClass_ = parentCtor.prototype;\n"
+        + "  childCtor.prototype = new tempCtor();\n"
+        + "  childCtor.prototype.constructor = childCtor;\n"
+        + "};"
+        + " function Top() {}\n"
+        + "Top.prototype.f = function() {};"
+        + " function Foo() {}\n"
+        + "goog.inherits(Foo, Top);\n"
+        + "Foo.prototype.f = function() {"
+        + "  Foo.superClass_.f();"
+        + "};\n"
+        + " function Bar() {}\n"
+        + "goog.inherits(Bar, Foo);\n"
+        + "Bar.prototype.f = function() {"
+        + "  Bar.superClass_.f();"
+        + "};\n"
+        + "(new Bar).f();\n";
+    testSets(false, js, "{f=[[Top.prototype]]}");
+    testSets(true, js, "{constructor=[[Bar.prototype, Foo.prototype]], "
+                 + "f=[[Bar.prototype], [Foo.prototype], [Top.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSkipNativeFunctionMethod
+  public void testSkipNativeFunctionMethod() {
+    String externs = ""
+        + ""
+        + "function Function(var_args) {}"
+        + "Function.prototype.call = function() {};";
+    String js = ""
+        + " function Foo(){};"
+        + ""
+        + "function Bar() { Foo.call(this); };"; 
+    testSame(externs, js, null);
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSkipNativeObjectMethod
+  public void testSkipNativeObjectMethod() {
+    String externs = ""
+        + " function Object(opt_v) {}"
+        + "Object.prototype.hasOwnProperty;";
+    String js = ""
+        + " function Foo(){};"
+        + "(new Foo).hasOwnProperty('x');";
+    testSets(false, externs, js, js, "{}");
+    testSets(true, externs, js, js, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testExtendNativeType
+  public void testExtendNativeType() {
+    String externs = ""
+        + ""
+        + "function Date(opt_1, opt_2, opt_3, opt_4, opt_5, opt_6, opt_7) {}"
+        + " Date.prototype.toString = function() {}";
+    String js = ""
+        + " function SuperDate() {};\n"
+        + "(new SuperDate).toString();";
+    testSets(true, externs, js, js, "{}");
+    testSets(false, externs, js, js, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testStringFunction
+  public void testStringFunction() {
+    
+    
+    String externs = ""
+         + "function String(opt_str) {};\n"
+         + "\n"
+         + "String.prototype.toString = function() { };\n";
+    String js = ""
+         + " function Foo() {};\n"
+         + "Foo.prototype.foo = function() {};\n"
+         + "String.prototype.foo = function() {};\n"
+         + "var a = 'str'.toString().foo();\n";
+    String output = ""
+         + "function Foo() {};\n"
+         + "Foo.prototype.Foo_prototype$foo = function() {};\n"
+         + "String.prototype.String_prototype$foo = function() {};\n"
+         + "var a = 'str'.toString().String_prototype$foo();\n";
+
+    testSets(false, externs, js, output,
+             "{foo=[[Foo.prototype], [String.prototype]]}");
+    testSets(true, externs, js, output,
+             "{foo=[[Foo.prototype], [String.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testUnusedTypeInExterns
+  public void testUnusedTypeInExterns() {
+    String externs = ""
+        + " function Foo() {};\n"
+        + "Foo.prototype.a";
+    String js = ""
+        + " function Bar() {};\n"
+        + "Bar.prototype.a;"
+        + " function Baz() {};\n"
+        + "Baz.prototype.a;";
+    String output = ""
+        + " function Bar() {};\n"
+        + "Bar.prototype.Bar_prototype$a;"
+        + " function Baz() {};\n"
+        + "Baz.prototype.Baz_prototype$a";
+    testSets(false, externs, js, output,
+             "{a=[[Bar.prototype], [Baz.prototype]]}");
+    testSets(true, externs, js, output,
+             "{a=[[Bar.prototype], [Baz.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testInterface
+  public void testInterface() {
+    String js = ""
+        + " function I() {};\n"
+        + "I.prototype.a;\n"
+        + " function Foo() {};\n"
+        + "Foo.prototype.a;\n"
+        + "\n"
+        + "var F = new Foo;"
+        + "var x = F.a;";
+    testSets(false, js, "{a=[[Foo.prototype, I.prototype]]}");
+    testSets(true, js, "{a=[[Foo.prototype], [I.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testInterfaceOfSuperclass
+  public void testInterfaceOfSuperclass() {
+    String js = ""
+        + " function I() {};\n"
+        + "I.prototype.a;\n"
+        + " function Foo() {};\n"
+        + "Foo.prototype.a;\n"
+        + " function Bar() {};\n"
+        + "Bar.prototype.a;\n"
+        + "\n"
+        + "var B = new Bar;"
+        + "B.a = 0";
+    testSets(false, js, "{a=[[Foo.prototype, I.prototype]]}");
+    testSets(true, js,
+        "{a=[[Bar.prototype], [Foo.prototype], [I.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testTwoInterfacesWithSomeInheritance
+  public void testTwoInterfacesWithSomeInheritance() {
+    String js = ""
+        + " function I() {};\n"
+        + "I.prototype.a;\n"
+        + " function I2() {};\n"
+        + "I2.prototype.a;\n"
+        + " function Foo() {};\n"
+        + "Foo.prototype.a;\n"
+        + "\n"
+        + "function Bar() {};\n"
+        + "Bar.prototype.a;\n"
+        + "\n"
+        + "var B = new Bar;"
+        + "B.a = 0";
+    testSets(false, js, "{a=[[Foo.prototype, I.prototype, I2.prototype]]}");
+    testSets(true, js, "{a=[[Bar.prototype], [Foo.prototype], "
+                       + "[I.prototype], [I2.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testInvalidatingInterface
+  public void testInvalidatingInterface() {
+    String js = ""
+        + " function I2() {};\n"
+        + "I2.prototype.a;\n"
+        + " function Bar() {}\n"
+        + "\n"
+        + "var i = new Bar;\n" 
+        + ""
+        + "function Foo() {};\n"
+        + "Foo.prototype.a = 0;\n"
+        + "(new Foo).a = 0;"
+        + " function I() {};\n"
+        + "I.prototype.a;\n";
+    testSets(false, js, "{}");
+    testSets(true, js, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testMultipleInterfaces
+  public void testMultipleInterfaces() {
+    String js = ""
+        + " function I() {};\n"
+        + " function I2() {};\n"
+        + "I2.prototype.a;\n"
+        + ""
+        + "function Foo() {};\n"
+        + "Foo.prototype.a = 0;\n"
+        + "(new Foo).a = 0";
+    testSets(false, js, "{a=[[Foo.prototype, I2.prototype]]}");
+    testSets(true, js, "{a=[[Foo.prototype], [I2.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testInterfaceWithSupertypeImplementor
+  public void testInterfaceWithSupertypeImplementor() {
+    String js = ""
+        + " function C() {}\n"
+        + "C.prototype.foo = function() {};\n"
+        + " function A (){}\n"
+        + "A.prototype.foo = function() {};\n"
+        + "\n"
+        + "function B() {}\n"
+        + " var b = new B();\n"
+        + "b.foo();\n";
+    testSets(false, js, "{foo=[[A.prototype, C.prototype]]}");
+    testSets(true, js, "{foo=[[A.prototype], [C.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSuperInterface
+  public void testSuperInterface() {
+    String js = ""
+        + " function I() {};\n"
+        + "I.prototype.a;\n"
+        + " function I2() {};\n"
+        + ""
+        + "function Foo() {};\n"
+        + "Foo.prototype.a = 0;\n"
+        + "(new Foo).a = 0";
+    testSets(false, js, "{a=[[Foo.prototype, I.prototype]]}");
+    testSets(true, js, "{a=[[Foo.prototype], [I.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testInterfaceUnionWithCtor
+  public void testInterfaceUnionWithCtor() {
+    String js = ""
+        + " function I() {};\n"
+        + " I.prototype.addEventListener;\n"
+        + " function Impl() {};\n"
+        + " Impl.prototype.addEventListener;"
+        + " function C() {};\n"
+        + " C.prototype.addEventListener;"
+        + ""
+        + "function f(x) { x.addEventListener(); };\n"
+        + "f(new C()); f(new Impl());";
+
+    testSets(false, js, js,
+        "{addEventListener=[[C.prototype, I.prototype, Impl.prototype]]}");
+
+    
+    
+    String tightenedOutput = ""
+        + "function I() {};\n"
+        + "I.prototype.I_prototype$addEventListener;\n"
+        + "function Impl() {};\n"
+        + "Impl.prototype.C_prototype$addEventListener;"
+        + "function C() {};\n"
+        + "C.prototype.C_prototype$addEventListener;"
+        + ""
+        + "function f(x) { x.C_prototype$addEventListener(); };\n"
+        + "f(new C()); f(new Impl());";
+
+    testSets(true, js, tightenedOutput,
+        "{addEventListener=[[C.prototype, Impl.prototype], [I.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testExternInterfaceUnionWithCtor
+  public void testExternInterfaceUnionWithCtor() {
+    String externs = ""
+        + " function I() {};\n"
+        + " I.prototype.addEventListener;\n"
+        + " function Impl() {};\n"
+        + " Impl.prototype.addEventListener;";
+
+    String js = ""
+        + " function C() {};\n"
+        + " C.prototype.addEventListener;"
+        + ""
+        + "function f(x) { x.addEventListener(); };\n"
+        + "f(new C()); f(new Impl());";
+
+    testSets(false, externs, js, js, "{}");
+    testSets(true, externs, js, js, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testMismatchInvalidation
+  public void testMismatchInvalidation() {
+    String js = ""
+        + " function Foo() {}\n"
+        + "Foo.prototype.a = 0;\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a = 0;\n"
+        + "\n"
+        + "var F = new Bar;\n"
+        + "F.a = 0;";
+
+    testSets(false, "", js, js, "{}", TypeValidator.TYPE_MISMATCH_WARNING,
+             "initializing variable\n"
+             + "found   : Bar\n"
+             + "required: (Foo|null)");
+    testSets(true, "", js, js, "{}", TypeValidator.TYPE_MISMATCH_WARNING,
+             "initializing variable\n"
+             + "found   : Bar\n"
+             + "required: (Foo|null)");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testBadCast
+  public void testBadCast() {
+    String js = " function Foo() {};\n"
+        + "Foo.prototype.a = 0;\n"
+        + " function Bar() {};\n"
+        + "Bar.prototype.a = 0;\n"
+        + "var a =  (new Bar);\n"
+        + "a.a = 4;";
+    testSets(false, "", js, js, "{}",
+             TypeValidator.INVALID_CAST,
+             "invalid cast - must be a subtype or supertype\n"
+             + "from: Bar\n"
+             + "to  : Foo");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testDeterministicNaming
+  public void testDeterministicNaming() {
+    String js =
+        "function A() {}\n"
+        + "A.prototype.f = function() {return 'a';};\n"
+        + "function B() {}\n"
+        + "B.prototype.f = function() {return 'b';};\n"
+        + "function C() {}\n"
+        + "C.prototype.f = function() {return 'c';};\n"
+        + "var ab = 1 ? new B : new A;\n"
+        + "var n = ab.f();\n";
+
+    String output =
+        "function A() {}\n"
+        + "A.prototype.A_prototype$f = function() { return'a'; };\n"
+        + "function B() {}\n"
+        + "B.prototype.A_prototype$f = function() { return'b'; };\n"
+        + "function C() {}\n"
+        + "C.prototype.C_prototype$f = function() { return'c'; };\n"
+        + "var ab = 1 ? new B : new A; var n = ab.A_prototype$f();\n";
+
+    for (int i = 0; i < 5; i++) {
+      testSets(false, js, output,
+          "{f=[[A.prototype, B.prototype], [C.prototype]]}");
+
+      testSets(true, js, output,
+          "{f=[[A.prototype, B.prototype], [C.prototype]]}");
+    }
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testObjectLiteral
+  public void testObjectLiteral() {
+    String js = " function Foo() {}\n"
+        + "Foo.prototype.a;\n"
+        + " function Bar() {}\n"
+        + "Bar.prototype.a;\n"
+        + "var F = ({ a: 'a' });\n";
+
+    String output = "function Foo() {}\n"
+        + "Foo.prototype.Foo_prototype$a;\n"
+        + "function Bar() {}\n"
+        + "Bar.prototype.Bar_prototype$a;\n"
+        + "var F = { Foo_prototype$a: 'a' };\n";
+
+    testSets(false, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+    testSets(true, js, output, "{a=[[Bar.prototype], [Foo.prototype]]}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testCustomInherits
+  public void testCustomInherits() {
+    String js = "Object.prototype.inheritsFrom = function(shuper) {\n" +
+        "  \n" +
+        "  function Inheriter() { }\n" +
+        "  Inheriter.prototype = shuper.prototype;\n" +
+        "  this.prototype = new Inheriter();\n" +
+        "  this.superConstructor = shuper;\n" +
+        "};\n" +
+        "function Foo(var1, var2, strength) {\n" +
+        "  Foo.superConstructor.call(this, strength);\n" +
+        "}" +
+        "Foo.inheritsFrom(Object);";
+
+    String externs = "" +
+        "function Function(var_args) {}" +
+        "Function.prototype.call = function(var_args) {};";
+
+    testSets(false, externs, js, js, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testSkipNativeFunctionStaticProperty
+  public void testSkipNativeFunctionStaticProperty() {
+    String js = ""
+      + "\n"
+      + "function addSingletonGetter(ctor) { ctor.a; }\n"
+      + " function Foo() {}\n"
+      + "Foo.a = 0;"
+      + " function Bar() {}\n"
+      + "Bar.a = 0;";
+
+    String output = ""
+        + "function addSingletonGetter(ctor){ctor.a}"
+        + "function Foo(){}"
+        + "Foo.a=0;"
+        + "function Bar(){}"
+        + "Bar.a=0";
+
+    testSets(false, js, output, "{}");
+  }
+
+// com.google.javascript.jscomp.DisambiguatePropertiesTest::testErrorOnProtectedProperty
+  public void testErrorOnProtectedProperty() {
+    String js = "function addSingletonGetter(foo) { foo.foobar = 'a'; };";
+
+    Compiler compiler = new Compiler();
+    CompilerOptions options = new CompilerOptions();
+    compiler.init(new JSSourceFile[]{JSSourceFile.fromCode("externs", "")},
+                  new JSSourceFile[]{
+                      JSSourceFile.fromCode("testcode", js)}, options);
+
+    Node root = compiler.parseInputs();
+    Node externsRoot = root.getFirstChild();
+    Node mainRoot = externsRoot.getNext();
+    getProcessor(compiler).process(externsRoot, mainRoot);
+
+    assertEquals(1, compiler.getErrors().length);
+    assertTrue(compiler.getErrors()[0].toString().contains("foobar"));
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportSymbol
+  public void testExportSymbol() throws Exception {
+    compileAndCheck("var a = {}; a.b = {}; a.b.c = function(d, e, f) {};" +
+                    "goog.exportSymbol('foobar', a.b.c)",
+                    "\n" +
+                    "var foobar = function(d, e, f) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportSymbolDefinedInVar
+  public void testExportSymbolDefinedInVar() throws Exception {
+    compileAndCheck("var a = function(d, e, f) {};" +
+                    "goog.exportSymbol('foobar', a)",
+                    "\n" +
+                    "var foobar = function(d, e, f) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportProperty
+  public void testExportProperty() throws Exception {
+    compileAndCheck("var a = {}; a.b = {}; a.b.c = function(d, e, f) {};" +
+                    "goog.exportProperty(a.b, 'cprop', a.b.c)",
+                    "var a = {};\n" +
+                    "a.b = {};\n" +
+                    "\n" +
+                    "a.b.cprop = function(d, e, f) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportMultiple
+  public void testExportMultiple() throws Exception {
+    compileAndCheck("var a = {}; a.b = function(p1) {}; " +
+                    "a.b.c = function(d, e, f) {};" +
+                    "a.b.prototype.c = function(g, h, i) {};" +
+                    "goog.exportSymbol('a.b', a.b);" +
+                    "goog.exportProperty(a.b, 'c', a.b.c);" +
+                    "goog.exportProperty(a.b.prototype, 'c', a.b.prototype.c);",
+
+                    "var a = {};\n" +
+                    "\n" +
+                    "a.b = function(p1) {\n};\n" +
+                    "\n" +
+                    "a.b.c = function(d, e, f) {\n};\n" +
+                    "\n" +
+                    "a.b.prototype.c = function(g, h, i) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportMultiple2
+  public void testExportMultiple2() throws Exception {
+    compileAndCheck("var a = {}; a.b = function(p1) {}; " +
+                    "a.b.c = function(d, e, f) {};" +
+                    "a.b.prototype.c = function(g, h, i) {};" +
+                    "goog.exportSymbol('hello', a);" +
+                    "goog.exportProperty(a.b, 'c', a.b.c);" +
+                    "goog.exportProperty(a.b.prototype, 'c', a.b.prototype.c);",
+
+                    "var hello = {};\n" +
+                    "hello.b = {};\n" +
+                    "\n" +
+                    "hello.b.c = function(d, e, f) {\n};\n" +
+                    "\n" +
+                    "hello.b.prototype.c = function(g, h, i) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportMultiple3
+  public void testExportMultiple3() throws Exception {
+    compileAndCheck("var a = {}; a.b = function(p1) {}; " +
+                    "a.b.c = function(d, e, f) {};" +
+                    "a.b.prototype.c = function(g, h, i) {};" +
+                    "goog.exportSymbol('prefix', a.b);" +
+                    "goog.exportProperty(a.b, 'c', a.b.c);",
+
+                    "\n" +
+                    "var prefix = function(p1) {\n};\n" +
+                    "\n" +
+                    "prefix.c = function(d, e, f) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportNonStaticSymbol
+  public void testExportNonStaticSymbol() throws Exception {
+    compileAndCheck("var a = {}; a.b = {}; var d = {}; a.b.c = d;" +
+                    "goog.exportSymbol('foobar', a.b.c)",
+                    "var foobar = {};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportNonStaticSymbol2
+  public void testExportNonStaticSymbol2() throws Exception {
+    compileAndCheck("var a = {}; a.b = {}; var d = null; a.b.c = d;" +
+                    "goog.exportSymbol('foobar', a.b.c())",
+                    "var foobar = {};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportNonexistentProperty
+  public void testExportNonexistentProperty() throws Exception {
+    compileAndCheck("var a = {}; a.b = {}; a.b.c = function(d, e, f) {};" +
+                    "goog.exportProperty(a.b, 'none', a.b.none)",
+                    "var a = {};\n" +
+                    "a.b = {};\n" +
+                    "a.b.none = {};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportSymbolWithTypeAnnotation
+  public void testExportSymbolWithTypeAnnotation() {
+
+    compileAndCheck("var internalName;\n" +
+                    "\n" +
+                    "internalName = function(param1, param2) {" +
+                      "return param1 + param2;" +
+                    "};" +
+                    "goog.exportSymbol('externalName', internalName)",
+                    "\n" +
+                    "var externalName = function(param1, param2) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportSymbolWithoutTypeCheck
+  public void testExportSymbolWithoutTypeCheck() {
+    
+    
+    setRunCheckTypes(false);
+
+    compileAndCheck("var internalName;\n" +
+                    "\n" +
+                    "internalName = function(param1, param2) {" +
+                      "return param1 + param2;" +
+                    "};" +
+                    "goog.exportSymbol('externalName', internalName)",
+                    "var externalName = function(param1, param2) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportSymbolWithConstructor
+  public void testExportSymbolWithConstructor() {
+    compileAndCheck("var internalName;\n" +
+                    "\n" +
+                    "internalName = function() {" +
+                    "};" +
+                    "goog.exportSymbol('externalName', internalName)",
+                    "\n" +
+                    "var externalName = function() {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportSymbolWithConstructorWithoutTypeCheck
+  public void testExportSymbolWithConstructorWithoutTypeCheck() {
+    
+    
+    
+    
+    
+
+    setRunCheckTypes(false);
+
+    compileAndCheck("var internalName;\n" +
+                    "\n" +
+                    "internalName = function() {" +
+                    "};" +
+                    "goog.exportSymbol('externalName', internalName)",
+                    "var externalName = function() {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportFunctionWithOptionalArguments
+  public void testExportFunctionWithOptionalArguments() {
+    compileAndCheck("var internalName;\n" +
+        "\n" +
+        "internalName = function(a) {" +
+        "  return 6;\n" +
+        "};" +
+        "goog.exportSymbol('externalName', internalName)",
+        "\n" +
+        "var externalName = function(a) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportFunctionWithVariableArguments
+  public void testExportFunctionWithVariableArguments() {
+    compileAndCheck("var internalName;\n" +
+        "\n" +
+        "internalName = function(a) {" +
+        "  return 6;\n" +
+        "};" +
+        "goog.exportSymbol('externalName', internalName)",
+        "\n" +
+        "var externalName = function(a) {\n};\n");
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportEnum
+   public void testExportEnum() {
+     compileAndCheck(
+         " var E = {A:1, B:2};" +
+         "goog.exportSymbol('E', E);",
+         
+         
+         "var E = {};\n"
+     );
+   }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testExportDontEmitPrototypePathPrefix
+  public void testExportDontEmitPrototypePathPrefix() {
+    compileAndCheck(
+        "\n" +
+        "var Foo = function() {};" +
+        "\n" +
+        "Foo.prototype.m = function() {return 6;};\n" +
+        "goog.exportSymbol('Foo', Foo);\n" +
+        "goog.exportProperty(Foo.prototype, 'm', Foo.prototype.m);",
+        "\n" +
+        "var Foo = function() {\n};\n" +
+        "\n" +
+        "Foo.prototype.m = function() {\n};\n"
+    );
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testUseExportsAsExterns
+  public void testUseExportsAsExterns() {
+    String librarySource =
+    "\n" +
+    "var InternalName = function(a) {" +
+    "};" +
+    "goog.exportSymbol('ExternalName', InternalName)";
+
+    String clientSource =
+      "var a = new ExternalName(6);\n" +
+      "\n" +
+      "var b = function(x) {};";
+
+    Result libraryCompileResult = compileAndExportExterns(librarySource);
+
+    assertEquals(0, libraryCompileResult.warnings.length);
+    assertEquals(0, libraryCompileResult.errors.length);
+
+    String generatedExterns = libraryCompileResult.externExport;
+
+    Result clientCompileResult = compileAndExportExterns(clientSource,
+        generatedExterns);
+
+    assertEquals(0, clientCompileResult.warnings.length);
+    assertEquals(0, clientCompileResult.errors.length);
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testWarnOnExportFunctionWithUnknownReturnType
+  public void testWarnOnExportFunctionWithUnknownReturnType() {
+    String librarySource =
+      "var InternalName = function() {" +
+      "  return 6;" +
+      "};" +
+      "goog.exportSymbol('ExternalName', InternalName)";
+
+      Result libraryCompileResult = compileAndExportExterns(librarySource);
+
+      assertEquals(1, libraryCompileResult.warnings.length);
+      assertEquals(0, libraryCompileResult.errors.length);
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testDontWarnOnExportConstructorWithUnknownReturnType
+  public void testDontWarnOnExportConstructorWithUnknownReturnType() {
+    String librarySource =
+      "\n " +
+      "var InternalName = function() {" +
+      "};" +
+      "goog.exportSymbol('ExternalName', InternalName)";
+
+      Result libraryCompileResult = compileAndExportExterns(librarySource);
+
+      assertEquals(0, libraryCompileResult.warnings.length);
+      assertEquals(0, libraryCompileResult.errors.length);
+  }
+
+// com.google.javascript.jscomp.ExternExportsPassTest::testWarnOnExportFunctionWithUnknownParameterTypes
+  public void testWarnOnExportFunctionWithUnknownParameterTypes() {
+    
+    String librarySource =
+      "\n " +
+      "var InternalName = function(a,b,c) {" +
+      "  return 6;" +
+      "};" +
+      "goog.exportSymbol('ExternalName', InternalName)";
+
+      Result libraryCompileResult = compileAndExportExterns(librarySource);
+
+      assertEquals(2, libraryCompileResult.warnings.length);
+      assertEquals(0, libraryCompileResult.errors.length);
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testNotEnoughPrototypeToExtract
+  public void testNotEnoughPrototypeToExtract() {
+    
+    for (int i = 0; i < 7; i++) {
+      testSame(generatePrototypeDeclarations("x", i));
+    }
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testExtractingSingleClassPrototype
+  public void testExtractingSingleClassPrototype() {
+    extract(generatePrototypeDeclarations("x", 7),
+        loadPrototype("x") +
+        generateExtractedDeclarations(7));
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testExtractingTwoClassPrototype
+  public void testExtractingTwoClassPrototype() {
+    extract(
+        generatePrototypeDeclarations("x", 6) +
+        generatePrototypeDeclarations("y", 6),
+        loadPrototype("x") +
+        generateExtractedDeclarations(6) +
+        loadPrototype("y") +
+        generateExtractedDeclarations(6));
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testExtractingTwoClassPrototypeInDifferentBlocks
+  public void testExtractingTwoClassPrototypeInDifferentBlocks() {
+    extract(
+        generatePrototypeDeclarations("x", 6) +
+        "if (foo()) {" +
+        generatePrototypeDeclarations("y", 6) +
+        "}",
+        loadPrototype("x") +
+        generateExtractedDeclarations(6) +
+        "if (foo()) {" +
+        loadPrototype("y") +
+        generateExtractedDeclarations(6) +
+        "}");
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testNoMemberDeclarations
+  public void testNoMemberDeclarations() {
+    testSame(
+        "x.prototype = {}; x.prototype = {}; x.prototype = {};" +
+        "x.prototype = {}; x.prototype = {}; x.prototype = {};" +
+        "x.prototype = {}; x.prototype = {}; x.prototype = {};");
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testExtractingPrototypeWithQName
+  public void testExtractingPrototypeWithQName() {
+    extract(
+        generatePrototypeDeclarations("com.google.javascript.jscomp.x", 7),
+        loadPrototype("com.google.javascript.jscomp.x") +
+        generateExtractedDeclarations(7));
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testInterweaved
+  public void testInterweaved() {
+    testSame(
+        "x.prototype.a=1; y.prototype.a=1;" +
+        "x.prototype.b=1; y.prototype.b=1;" +
+        "x.prototype.c=1; y.prototype.c=1;" +
+        "x.prototype.d=1; y.prototype.d=1;" +
+        "x.prototype.e=1; y.prototype.e=1;" +
+        "x.prototype.f=1; y.prototype.f=1;");
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testExtractingPrototypeWithNestedMembers
+  public void testExtractingPrototypeWithNestedMembers() {
+    extract(
+        "x.prototype.y.a = 1;" +
+        "x.prototype.y.b = 1;" +
+        "x.prototype.y.c = 1;" +
+        "x.prototype.y.d = 1;" +
+        "x.prototype.y.e = 1;" +
+        "x.prototype.y.f = 1;" +
+        "x.prototype.y.g = 1;",
+        loadPrototype("x") +
+        TMP + ".y.a = 1;" +
+        TMP + ".y.b = 1;" +
+        TMP + ".y.c = 1;" +
+        TMP + ".y.d = 1;" +
+        TMP + ".y.e = 1;" +
+        TMP + ".y.f = 1;" +
+        TMP + ".y.g = 1;");
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testWithDevirtualization
+  public void testWithDevirtualization() {
+    extract(
+        "x.prototype.a = 1;" +
+        "x.prototype.b = 1;" +
+        "function devirtualize1() { }" +
+        "x.prototype.c = 1;" +
+        "x.prototype.d = 1;" +
+        "x.prototype.e = 1;" +
+        "x.prototype.f = 1;" +
+        "x.prototype.g = 1;",
+
+        loadPrototype("x") +
+        TMP + ".a = 1;" +
+        TMP + ".b = 1;" +
+        "function devirtualize1() { }" +
+        TMP + ".c = 1;" +
+        TMP + ".d = 1;" +
+        TMP + ".e = 1;" +
+        TMP + ".f = 1;" +
+        TMP + ".g = 1;");
+
+    extract(
+        "x.prototype.a = 1;" +
+        "x.prototype.b = 1;" +
+        "function devirtualize1() { }" +
+        "x.prototype.c = 1;" +
+        "x.prototype.d = 1;" +
+        "function devirtualize2() { }" +
+        "x.prototype.e = 1;" +
+        "x.prototype.f = 1;" +
+        "function devirtualize3() { }" +
+        "x.prototype.g = 1;",
+
+        loadPrototype("x") +
+        TMP + ".a = 1;" +
+        TMP + ".b = 1;" +
+        "function devirtualize1() { }" +
+        TMP + ".c = 1;" +
+        TMP + ".d = 1;" +
+        "function devirtualize2() { }" +
+        TMP + ".e = 1;" +
+        TMP + ".f = 1;" +
+        "function devirtualize3() { }" +
+        TMP + ".g = 1;");
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testAnonSimple
+  public void testAnonSimple() {
+    pattern = Pattern.USE_ANON_FUNCTION;
+
+    extract(
+        generatePrototypeDeclarations("x", 3),
+        generateExtractedDeclarations(3) +
+        loadPrototype("x"));
+
+    testSame(generatePrototypeDeclarations("x", 1));
+    testSame(generatePrototypeDeclarations("x", 2));
+
+    extract(
+        generatePrototypeDeclarations("x", 7),
+        generateExtractedDeclarations(7) +
+        loadPrototype("x"));
+
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testAnonWithDevirtualization
+  public void testAnonWithDevirtualization() {
+    pattern = Pattern.USE_ANON_FUNCTION;
+
+    extract(
+        "x.prototype.a = 1;" +
+        "x.prototype.b = 1;" +
+        "function devirtualize() { }" +
+        "x.prototype.c = 1;",
+
+        "(function(" + TMP + "){" +
+        TMP + ".a = 1;" +
+        TMP + ".b = 1;" +
+        TMP + ".c = 1;" +
+        loadPrototype("x") +
+        "function devirtualize() { }");
+
+    extract(
+        "x.prototype.a = 1;" +
+        "function devirtualize1() { }" +
+        "x.prototype.b = 1;" +
+        "function devirtualize2() { }" +
+        "x.prototype.c = 1;" +
+        "function devirtualize3() { }",
+
+        "(function(" + TMP + "){" +
+        TMP + ".a = 1;" +
+        TMP + ".b = 1;" +
+        TMP + ".c = 1;" +
+        loadPrototype("x") +
+        "function devirtualize1() { }" +
+        "function devirtualize2() { }" +
+        "function devirtualize3() { }");
+  }
+
+// com.google.javascript.jscomp.ExtractPrototypeMemberDeclarationsTest::testAnonWithSideFx
+  public void testAnonWithSideFx() {
+    pattern = Pattern.USE_ANON_FUNCTION;
+    testSame(
+        "function foo() {};" +
+        "foo.prototype.a1 = 1;" +
+        "bar();;" +
+        "foo.prototype.a2 = 2;" +
+        "bar();;" +
+        "foo.prototype.a3 = 3;" +
+        "bar();;" +
+        "foo.prototype.a4 = 4;" +
+        "bar();;" +
+        "foo.prototype.a5 = 5;" +
+        "bar();;" +
+        "foo.prototype.a6 = 6;" +
+        "bar();;" +
+        "foo.prototype.a7 = 7;" +
+        "bar();");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testSimpleAssign
+  public void testSimpleAssign() {
+    inline("var x; x = 1; print(x)", "var x; print(1)");
+    inline("var x; x = 1; x", "var x; 1");
+    inline("var x; x = 1; var a = x", "var x; var a = 1");
+    inline("var x; x = 1; x = x + 1", "var x; x = 1 + 1");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testSimpleVar
+  public void testSimpleVar() {
+    inline("var x = 1; print(x)", "var x; print(1)");
+    inline("var x = 1; x", "var x; 1");
+    inline("var x = 1; var a = x", "var x; var a = 1");
+    inline("var x = 1; x = x + 1", "var x; x = 1 + 1");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testExported
+  public void testExported() {
+    noInline("var _x = 1; print(_x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDoNotInlineIncrement
+  public void testDoNotInlineIncrement() {
+    noInline("var x = 1; x++;");
+    noInline("var x = 1; x--;");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDoNotInlineAssignmentOp
+  public void testDoNotInlineAssignmentOp() {
+    noInline("var x = 1; x += 1;");
+    noInline("var x = 1; x -= 1;");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDoNotInlineIntoLhsOfAssign
+  public void testDoNotInlineIntoLhsOfAssign() {
+    noInline("var x = 1; x += 3;");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testMultiUse
+  public void testMultiUse() {
+    noInline("var x; x = 1; print(x); print (x);");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testMultiUseInSameCfgNode
+  public void testMultiUseInSameCfgNode() {
+    noInline("var x; x = 1; print(x) || print (x);");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testMultiUseInTwoDifferentPath
+  public void testMultiUseInTwoDifferentPath() {
+    noInline("var x = 1; if (print) { print(x) } else { alert(x) }");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testAssignmentBeforeDefinition
+  public void testAssignmentBeforeDefinition() {
+    inline("x = 1; var x = 0; print(x)","x = 1; var x; print(0)" );
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testVarInConditionPath
+  public void testVarInConditionPath() {
+    noInline("if (foo) { var x = 0 } print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testMultiDefinitionsBeforeUse
+  public void testMultiDefinitionsBeforeUse() {
+    inline("var x = 0; x = 1; print(x)", "var x = 0; print(1)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testMultiDefinitionsInSameCfgNode
+  public void testMultiDefinitionsInSameCfgNode() {
+    noInline("var x; (x = 1) || (x = 2); print(x)");
+    noInline("var x; x = (1 || (x = 2)); print(x)");
+    noInline("var x;(x = 1) && (x = 2); print(x)");
+    noInline("var x;x = (1 && (x = 2)); print(x)");
+    noInline("var x; x = 1 , x = 2; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNotReachingDefinitions
+  public void testNotReachingDefinitions() {
+    noInline("var x; if (foo) { x = 0 } print (x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineLoopCarriedDefinition
+  public void testNoInlineLoopCarriedDefinition() {
+    
+    noInline("var x; while(true) { print(x); x = 1; }");
+
+    
+    noInline("var x = 0; while(true) { print(x); x = 1; }");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDoNotExitLoop
+  public void testDoNotExitLoop() {
+    noInline("while (z) { var x = 3; } var y = x;");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDoNotInlineWithinLoop
+  public void testDoNotInlineWithinLoop() {
+    noInline("var y = noSFX(); do { var z = y.foo(); } while (true);");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDefinitionAfterUse
+  public void testDefinitionAfterUse() {
+    inline("var x = 0; print(x); x = 1", "var x; print(0); x = 1");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineSameVariableInStraightLine
+  public void testInlineSameVariableInStraightLine() {
+    inline("var x; x = 1; print(x); x = 2; print(x)",
+        "var x; print(1); print(2)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineInDifferentPaths
+  public void testInlineInDifferentPaths() {
+    inline("var x; if (print) {x = 1; print(x)} else {x = 2; print(x)}",
+        "var x; if (print) {print(1)} else {print(2)}");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineInMergedPath
+  public void testNoInlineInMergedPath() {
+    noInline(
+        "var x,y;x = 1;while(y) { if(y){ print(x) } else { x = 1 } } print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineIntoExpressions
+  public void testInlineIntoExpressions() {
+    inline("var x = 1; print(x + 1);", "var x; print(1 + 1)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions1
+  public void testInlineExpressions1() {
+    inline("var a, b; var x = a+b; print(x)", "var a, b; var x; print(a+b)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions2
+  public void testInlineExpressions2() {
+    
+    noInline("var a, b; var x = a + b; a = 1; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions3
+  public void testInlineExpressions3() {
+    inline("var a,b,x; x=a+b; x=a-b ; print(x)",
+           "var a,b,x; x=a+b; print(a-b)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions4
+  public void testInlineExpressions4() {
+    
+    noInline("var a,b,x; x=a+b, x=a-b; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions5
+  public void testInlineExpressions5() {
+    noInline("var a; var x = a = 1; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions6
+  public void testInlineExpressions6() {
+    noInline("var a, x; a = 1 + (x = 1); print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpression7
+  public void testInlineExpression7() {
+    
+    noInline("var x = foo() + 1; bar(); print(x)");
+
+    
+    
+    
+    noInline("var x = foo() + 1; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpression8
+  public void testInlineExpression8() {
+    
+    inline("var x = a + b; print(x);      x = a - b; print(x)",
+           "var x;         print(a + b);             print(a - b)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpression9
+  public void testInlineExpression9() {
+    
+    inline("var x; if (g) { x= a + b; print(x)    }  x = a - b; print(x)",
+           "var x; if (g) {           print(a + b)}             print(a - b)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpression10
+  public void testInlineExpression10() {
+    
+    noInline("var x, y; x = ((y = 1), print(y))");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions11
+  public void testInlineExpressions11() {
+    inline("var x; x = x + 1; print(x)", "var x; print(x + 1)");
+    noInline("var x; x = x + 1; print(x); print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions12
+  public void testInlineExpressions12() {
+    
+    
+    noInline("var x = 10; x = c++; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineExpressions13
+  public void testInlineExpressions13() {
+    inline("var a = 1, b = 2;" +
+           "var x = a;" +
+           "var y = b;" +
+           "var z = x + y;" +
+           "var i = z;" +
+           "var j = z + y;" +
+           "var k = i;",
+
+           "var a, b;" +
+           "var x;" +
+           "var y = 2;" +
+           "var z = 1 + y;" +
+           "var i;" +
+           "var j = z + y;" +
+           "var k = z;");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineIfDefinitionMayNotReach
+  public void testNoInlineIfDefinitionMayNotReach() {
+    noInline("var x; if (x=1) {} x;");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineEscapedToInnerFunction
+  public void testNoInlineEscapedToInnerFunction() {
+    noInline("var x = 1; function foo() { x = 2 }; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineLValue
+  public void testNoInlineLValue() {
+    noInline("var x; if (x = 1) { print(x) }");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testSwitchCase
+  public void testSwitchCase() {
+    inline("var x = 1; switch(x) { }", "var x; switch(1) { }");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testShadowedVariableInnerFunction
+  public void testShadowedVariableInnerFunction() {
+    inline("var x = 1; print(x) || (function() {  var x; x = 1; print(x)})()",
+        "var x; print(1) || (function() {  var x; print(1)})()");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testCatch
+  public void testCatch() {
+    noInline("var x = 0; try { } catch (x) { }");
+    noInline("try { } catch (x) { print(x) }");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineGetProp
+  public void testNoInlineGetProp() {
+    
+    noInline("var x = a.b.c; j.c = 1; print(x);");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineGetProp2
+  public void testNoInlineGetProp2() {
+    noInline("var x = 1 * a.b.c; j.c = 1; print(x);");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineGetProp3
+  public void testNoInlineGetProp3() {
+    
+    inline("var x = function(){1 * a.b.c}; print(x);",
+           "var x; print(function(){1 * a.b.c});");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineGetEle
+  public void testNoInlineGetEle() {
+    
+    noInline("var x = a[i]; a[j] = 2; print(x); ");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineConstructors
+  public void testNoInlineConstructors() {
+    noInline("var x = new Iterator(); x.next();");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineArrayLits
+  public void testNoInlineArrayLits() {
+    noInline("var x = []; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineObjectLits
+  public void testNoInlineObjectLits() {
+    noInline("var x = {}; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNoInlineRegExpLits
+  public void testNoInlineRegExpLits() {
+    noInline("var x = /y/; print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineConstructorCallsIntoLoop
+  public void testInlineConstructorCallsIntoLoop() {
+    
+    noInline("var x = new Iterator();" +
+             "for(i = 0; i < 10; i++) {j = x.next()}");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testRemoveWithLabels
+  public void testRemoveWithLabels() {
+    inline("var x = 1; L: x = 2; print(x)", "var x = 1; print(2)");
+    inline("var x = 1; L: M: x = 2; print(x)", "var x = 1; print(2)");
+    inline("var x = 1; L: M: N: x = 2; print(x)", "var x = 1; print(2)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineAcrossSideEffect1
+  public void testInlineAcrossSideEffect1() {
+    inline("var y; var x = noSFX(y); print(x)", "var y;var x;print(noSFX(y))");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineAcrossSideEffect2
+  public void testInlineAcrossSideEffect2() {
+    
+    
+    
+
+    
+    noInline("var y; var x = noSFX(y), z = hasSFX(y); print(x)");
+    noInline("var y; var x = noSFX(y), z = new hasSFX(y); print(x)");
+    noInline("var y; var x = new noSFX(y), z = new hasSFX(y); print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineAcrossSideEffect3
+  public void testInlineAcrossSideEffect3() {
+    
+    noInline("var y; var x = noSFX(y); hasSFX(y), print(x)");
+    noInline("var y; var x = noSFX(y); new hasSFX(y), print(x)");
+    noInline("var y; var x = new noSFX(y); new hasSFX(y), print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineAcrossSideEffect4
+  public void testInlineAcrossSideEffect4() {
+    
+    
+    noInline("var y; var x = noSFX(y); hasSFX(y); print(x)");
+    noInline("var y; var x = noSFX(y); new hasSFX(y); print(x)");
+    noInline("var y; var x = new noSFX(y); new hasSFX(y); print(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testCanInlineAcrossNoSideEffect
+  public void testCanInlineAcrossNoSideEffect() {
+    inline("var y; var x = noSFX(Y), z = noSFX(); noSFX(); noSFX(), print(x)",
+           "var y; var x, z = noSFX(); noSFX(); noSFX(), print(noSFX(Y))");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testDependOnOuterScopeVariables
+  public void testDependOnOuterScopeVariables() {
+    noInline("var x; function foo() { var y = x; x = 0; print(y) }");
+    noInline("var x; function foo() { var y = x; x++; print(y) }");
+
+    
+    
+    
+    noInline("var x; function foo() { var y = x; print(y) }");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineIfNameIsLeftSideOfAssign
+  public void testInlineIfNameIsLeftSideOfAssign() {
+    inline("var x = 1; x = print(x) + 1", "var x; x = print(1) + 1");
+    inline("var x = 1; L: x = x + 2", "var x; L: x = 1 + 2");
+    inline("var x = 1; x = (x = x + 1)", "var x; x = (x = 1 + 1)");
+
+    noInline("var x = 1; x = (x = (x = 10) + x)");
+    noInline("var x = 1; x = (f(x) + (x = 10) + x);");
+    noInline("var x = 1; x=-1,foo(x)");
+    noInline("var x = 1; x-=1,foo(x)");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInlineArguments
+  public void testInlineArguments() {
+    testSame("function _func(x) { print(x) }");
+    testSame("function _func(x,y) { if(y) { x = 1 }; print(x) }");
+
+    test("function f(x, y) { x = 1; print(x) }",
+         "function f(x, y) { print(1) }");
+
+    test("function f(x, y) { if (y) { x = 1; print(x) }}",
+         "function f(x, y) { if (y) { print(1) }}");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInvalidInlineArguments1
+  public void testInvalidInlineArguments1() {
+    testSame("function f(x, y) { x = 1; arguments[0] = 2; print(x) }");
+    testSame("function f(x, y) { x = 1; var z = arguments;" +
+        "z[0] = 2; z[1] = 3; print(x)}");
+    testSame("function g(a){a[0]=2} function f(x){x=1;g(arguments);print(x)}");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testInvalidInlineArguments2
+  public void testInvalidInlineArguments2() {
+    testSame("function f(c) {var f = c; arguments[0] = this;" +
+             "f.apply(this, arguments); return this;}");
+  }
+
+// com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testNotOkToSkipCheckPathBetweenNodes
+  public void testNotOkToSkipCheckPathBetweenNodes() {
+    noInline("var x; for(x = 1; foo(x);) {}");
+    noInline("var x; for(; x = 1;foo(x)) {}");
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction1
+  public void testIsSimpleFunction1() {
+    assertTrue(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction2
+  public void testIsSimpleFunction2() {
+    assertTrue(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){return 0;}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction3
+  public void testIsSimpleFunction3() {
+    assertTrue(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){return x ? 0 : 1}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction4
+  public void testIsSimpleFunction4() {
+    assertFalse(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){return;}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction5
+  public void testIsSimpleFunction5() {
+    assertFalse(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){return 0; return 0;}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction6
+  public void testIsSimpleFunction6() {
+    assertFalse(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){var x=true;return x ? 0 : 1}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testIsSimpleFunction7
+  public void testIsSimpleFunction7() {
+    assertFalse(getInjector().isDirectCallNodeReplacementPossible(
+        prep("function f(){if (x) return 0; else return 1}")));
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction1
+  public void testCanInlineReferenceToFunction1() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){}; foo();", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction2
+  public void testCanInlineReferenceToFunction2() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){}; foo();", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction3
+  public void testCanInlineReferenceToFunction3() {
+    
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return;}; foo();", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction4
+  public void testCanInlineReferenceToFunction4() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return;}; foo();", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction5
+  public void testCanInlineReferenceToFunction5() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; foo();", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction6
+  public void testCanInlineReferenceToFunction6() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; foo();", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction7
+  public void testCanInlineReferenceToFunction7() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; var x=foo();", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction8
+  public void testCanInlineReferenceToFunction8() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; var x=foo();", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction9
+  public void testCanInlineReferenceToFunction9() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; var x; x=foo();", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction10
+  public void testCanInlineReferenceToFunction10() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; var x; x=foo();", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction11
+  public void testCanInlineReferenceToFunction11() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; var x; x=x+foo();", "foo",
+        INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction12
+  public void testCanInlineReferenceToFunction12() {
+    
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return true;}; var x; x=x+foo();", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction12b
+  public void testCanInlineReferenceToFunction12b() {
+    
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(){return true;}; var x; x=x+foo();",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction14
+  public void testCanInlineReferenceToFunction14() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; foo(x);", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction15
+  public void testCanInlineReferenceToFunction15() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; foo(x);", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction16
+  public void testCanInlineReferenceToFunction16() {
+    
+    
+    helperCanInlineReferenceToFunction(NEW_VARS_IN_GLOBAL_SCOPE,
+        "function foo(a){var b;return a;}; foo(goo());", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction17
+  public void testCanInlineReferenceToFunction17() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return a;}; " +
+        "function x() { foo(goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction18
+  public void testCanInlineReferenceToFunction18() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return a;} foo(x++);", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction19
+  public void testCanInlineReferenceToFunction19() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return a+a} foo([]);", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction20
+  public void testCanInlineReferenceToFunction20() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return a+a} foo({});", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction21
+  public void testCanInlineReferenceToFunction21() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return a+a} foo(new Date);", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction22
+  public void testCanInlineReferenceToFunction22() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return a+a} foo(true && new Date);", "foo",
+        INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction23
+  public void testCanInlineReferenceToFunction23() {
+    
+    helperCanInlineReferenceToFunction(NEW_VARS_IN_GLOBAL_SCOPE,
+        "function foo(a){return a;}; foo(x++);", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction24
+  public void testCanInlineReferenceToFunction24() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return a;}; " +
+        "function x() { foo(x++); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction25
+  public void testCanInlineReferenceToFunction25() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return a+a;}; foo(x++);", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction26
+  public void testCanInlineReferenceToFunction26() {
+    helperCanInlineReferenceToFunction(NEW_VARS_IN_GLOBAL_SCOPE,
+        "function foo(a){return a+a;}; foo(x++);", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction27
+  public void testCanInlineReferenceToFunction27() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return a+a;}; " +
+        "function x() { foo(x++); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction28
+  public void testCanInlineReferenceToFunction28() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; foo(goo());", "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction29
+  public void testCanInlineReferenceToFunction29() {
+    helperCanInlineReferenceToFunction(NEW_VARS_IN_GLOBAL_SCOPE,
+        "function foo(a){return true;}; foo(goo());", "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction30
+  public void testCanInlineReferenceToFunction30() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo(goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction31
+  public void testCanInlineReferenceToFunction31() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a) {return true;}; " +
+        "function x() {foo.call(this, 1);}",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction32
+  public void testCanInlineReferenceToFunction32() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.apply(this, [1]); }",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction33
+  public void testCanInlineReferenceToFunction33() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo.bar(this, 1); }",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction34
+  public void testCanInlineReferenceToFunction34() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(this, goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction35
+  public void testCanInlineReferenceToFunction35() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.apply(this, goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction36
+  public void testCanInlineReferenceToFunction36() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo.bar(this, goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction37
+  public void testCanInlineReferenceToFunction37() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(null, 1); }",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction38
+  public void testCanInlineReferenceToFunction38() {
+    assumeStrictThis = false;
+
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(null, goo()); }",
+        "foo", INLINE_BLOCK);
+
+    assumeStrictThis = true;
+
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(null, goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction39
+  public void testCanInlineReferenceToFunction39() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(bar, 1); }",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction40
+  public void testCanInlineReferenceToFunction40() {
+    assumeStrictThis = false;
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(bar, goo()); }",
+        "foo", INLINE_BLOCK);
+
+    assumeStrictThis = true;
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(bar, goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction41
+  public void testCanInlineReferenceToFunction41() {
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(new bar(), 1); }",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction42
+  public void testCanInlineReferenceToFunction42() {
+    assumeStrictThis = false;
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(new bar(), goo()); }",
+        "foo", INLINE_BLOCK);
+
+    assumeStrictThis = true;
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { foo.call(new bar(), goo()); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction43
+  public void testCanInlineReferenceToFunction43() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return true;}; " +
+        "function x() { foo.call(); }",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction44
+  public void testCanInlineReferenceToFunction44() {
+    assumeStrictThis = false;
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return true;}; " +
+        "function x() { foo.call(); }",
+        "foo", INLINE_BLOCK);
+
+    assumeStrictThis = true;
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return true;}; " +
+        "function x() { foo.call(); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction45
+  public void testCanInlineReferenceToFunction45() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return function() {return true;}}; foo();",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction46
+  public void testCanInlineReferenceToFunction46() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return function() {return true;}}; foo();",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction47
+  public void testCanInlineReferenceToFunction47() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){var a; return function() {return true;}}; foo();",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction48
+  public void testCanInlineReferenceToFunction48() {
+    
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){var a; return function() {return true;}}; foo();",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction49
+  public void testCanInlineReferenceToFunction49() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return function() {var a; return true;}}; foo();",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction50
+  public void testCanInlineReferenceToFunction50() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return function() {var a; return true;}}; foo();",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunction51
+  public void testCanInlineReferenceToFunction51() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){function x() {var a; return true;} return x}; foo();",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression1
+  public void testCanInlineReferenceToFunctionInExpression1() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { if (foo(1)) throw 'test'; }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression2
+  public void testCanInlineReferenceToFunctionInExpression2() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { return foo(1); }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression3
+  public void testCanInlineReferenceToFunctionInExpression3() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() { switch(foo(1)) { default:break; } }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression4
+  public void testCanInlineReferenceToFunctionInExpression4() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() {foo(1)?0:1 }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression5
+  public void testCanInlineReferenceToFunctionInExpression5() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() {true?foo(1):1 }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression5a
+ public void testCanInlineReferenceToFunctionInExpression5a() {
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(a){return true;}; " +
+        "function x() {true?foo(1):1 }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression6
+  public void testCanInlineReferenceToFunctionInExpression6() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() {foo(1) && 1 }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression7
+  public void testCanInlineReferenceToFunctionInExpression7() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() {1 && foo(1) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression7a
+  public void testCanInlineReferenceToFunctionInExpression7a() {
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(a){return true;}; " +
+        "function x() {1 && foo(1) }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression8
+  public void testCanInlineReferenceToFunctionInExpression8() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() {1 + foo(1) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression9
+  public void testCanInlineReferenceToFunctionInExpression9() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() {var b = 1 + foo(1)}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression10
+  public void testCanInlineReferenceToFunctionInExpression10() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(a){return true;}; " +
+        "function x() {var b; b += 1 + foo(1) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression10a
+  public void testCanInlineReferenceToFunctionInExpression10a() {
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(a){return true;}; " +
+        "function x() {var b; b += 1 + foo(1) }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression12
+  public void testCanInlineReferenceToFunctionInExpression12() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() {var a,b,c; a = b = c = foo(1) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression13
+  public void testCanInlineReferenceToFunctionInExpression13() {
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(a){return true;}; " +
+        "function x() {var a,b,c; a = b = c = 1 + foo(1) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression14
+  public void testCanInlineReferenceToFunctionInExpression14() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "var a = {}, b = {}, c;" +
+        "a.test = 'a';" +
+        "b.test = 'b';" +
+        "c = a;" +
+        "function foo(){c = b; return 'foo'};" +
+        "c.test=foo();",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression14a
+  public void testCanInlineReferenceToFunctionInExpression14a() {
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "var a = {}, b = {}, c;" +
+        "a.test = 'a';" +
+        "b.test = 'b';" +
+        "c = a;" +
+        "function foo(){c = b; return 'foo'};" +
+        "c.test=foo();",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression18
+  public void testCanInlineReferenceToFunctionInExpression18() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.YES,
+        "function foo(){return _g();}; " +
+        "function x() {1 + foo()() }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression19
+  public void testCanInlineReferenceToFunctionInExpression19() {
+    
+    
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return a;}; " +
+        "function x() {1 + _g(foo()) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression19a
+  public void testCanInlineReferenceToFunctionInExpression19a() {
+    
+    
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(){return a;}; " +
+        "function x() {1 + _g(foo()) }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression21
+  public void testCanInlineReferenceToFunctionInExpression21() {
+    
+    
+    
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "var z = {};" +
+        "function foo(a){z = {};return true;}; " +
+        "function x() { z.gack = foo(1) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression21a
+  public void testCanInlineReferenceToFunctionInExpression21a() {
+    
+    
+    
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "var z = {};" +
+        "function foo(a){z = {};return true;}; " +
+        "function x() { z.gack = foo(1) }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression22
+  public void testCanInlineReferenceToFunctionInExpression22() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return a;}; " +
+        "function x() {1 + _g(_a(), foo()) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression22a
+  public void testCanInlineReferenceToFunctionInExpression22a() {
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(){return a;}; " +
+        "function x() {1 + _g(_a(), foo()) }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression23
+  public void testCanInlineReferenceToFunctionInExpression23() {
+    
+    helperCanInlineReferenceToFunction(CanInlineResult.NO,
+        "function foo(){return a;}; " +
+        "function x() {1 + _g(_a(), foo.call(this)) }",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInExpression23a
+  public void testCanInlineReferenceToFunctionInExpression23a() {
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.AFTER_DECOMPOSITION,
+        "function foo(){return a;}; " +
+        "function x() {1 + _g(_a(), foo.call(this)) }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInLoop1
+  public void testCanInlineReferenceToFunctionInLoop1() {
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.YES,
+        "function foo(){return a;}; " +
+        "while(1) { foo(); }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testCanInlineReferenceToFunctionInLoop2
+  public void testCanInlineReferenceToFunctionInLoop2() {
+    
+    
+    
+    
+    helperCanInlineReferenceToFunction(
+        CanInlineResult.NO,
+        "function foo(){return function() {};}; " +
+        "while(1) { foo(); }",
+        "foo", INLINE_BLOCK, true);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline1
+  public void testInline1() {
+    helperInlineReferenceToFunction(
+        "function foo(){}; foo();",
+        "function foo(){}; void 0",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline2
+  public void testInline2() {
+    helperInlineReferenceToFunction(
+        "function foo(){}; foo();",
+        "function foo(){}; {}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline3
+  public void testInline3() {
+    helperInlineReferenceToFunction(
+        "function foo(){return;}; foo();",
+        "function foo(){return;}; {}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline4
+  public void testInline4() {
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; foo();",
+        "function foo(){return true;}; true;",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline5
+  public void testInline5() {
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; foo();",
+        "function foo(){return true;}; {true;}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline6
+  public void testInline6() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; var x=foo();",
+        "function foo(){return true;}; var x=true;",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline7
+  public void testInline7() {
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; var x=foo();",
+        "function foo(){return true;}; var x;" +
+            "{x=true}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline8
+  public void testInline8() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; var x; x=foo();",
+        "function foo(){return true;}; var x; x=true;",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline9
+  public void testInline9() {
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; var x; x=foo();",
+        "function foo(){return true;}; var x;{x=true}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline10
+  public void testInline10() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(){return true;}; var x; x=x+foo();",
+        "function foo(){return true;}; var x; x=x+true;",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline11
+  public void testInline11() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){return true;}; foo(x);",
+        "function foo(a){return true;}; true;",
+        "foo", INLINE_DIRECT);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline12
+  public void testInline12() {
+    helperInlineReferenceToFunction(
+        "function foo(a){return true;}; foo(x);",
+        "function foo(a){return true;}; {true}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline13
+  public void testInline13() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){return a;}; " +
+        "function x() { foo(x++); }",
+        "function foo(a){return a;}; " +
+        "function x() {{var a$$inline_1=x++;" +
+            "a$$inline_1}}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline14
+  public void testInline14() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){return a+a;}; foo(x++);",
+        "function foo(a){return a+a;}; " +
+            "{var a$$inline_1=x++;" +
+            " a$$inline_1+" +
+            "a$$inline_1;}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline15
+  public void testInline15() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){return a+a;}; foo(new Date());",
+        "function foo(a){return a+a;}; " +
+            "{var a$$inline_1=new Date();" +
+            " a$$inline_1+" +
+            "a$$inline_1;}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline16
+  public void testInline16() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){return a+a;}; foo(function(){});",
+        "function foo(a){return a+a;}; " +
+            "{var a$$inline_1=function(){};" +
+            " a$$inline_1+" +
+            "a$$inline_1;}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline17
+  public void testInline17() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){return true;}; foo(goo());",
+        "function foo(a){return true;};" +
+            "{var a$$inline_1=goo();true}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline18
+  public void testInline18() {
+    
+    helperInlineReferenceToFunction(
+        "function foo(a){var b;return a;}; " +
+            "function x() { foo(goo()); }",
+            "function foo(a){var b;return a;}; " +
+            "function x() {{var a$$inline_2=goo();" +
+                "var b$$inline_3;a$$inline_2}}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline19
+  public void testInline19() {
+    
+    helperInlineReferenceToFunction(
+        "var x = 1; var y = 2;" +
+        "function foo(a,b){x = b; y = a;}; " +
+        "function bar() { foo(x,y); }",
+        "var x = 1; var y = 2;" +
+        "function foo(a,b){x = b; y = a;}; " +
+        "function bar() {" +
+           "{var a$$inline_2=x;" +
+            "x = y;" +
+            "y = a$$inline_2;}" +
+        "}",
+        "foo", INLINE_BLOCK);
+  }
+
+// com.google.javascript.jscomp.FunctionInjectorTest::testInline19b
+  public void testInline19b() {
+    helperInlineReferenceToFunction(
+        "var x = 1; var y = 2;" +
+        "function foo(a,b){y = a; x = b;}; " +
+        "function bar() { foo(x,y); }",
+        "var x = 1; var y = 2;" +
+        "function foo(a,b){y = a; x = b;}; " +
+        "function bar() {" +
+           "{var b$$inline_3=y;" +
+            "y = x;" +
+            "x = b$$inline_3;}" +
+        "}",
+        "foo", INLINE_BLOCK);
+  }

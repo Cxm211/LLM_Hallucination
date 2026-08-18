@@ -1,0 +1,3 @@
+public void writeNumber(double d) throws IOException {
+        _appendValue(JsonToken.VALUE_NUMBER_FLOAT, Double.valueOf(d));
+    }

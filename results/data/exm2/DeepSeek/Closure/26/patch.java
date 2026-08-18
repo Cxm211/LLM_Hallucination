@@ -1,0 +1,7 @@
+  private String normalizeSourceName(String filename) {
+    filename = filename.replace('\\', '/');
+    if (filename.indexOf(filenamePrefix) == 0) {
+      filename = filename.substring(filenamePrefix.length());
+    }
+    return filename;
+  }

@@ -1,0 +1,17 @@
+public long set(long instant, int value) {
+    long localInstant = iZone.convertUTCToLocal(instant);
+    localInstant = iField.set(localInstant, value);
+    long result;
+    try {
+        result = iZone.convertLocalToUTC(localInstant, false);
+    } catch (IllegalInstantException e) {
+        throw new IllegalFieldValueException(iField.getType(), value, "Illegal instant due to time zone offset transition");
+    }
+    if (get(result) != value) {
+        throw new IllegalFieldValueException(iField.getType(), new Integer(value),
+            "Illegal instant due to time zone offset transition: " +
+            DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").print(new Instant(localInstant)) +
+            " (" + iZone.getID() + ")");
+    }
+    return result;
+}

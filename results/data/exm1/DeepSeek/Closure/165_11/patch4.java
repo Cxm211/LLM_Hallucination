@@ -1,0 +1,13 @@
+  public RecordTypeBuilder(JSTypeRegistry registry) {
+    this.registry = registry;
+  }
+
+  public JSType build() {
+     // If we have an empty record, simply return the object type.
+    if (isEmpty) {
+       return registry.getNativeObjectType(JSTypeNative.OBJECT_TYPE);
+    }
+
+    return new RecordType(
+        registry, Collections.unmodifiableMap(properties));
+  }

@@ -1,0 +1,346 @@
+We are given a single function `inlineAliases` from the source file. The task is to determine which testcase methods expose bugs in this function, and then produce a minimal correct fix. We have a large number of testcases, but only the ones that involve `inlineAliases` and fail due to a bug in it are relevant. The bug is presumably in the logic of `inlineAliases`. We need to analyze the function and see which testcases would fail.
+
+First, understand the function: It takes a `GlobalNamespace` and processes names in a worklist. It attempts to inline aliases for names that satisfy certain conditions:
+- Name type is not GET or SET.
+- Name has globalSets==1, localSets==0, aliasingGets>0.
+- It collects refs of type ALIASING_GET that are local.
+- It tries to inline each such alias via `inlineAliasIfPossible`. If successful, removes the ref.
+- After processing, if the name is an OBJECTLIT or FUNCTION and aliasingGets==0 and has props, it adds children to worklist.
+
+The bug might be related to the condition for adding children: `name.aliasingGets == 0`. But note that after inlining local aliases, we might have reduced aliasingGets. However, the condition checks if there are any aliases left. But the code operates by iterating over refs and removing them if inlined, but does it update `name.aliasingGets`? It seems `name.removeRef(ref)` might update the count? Possibly not, or maybe it does. The bug might be that after removing refs, `aliasingGets` is not updated, causing condition to be wrong. Or perhaps the condition should check `name.aliasingGets > 0` before adding? Actually the comment says: "Check if name has any aliases left after local-alias-inlining above." So if aliasingGets == 0, it means no aliases, so children can be added. That seems correct.
+
+But we need to identify which testcases actually trigger a bug. We should look at testcases that involve `inlineAliases` behavior. Not all testcases will exercise this function. The function is part of `CollapseProperties` pass. Many testcases test the overall collapse, but not all will trigger the inline aliases path.
+
+We need to find testcases that have a scenario where a local alias is created and should be inlined. For example, testcases with `var x = a;` in a local function, where `a` is an object literal or function with properties. Those are the ones that test `inlineAliases`. Specifically, tests named `testLocalAlias1` through `testLocalAlias7`, `testGlobalWriteToAncestor`, `testGlobalWriteToNonAncestor`, `testLocalWriteToAncestor`, `testLocalWriteToNonAncestor`, `testNonWellformedAlias1`, `testNonWellformedAlias2`, `testLocalAliasOfAncestor`, `testGlobalAliasOfAncestor`, `testLocalAliasOfOtherName`, `testLocalAliasOfFunction`, `testNoInlineGetpropIntoCall`, `testInlineAliasWithModifications`, etc.
+
+Also `testIssue389`, `testAliasedTopLevelName`, `testAliasedTopLevelEnum` may involve.
+
+But note: The buggy code is only one function, but the testcases are for the whole `CollapseProperties`. We need to see which testcases would fail due to a bug in `inlineAliases`. Many testcases might pass even with the bug if they don't exercise the buggy path.
+
+We need to simulate mentally. The function `inlineAliases` is called during the `CollapseProperties` pass. The bug might be in the condition for adding children. Let's look at the code:
+
+```
+if ((name.type == Name.Type.OBJECTLIT ||
+     name.type == Name.Type.FUNCTION) &&
+    name.aliasingGets == 0 && name.props != null) {
+  workList.addAll(name.props);
+}
+```
+
+So if a name has aliasingGets > 0, its children are not added to the worklist, even if the aliasingGets are from local aliases that have been inlined? The code first tries to inline local aliases and removes refs, but does not update `aliasingGets`. So if after inlining some aliases, aliasingGets might still be >0 if there are non-local aliases or if inlining failed. That is fine.
+
+But the potential bug: The condition checks `aliasingGets == 0` after processing local aliases. However, if there are global aliases (non-local), they are not inlined here, so aliasingGets remains >0 and children are not added. That is correct.
+
+But what if the name has aliasingGets>0 due to global aliases, but we still want to process its children? The condition prevents that, which might be intentional because if the object is aliased globally, collapsing its children might be unsafe.
+
+Now, the testcases that might expose a bug: perhaps a scenario where a name is an OBJECTLIT or FUNCTION, and after inlining local aliases, aliasingGets becomes 0, but children should be added. However, if `name.removeRef(ref)` does not decrement `aliasingGets`, then the condition would still see aliasingGets > 0 and not add children, causing missed collapsing. That would be a bug.
+
+Look at `removeRef` in the `Name` class? Not provided. But typical pattern: `name.aliasingGets` is a count of ALIASING_GET refs. When a ref is removed, the count should be decremented. If it isn't, then after inlining all local aliases, aliasingGets might remain unchanged.
+
+Also note: The code iterates over refs and removes them if inlined. But it does not break out of the loop after removing. It continues to iterate, but the ref list might have been modified? `List<Ref> refs = Lists.newArrayList(name.getRefs());` creates a copy, so safe.
+
+If `removeRef` does not update `aliasingGets`, then the condition after the loop would still see the original count. That would cause children not to be added. So testcases that rely on children being collapsed after local alias inlining would fail.
+
+Let's look at `testLocalAlias5` for example:
+```
+var a = {b: {c: 5}}; 
+function f() { var x = a; var y = x.b; f(a.b.c); f(y.c); }
+```
+Expected output:
+```
+var a$b$c = 5; 
+function f() { var x = null; var y = null; f(a$b$c); f(a$b$c);}
+```
+Here, `a` is an object with property `b` which is an object with property `c`. After collapsing, `a.b.c` becomes `a$b$c`. The local alias `y` of `a.b` is inlined. The children of `a` (i.e., `b`) need to be processed, and then children of `b` (i.e., `c`). If `aliasingGets` is not updated, `a` might have aliasingGets>0 due to `var x = a` (local alias), but after inlining that alias, the ref is removed. If `aliasingGets` is not decremented, then the condition `name.aliasingGets == 0` fails, so `name.props` (children like `b`) are not added to worklist, so `a.b.c` never gets collapsed. That would cause the actual output to differ from expected, so the test would fail.
+
+Similarly, many local alias tests would fail.
+
+Thus, the bug is likely that `name.removeRef(ref)` does not update `aliasingGets`. But we don't have the implementation of `Name.removeRef`. The fix should ensure that after removing a ref, the counts are updated. Alternatively, we could recompute `aliasingGets` after the loop by counting remaining aliasing get refs. But the minimal fix might be to update the condition to check if there are any aliasing gets left among the refs, rather than relying on the counter that might not be updated.
+
+However, the given source is only the `inlineAliases` method. We are to produce a fixed version of that method. The bug might be in the condition that checks `aliasingGets == 0` but the counter is not updated. The fix could be to recompute `aliasingGets` after the loop, or to use a different check.
+
+But wait: The function uses `name.aliasingGets` which is a field of `Name`. The `removeRef` method may or may not update it. We cannot assume it does not, but since we are asked to fix the bug, we need to ensure correctness. A safe fix is to recalculate the number of aliasing gets from the remaining refs after inlining, rather than relying on a potentially stale counter.
+
+Alternatively, we could simply not rely on `aliasingGets` and instead check the refs themselves. But that would be more invasive.
+
+Given the context of the bug (likely from a known issue in Closure Compiler), the bug is that `name.aliasingGets` is not updated when a ref is removed. So the fix should update `aliasingGets` accordingly. Since we only have the `inlineAliases` method, we need to add code to update the counter. We can do this by tracking the number of aliasing gets removed and subtracting from `aliasingGets`. Or we can call a method that updates it.
+
+But we don't have `removeRef` implementation. Perhaps `removeRef` already updates the counter? The bug report might be that it does not. The simplest fix: after the loop, compute `name.aliasingGets` by counting the remaining refs of type ALIASING_GET. Or we could set it to the number of refs of that type after the loop.
+
+Given that we are to produce minimal fix, we can add after the loop: `name.aliasingGets = count...` but we need to access refs. The refs list was copied; we can use `name.getRefs()` again.
+
+Alternatively, we can modify the condition to use `name.getRefs()` to check if there are any ALIASING_GET refs left, rather than relying on the counter. That would be a minimal change.
+
+Let's examine the condition:
+```
+if ((name.type == Name.Type.OBJECTLIT ||
+     name.type == Name.Type.FUNCTION) &&
+    name.aliasingGets == 0 && name.props != null) {
+```
+
+We can change `name.aliasingGets == 0` to check if there are no ALIASING_GET refs in the name's refs. For example:
+```
+boolean hasAliasingGet = false;
+for (Ref r : name.getRefs()) {
+  if (r.type == Type.ALIASING_GET) {
+    hasAliasingGet = true;
+    break;
+  }
+}
+if ((name.type == Name.Type.OBJECTLIT || name.type == Name.Type.FUNCTION) &&
+    !hasAliasingGet && name.props != null) {
+```
+
+But that might be heavy. Alternatively, we can simply replace `name.aliasingGets == 0` with `hasNoAliasingGets(name)` where we define a helper.
+
+But the minimal fix might be to update the counter after the loop. Since we are only given the function, we can add a line to recompute `aliasingGets` after the inlining loop.
+
+The easiest: after the for loop over refs, we can do:
+```
+// Update aliasingGets count after removing refs.
+name.aliasingGets = 0;
+for (Ref r : name.getRefs()) {
+  if (r.type == Type.ALIASING_GET) {
+    name.aliasingGets++;
+  }
+}
+```
+But note: `name.getRefs()` returns a collection, not necessarily a list. We can iterate.
+
+Alternatively, we can just set `name.aliasingGets` to the number of remaining ALIASING_GET refs.
+
+Since we are to produce the fixed code, we need to include the entire function with the fix.
+
+Now, regarding which testcases trigger the bug: all testcases that involve local alias inlining and subsequent collapsing of children would be affected. That includes many `testLocalAlias*`, `testGlobalWriteToNonAncestor`, `testLocalWriteToNonAncestor`, `testNoInlineGetpropIntoCall`, `testInlineAliasWithModifications`, and likely others that rely on children being collapsed after alias inlining.
+
+Let's list the test method paths that are given. They are all in `com.google.javascript.jscomp.CollapsePropertiesTest`. The ones that seem to exercise local alias inlining are those with "LocalAlias" in the name, and also "GlobalWriteToNonAncestor", "LocalWriteToNonAncestor", "NoInlineGetpropIntoCall", "InlineAliasWithModifications". But we need to check only those that would fail due to the bug.
+
+Given the bug is about not adding children after alias inlining, any test where a name has local aliases inlined and then children properties should be collapsed would fail. For example, testLocalAlias5 expects `a.b.c` to be collapsed to `a$b$c`. If children are not processed, then `a.b.c` might not get collapsed, so the output would differ.
+
+Similarly, testLocalAlias1: `var a = {b: 3}; function f() { var x = a; f(x.b); }` expects `var a$b = 3; function f() { var x = null; f(a$b); }`. Here, after inlining local alias `x`, `a` still has props? No, `a` is an object literal with property `b`. The property `b` should be collapsed to `a$b`. The children of `a` (prop `b`) need to be added to worklist to be processed. If not added, `a.b` might not get collapsed. The test expects `a$b` to be created. So it would fail.
+
+Thus, all local alias tests that have object literal or function with children would likely fail.
+
+Also testLocalAlias2,3,4,5,6,7. Also testGlobalWriteToNonAncestor: `var a = {b: 3}; function f() { var x = a; f(a.b); } a.b = 5;` expects `var a$b = 3;...` so collapsing of `a.b` should happen. So that test would fail.
+
+testLocalWriteToNonAncestor: similar.
+
+testNoInlineGetpropIntoCall: `var b = x; function f() { var a = b; a(); }` expects `var b = x; function f() { var a = null; b(); }`. Here, `b` is not an object literal or function? It's just a variable, so perhaps not in the condition? Actually `b` is a variable, not an object literal or function with properties. So maybe not relevant. But the second part: `var b = {}; b.c = x; function f() { var a = b.c; a(); }` expects `var b$c = x; function f() { var a = null; b$c(); }`. Here, `b` is an object, and `b.c` is a property. The property `c` should be collapsed. So if children of `b` are not added, `b.c` might not get collapsed. So this test would fail.
+
+testInlineAliasWithModifications: similar.
+
+Thus, many tests are affected.
+
+But the task asks: "Determine which testcase methods actually expose the bug." We need to list the full path for each such method. Based on the list, we should include all that involve local alias inlining with subsequent property collapsing. But we need to ensure they are from the CollapsePropertiesTest class. The paths are given as method names.
+
+Let's go through the list and identify those that are likely to exercise the bug. We'll select all methods that contain "LocalAlias", "GlobalWriteToNonAncestor", "LocalWriteToNonAncestor", "NoInlineGetpropIntoCall", "InlineAliasWithModifications". Also "TestTwinReferenceCancelsChildCollapsing" might involve? Not sure.
+
+Also "testAddPropertyToChildTypeOfUncollapsibleObjectInLocalScope" might involve.
+
+But we should be conservative. Given the bug is in `inlineAliases`, which is called during the overall collapse process, many tests might fail if the bug prevents proper collapsing. However, not all tests rely on children being added after alias inlining. For example, `testCollapse` and `testMultiLevelCollapse` do not have local aliases, so they would likely pass even with the bug because the children are added directly via other mechanisms? Actually, the worklist starts with top-level names. For `var a = {}; a.b = {}; var c = a.b;`, there is no local alias; `a.b` is accessed directly. So the bug might not affect those.
+
+The bug specifically affects when a name has aliasing gets (local aliases) and after inlining them, its children should be processed. Tests that have such scenario are the ones with `var x = a;` in a function scope where `a` has children.
+
+Thus, we can narrow down to test methods that include a local alias (assignment to local variable) within a function, and the aliased object has properties that are later accessed.
+
+From the list, these are:
+
+- testLocalAlias1
+- testLocalAlias2
+- testLocalAlias3
+- testLocalAlias4
+- testLocalAlias5
+- testLocalAlias6
+- testLocalAlias7
+- testGlobalWriteToNonAncestor
+- testLocalWriteToNonAncestor
+- testNoInlineGetpropIntoCall (part of it)
+- testInlineAliasWithModifications (part of it)
+- testAddPropertyToChildTypeOfUncollapsibleObjectInLocalScope? That test expects a warning, but might still be affected.
+- testAliasCreatedForEnumDepth2_3? That has local alias? It has `var d = a;` but `a` is top-level, not local.
+
+Also testIssue389 and testAliasedTopLevelEnum might involve local aliases? They involve function alias, but not local alias in a function.
+
+We need to be precise. The bug is in `inlineAliases`, which processes names with local aliases. So any test that creates a local alias (i.e., a variable in a local scope that references a global name) and expects the global name's children to be collapsed afterwards would be affected.
+
+Let's examine a few:
+
+testLocalAlias1: "var a = {b: 3}; function f() { var x = a; f(x.b); }" -> local alias `x` for `a`. After inlining, `x.b` becomes `a.b`, and `a.b` should be collapsed to `a$b`. So bug causes no collapse of `a.b`. So it fails.
+
+testGlobalWriteToNonAncestor: "var a = {b: 3}; function f() { var x = a; f(a.b); } a.b = 5;" -> local alias `x`, and `a.b` is collapsed. So it fails.
+
+testLocalWriteToNonAncestor: "var a = {b: 3}; function f() { a.b = 5; var x = a; f(a.b); }" -> local alias `x`, expects `a$b` collapsed. Fails.
+
+testNoInlineGetpropIntoCall: has two parts; the second part: "var b = {}; b.c = x; function f() { var a = b.c; a(); }" -> local alias `a` for `b.c`, but `b.c` is a property of `b`. After inlining, `b.c` should be collapsed to `b$c`. So it fails.
+
+testInlineAliasWithModifications: "var x = {}; x.x = 10; function f() {var y=x.x; x.x++; alert(y)}" -> local alias `y` for `x.x`, expects `x$x` collapsed. Fails.
+
+Thus, these seven LocalAlias tests, plus GlobalWriteToNonAncestor, LocalWriteToNonAncestor, NoInlineGetpropIntoCall, InlineAliasWithModifications are candidates.
+
+Additionally, there are tests like `testLocalAliasOfFunction` and `testLocalAliasOfAncestor`, etc. `testLocalAliasOfFunction`: "var a = function() {}; a.b = 5; function f() { var x = a.b; f(x); }" expects `var a$b = 5; ...` So it would fail.
+
+`testLocalAliasOfAncestor` and `testGlobalAliasOfAncestor` are testSame, so they might not be affected because they are not supposed to collapse; but if the bug prevents collapsing, they might still pass as same? Possibly they would still pass because they don't expect collapsing. So they might not be triggering the bug in a failing way.
+
+`testNonWellformedAlias1` and `testNonWellformedAlias2` are testSame, so they might not fail.
+
+Thus, we should include methods that have a local alias and expect a collapsed property.
+
+Let's list all methods that involve local aliases (from the test list):
+
+- testLocalAlias1
+- testLocalAlias2
+- testLocalAlias3
+- testLocalAlias4
+- testLocalAlias5
+- testLocalAlias6
+- testLocalAlias7
+- testGlobalWriteToNonAncestor
+- testLocalWriteToNonAncestor
+- testNoInlineGetpropIntoCall
+- testInlineAliasWithModifications
+- testLocalAliasOfFunction
+- testLocalAliasOfAncestor (testSame)
+- testGlobalAliasOfAncestor (testSame)
+- testNonWellformedAlias1 (testSame)
+- testNonWellformedAlias2 (testSame)
+- testAliasCreatedForEnumDepth2_3? That has `var d = a;` but `a` is top-level and function scope. It expects a warning and likely still collapses? It is test with warning. Might be affected.
+
+But we need to be sure which ones actually expose the bug. The bug is that after inlining local aliases, children are not added. The test expects children to be collapsed. If the test expects testSame (no changes), then it might not expose the bug because even if children are not added, the output remains same? Not necessarily; if children are not collapsed, but the test expects same, it might still be same if collapsing is not needed. But in testLocalAliasOfAncestor, the code is "var a = {b: {c: 5}}; function g() { f(a); } function f() { var x = a.b; f(x.c); }". The expected is same. But if the bug prevents collapsing `a.b.c`, the output might still be the same because the original code is left as is. So the test would pass even with the bug. So it does not expose the bug.
+
+Similarly for testGlobalAliasOfAncestor: same.
+
+Thus, we should only include methods where the expected output differs from the input, and the difference relies on the children being collapsed after alias inlining.
+
+So the following methods are likely to expose the bug:
+
+- testLocalAlias1 through testLocalAlias7
+- testGlobalWriteToNonAncestor
+- testLocalWriteToNonAncestor
+- testNoInlineGetpropIntoCall (the second part)
+- testInlineAliasWithModifications (the last two parts? Actually all four parts have local alias? The first two are testSame, so they might not fail. The third and fourth have collapsing.)
+- testLocalAliasOfFunction
+
+Let's check testNoInlineGetpropIntoCall: It has two test statements:
+1. "var b = x; function f() { var a = b; a(); }" -> testSame.
+2. "var b = {}; b.c = x; function f() { var a = b.c; a(); }" -> test expecting collapse of b.c.
+
+The bug would cause the second part to fail. So the method exposes the bug.
+
+testInlineAliasWithModifications: has four sub-tests. First two are testSame, last two collapse. So method exposes bug.
+
+Now, we need to output the full method paths. For CollapsePropertiesTest, the path is "com.google.javascript.jscomp.CollapsePropertiesTest.testXxx". For the test methods from CommandLineRunnerTest, they are separate, but the source only shows those tests in the list, but they are different test classes. We only need to consider CollapsePropertiesTest methods because the buggy function is in CollapseProperties. The CommandLineRunnerTest methods test different things, likely not related to inlineAliases.
+
+Thus, we will output only CollapsePropertiesTest methods.
+
+Let's list the full paths:
+
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias1"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias2"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias3"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias4"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias5"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias6"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias7"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testGlobalWriteToNonAncestor"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalWriteToNonAncestor"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testNoInlineGetpropIntoCall"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testInlineAliasWithModifications"
+- "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAliasOfFunction"
+
+Also testAddPropertyToChildTypeOfUncollapsibleObjectInLocalScope? It has local alias? Let's check: "var a = {};  a.b = function (){}; a.b.x = 0; var c = a; (function() {a.b.y = 1;})(); a.b.x; a.b.y;" where there is var c = a (local alias? Actually it's in global? No, it's global. But c is a global variable? The code is at global scope. The alias is not inside a function, so it's not a local alias. So it might not be processed by inlineAliases. So not.
+
+Thus, we have these.
+
+Now, the fixed code: We need to provide the corrected implementation of `inlineAliases`. Our fix should ensure that after removing refs, the `aliasingGets` count is updated properly, so that the condition for adding children is correct.
+
+Implementation:
+
+We can add a loop after the for loop to recalculate `aliasingGets` from the remaining refs. Or we can modify the condition to not rely on the counter.
+
+Simplest: After the for loop, recompute:
+
+```
+int newAliasingGets = 0;
+for (Ref r : name.getRefs()) {
+  if (r.type == Type.ALIASING_GET) {
+    newAliasingGets++;
+  }
+}
+name.aliasingGets = newAliasingGets;
+```
+
+But we must ensure that we don't override any other uses of aliasingGets later. The condition uses it, so this is fine.
+
+Alternatively, we could update the count inside the loop when we remove a ref, but we don't have access to the removal method's internals. The above is safe.
+
+Thus, we insert after the for loop and before the final if condition.
+
+So the fixed function becomes:
+
+```
+private void inlineAliases(GlobalNamespace namespace) {
+    Deque<Name> workList = new ArrayDeque<Name>(namespace.getNameForest());
+    while (!workList.isEmpty()) {
+      Name name = workList.pop();
+
+      if (name.type == Name.Type.GET || name.type == Name.Type.SET) {
+        continue;
+      }
+
+      if (name.globalSets == 1 && name.localSets == 0 &&
+          name.aliasingGets > 0) {
+        List<Ref> refs = Lists.newArrayList(name.getRefs());
+        for (Ref ref : refs) {
+          if (ref.type == Type.ALIASING_GET && ref.scope.isLocal()) {
+            if (inlineAliasIfPossible(ref, namespace)) {
+              name.removeRef(ref);
+            }
+          }
+        }
+        // Recalculate aliasingGets after removals
+        name.aliasingGets = 0;
+        for (Ref r : name.getRefs()) {
+          if (r.type == Type.ALIASING_GET) {
+            name.aliasingGets++;
+          }
+        }
+      }
+
+      if ((name.type == Name.Type.OBJECTLIT ||
+           name.type == Name.Type.FUNCTION) &&
+          name.aliasingGets == 0 && name.props != null) {
+        workList.addAll(name.props);
+      }
+    }
+  }
+```
+
+This ensures that after inlining, the count is accurate.
+
+Now, we need to output the JSON. The "trigger_method" list should contain the full paths of the test methods that expose the bug, as per our selection. We should include all that we identified.
+
+But we must also consider that the bug might be in other functions? The user says: "If multiple functions are buggy, all will be provided." Only one function is provided, so we fix only that.
+
+Thus, final answer.
+
+We need to output the full fixed code as a JSON string, preserving the original function exactly with the fix inserted.
+
+Now, produce the JSON.{
+  "trigger_method": [
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias1",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias2",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias3",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias4",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias5",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias6",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAlias7",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testGlobalWriteToNonAncestor",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalWriteToNonAncestor",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testNoInlineGetpropIntoCall",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testInlineAliasWithModifications",
+    "com.google.javascript.jscomp.CollapsePropertiesTest.testLocalAliasOfFunction"
+  ],
+  "fixed_code": [
+    "private void inlineAliases(GlobalNamespace namespace) {\n    // Invariant: All the names in the worklist meet condition (a).\n    Deque<Name> workList = new ArrayDeque<Name>(namespace.getNameForest());\n    while (!workList.isEmpty()) {\n      Name name = workList.pop();\n\n      // Don't attempt to inline a getter or setter property as a variable.\n      if (name.type == Name.Type.GET || name.type == Name.Type.SET) {\n        continue;\n      }\n\n      if (name.globalSets == 1 && name.localSets == 0 &&\n          name.aliasingGets > 0) {\n        // {@code name} meets condition (b). Find all of its local aliases\n        // and try to inline them.\n        List<Ref> refs = Lists.newArrayList(name.getRefs());\n        for (Ref ref : refs) {\n          if (ref.type == Type.ALIASING_GET && ref.scope.isLocal()) {\n            // {@code name} meets condition (c). Try to inline it.\n            if (inlineAliasIfPossible(ref, namespace)) {\n              name.removeRef(ref);\n            }\n          }\n        }\n\n        // Recalculate aliasingGets after removing refs.\n        name.aliasingGets = 0;\n        for (Ref r : name.getRefs()) {\n          if (r.type == Type.ALIASING_GET) {\n            name.aliasingGets++;\n          }\n        }\n      }\n\n      // Check if {@code name} has any aliases left after the\n      // local-alias-inlining above.\n      if ((name.type == Name.Type.OBJECTLIT ||\n           name.type == Name.Type.FUNCTION) &&\n          name.aliasingGets == 0 && name.props != null) {\n        // All of {@code name}'s children meet condition (a), so they can be\n        // added to the worklist.\n        workList.addAll(name.props);\n      }\n    }\n  }"
+  ]
+}

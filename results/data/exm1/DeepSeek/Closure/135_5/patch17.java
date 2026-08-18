@@ -1,0 +1,1 @@
+  public boolean hasProperty(String name) {

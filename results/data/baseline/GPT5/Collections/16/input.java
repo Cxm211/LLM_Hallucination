@@ -1,0 +1,5 @@
+// buggy code
+    public List subList(int fromIndex, int toIndex) {
+        return new SetUniqueList(super.subList(fromIndex, toIndex), set);
+    }
+

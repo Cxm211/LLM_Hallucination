@@ -1,0 +1,143 @@
+  private void updateSimpleDeclaration(String alias, Name refName, Ref ref) {
+    Node rvalue = ref.node.getNext();
+    Node parent = ref.node.getParent();
+    Node gramps = parent.getParent();
+    Node greatGramps = gramps.getParent();
+    Node greatGreatGramps = greatGramps.getParent();
+
+
+    // Create the new alias node.
+    Node nameNode = NodeUtil.newName(
+        compiler.getCodingConvention(), alias, gramps.getFirstChild(),
+        refName.fullName());
+    NodeUtil.copyNameAnnotations(ref.node.getLastChild(), nameNode);
+
+    if (gramps.getType() == Token.EXPR_RESULT) {
+      // BEFORE: a.b.c = ...;
+      //   exprstmt
+      //     assign
+      //       getprop
+      //         getprop
+      //           name a
+      //           string b
+      //         string c
+      //       NODE
+      // AFTER: var a$b$c = ...;
+      //   var
+      //     name a$b$c
+      //       NODE
+
+      // Remove the rvalue (NODE).
+      parent.removeChild(rvalue);
+      nameNode.addChildToFront(rvalue);
+
+      Node varNode = new Node(Token.VAR, nameNode);
+      greatGramps.replaceChild(gramps, varNode);
+    } else {
+      // This must be a complex assignment.
+      Preconditions.checkNotNull(ref.getTwin());
+
+      // BEFORE:
+      // ... (x.y = 3);
+      //
+      // AFTER:
+      // var x$y;
+      // ... (x$y = 3);
+
+      Node current = gramps;
+      Node currentParent = gramps.getParent();
+      for (; currentParent.getType() != Token.SCRIPT &&
+             currentParent.getType() != Token.BLOCK;
+           current = currentParent,
+           currentParent = currentParent.getParent()) {}
+
+      // Create a stub variable declaration right
+      // before the current statement.
+      Node stubVar = new Node(Token.VAR, nameNode.cloneTree())
+          .copyInformationFrom(nameNode);
+      currentParent.addChildBefore(stubVar, current);
+
+      parent.replaceChild(ref.node, nameNode);
+    }
+
+    compiler.reportCodeChange();
+  }
+
+    boolean canCollapseUnannotatedChildNames() {
+      if (type == Type.OTHER || globalSets != 1 || localSets != 0) {
+        return false;
+      }
+
+      // Don't try to collapse if the one global set is a twin reference.
+      // We could theoretically handle this case in CollapseProperties, but
+      // it's probably not worth the effort.
+      Preconditions.checkNotNull(declaration);
+      if (declaration.getTwin() != null) {
+        return false;
+      }
+
+      if (isClassOrEnum) {
+        return true;
+      }
+
+      // If this is a key of an aliased object literal, then it will be aliased
+      // later. So we won't be able to collapse its properties.
+      if (parent != null && parent.shouldKeepKeys()) {
+        return false;
+      }
+
+      // If this is aliased, then its properties can't be collapsed either.
+      if (type != Type.FUNCTION && aliasingGets > 0) {
+        return false;
+      }
+
+      return (parent == null || parent.canCollapseUnannotatedChildNames());
+    }
+
+// trigger testcase
+public void testAddPropertyToChildOfUncollapsibleFunctionInLocalScope() {
+    testSame(
+        "function a() {} a.b = {x: 0}; var c = a;" +
+        "(function() {a.b.y = 0;})(); a.b.y;");
+  }
+
+public void testAddPropertyToUncollapsibleFunctionInLocalScopeDepth1() {
+    testSame("function a() {} var c = a; (function() {a.b = 0;})(); a.b;");
+  }
+
+public void testAddPropertyToUncollapsibleFunctionInLocalScopeDepth2() {
+    test("var a = {}; a.b = function (){}; var d = a.b;" +
+         "(function() {a.b.c = 0;})(); a.b.c;",
+         "var a$b = function (){}; var d = a$b;" +
+         "(function() {a$b.c = 0;})(); a$b.c;");
+  }
+
+public void testAddPropertyToUncollapsibleNamedCtorInLocalScopeDepth1() {
+    // This technically should be collapsed, according to the rules.
+    // We don't collapse named constructors for legacy reasons
+    // (this pass has been around too long, and we don't know who's
+    // depending on this behavior).
+    testSame(
+          "/** @constructor */ function a() {} var c = a; " +
+          "(function() {a.b = 0;})(); a.b;");
+  }
+
+public void testAliasCreatedForFunctionDepth1_1() {
+    testSame("var a = function(){}; a.b = 1; var c = a; c.b = 2; a.b != c.b;");
+  }
+
+public void testAliasCreatedForFunctionDepth1_2() {
+    testSame("var a = function(){}; a.b = 1; f(a); a.b;");
+  }
+
+public void testAliasCreatedForFunctionDepth1_3() {
+    testSame("var a = function(){}; a.b = 1; new f(a); a.b;");
+  }
+
+public void testAliasCreatedForFunctionDepth2() {
+    test(
+        "var a = {}; a.b = function() {}; a.b.c = 1; var d = a.b;" +
+        "a.b.c != d.c;",
+        "var a$b = function() {}; a$b.c = 1; var d = a$b;" +
+        "a$b.c != d.c;");
+  }

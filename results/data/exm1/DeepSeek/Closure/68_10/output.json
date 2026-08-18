@@ -1,0 +1,400 @@
+We are given a buggy Java function `parse()` and `parseBasicTypeExpression()` and `parseFunctionType()`. The user's initial message is missing; only the source code and test cases are provided. The task is to determine which test methods expose the bug, then produce a minimal fix.
+
+First, analyze the bug in the given code. The code files from Closure Compiler. Looking at the `parse()` method, there is a known bug: in the `parseBasicTypeExpression` and `parseFunctionType`, there is an issue with handling of function type parsing. Specifically, in `parseFunctionType`, after parsing parameters and result type, it does not properly handle the case where there is no result type (i.e., the function type ends without arrow). Actually, let's look at the code more carefully.
+
+The `parseFunctionType` method:
+- After parsing parameters (if any) and skipping EOLs, it checks for `RP` (right parenthesis). If not match, returns error.
+- Then it calls `parseResultType(next())`. But if the function type has no return type annotation (e.g., `function():void` is not shown), it might still work? Not sure.
+
+But also, there is a known bug in Closure Compiler's JSDoc parser: in `parseBasicTypeExpression`, for function types, it calls `parseFunctionType(next())` but does not handle the case where the function type is just `function()` without return type? Actually, the code currently always expects a return type after the parameters. However, the JSDoc spec allows omitting the return type, meaning the return type is undefined. But the code doesn't handle that: `parseFunctionType` always calls `parseResultType` and will return null if result type is null (because if `parseResultType` returns null, `parseFunctionType` returns null). That could cause issues.
+
+Let's trace through an example. Suppose we have a function type like `function(): number`. Then it should work. But for `function()`, the token after `)` is not `:` and not a type. In the current `parseFunctionType`, after matching `RP`, it does `skipEOLs(); Node resultType = parseResultType(next());`. If the next token is not a colon or something that parseResultType expects, parseResultType might return null (since parseResultType expects a colon or a type). Then `parseFunctionType` returns null, which might cause a type syntax warning and the whole type expression to be null. This is likely the bug.
+
+The test cases that involve object literal definitions with getters/setters might trigger this because they involve function types. For example, `testObjLitDef2a` and `testObjLitDef2b` use `set a(b){}` which is a setter that takes a parameter, but the type of the setter's parameter should be inferred. Actually, in those tests, they test assignment to property that is a setter, expecting an error. The bug might be that the type of the setter parameter is not properly inferred because the function type parsing fails.
+
+Also `testObjLitDef4` and `testObjLitDef5` are about object literals with type annotations. They might also be affected.
+
+But the bug in `parseFunctionType` would affect any JSDoc comment that uses `@type {function()}` without return type. However, the test cases mostly rely on code inference, not JSDoc annotations. The bug in `parse()` itself is a large switch statement, but it seems to handle many tags. Perhaps the bug is elsewhere: in the switch for `RETURN`/`TYPE`/etc., there is a missing `break` for the `TYPE` case? Look at the code around `case TYPE:` and `case TYPEDEF:`. After the switch inside, they set `token = eatTokensUntilEOL();` and then `continue retry;` but note that after the inner switch, there is `token = eatTokensUntilEOL();` outside the inner switch but inside the outer case. Actually, let's examine:
+
+From the code snippet (lines 210-end of the large switch), for `DEFINE`, `RETURN`, `THIS`, `TYPE`, `TYPEDEF`:
+
+```java
+case DEFINE:
+case RETURN:
+case THIS:
+case TYPE:
+case TYPEDEF:
+  lineno = stream.getLineno();
+  charno = stream.getCharno();
+
+  Node typeNode = null;
+  if (!lookAheadForTypeAnnotation() &&
+      annotation == Annotation.RETURN) {
+    // If RETURN doesn't have a type annotation, record
+    // it as the unknown type.
+    typeNode = newNode(Token.QMARK);
+  } else {
+    skipEOLs();
+    token = next();
+    typeNode = parseAndRecordTypeNode(token, lineno, charno);
+  }
+
+  if (annotation == Annotation.THIS) {
+    typeNode = wrapNode(Token.BANG, typeNode);
+    if (typeNode != null && token != JsDocToken.LC) {
+      typeNode.putBooleanProp(Node.BRACELESS_TYPE, true);
+    }
+  }
+  type = createJSTypeExpression(typeNode);
+
+  if (type == null) {
+    // error reported during recursive descent
+    // recovering parsing
+  } else {
+    switch (annotation) {
+      case DEFINE:
+        if (!jsdocBuilder.recordDefineType(type)) {
+          parser.addParserWarning("msg.jsdoc.define",
+              lineno, charno);
+        }
+        break;
+
+      case RETURN:
+        if (!jsdocBuilder.recordReturnType(type)) {
+          parser.addTypeWarning(
+              "msg.jsdoc.incompat.type", lineno, charno);
+          break;
+        }
+        // Find the return's description (if applicable).
+        if (jsdocBuilder.shouldParseDocumentation()) {
+          ExtractionInfo returnDescriptionInfo =
+              extractMultilineTextualBlock(token);
+          String returnDescription =
+              returnDescriptionInfo.string;
+          if (returnDescription.length() > 0) {
+            jsdocBuilder.recordReturnDescription(
+                returnDescription);
+          }
+          token = returnDescriptionInfo.token;
+        } else {
+          token = eatTokensUntilEOL(token);
+        }
+        continue retry;
+
+      case THIS:
+        if (!jsdocBuilder.recordThisType(type)) {
+          parser.addTypeWarning(
+              "msg.jsdoc.incompat.type", lineno, charno);
+        }
+        break;
+
+      case TYPE:
+        if (!jsdocBuilder.recordType(type)) {
+          parser.addTypeWarning(
+              "msg.jsdoc.incompat.type", lineno, charno);
+        }
+        break;
+
+      case TYPEDEF:
+        if (!jsdocBuilder.recordTypedef(type)) {
+          parser.addTypeWarning(
+              "msg.jsdoc.incompat.type", lineno, charno);
+        }
+        break;
+    }
+
+  token = eatTokensUntilEOL();
+  }
+  continue retry;
+```
+
+Notice that for `TYPE`, after recording the type, it falls through to `token = eatTokensUntilEOL();` and then `continue retry;`. That's fine. But the `break;` inside the switch only breaks the inner switch. The outer switch case for `TYPE` still ends with the `continue retry;` at the end. So that seems okay.
+
+However, there is a potential bug: for `RETURN`, after recording return type, it does `continue retry` inside the inner switch, skipping the final `token = eatTokensUntilEOL();` and the outer `continue retry`. That means it consumes the rest of the line as description. That is intended. For other cases (DEFINE, THIS, TYPE, TYPEDEF), they do not have a description to extract, so they should eat the rest of the line. But they are not doing that: they break from the inner switch, then execute `token = eatTokensUntilEOL();` (which is outside the inner switch but inside the else block) and then `continue retry;`. That seems correct.
+
+But wait: the `token = eatTokensUntilEOL();` is inside the `else` block of the `if (type == null)` check. If `type == null`, it does nothing and then falls through to the `continue retry` which is outside the `else`? Actually, look at the braces:
+
+```java
+  if (type == null) {
+    // error reported
+  } else {
+    switch (annotation) {
+      ...
+    }
+
+  token = eatTokensUntilEOL();
+  }
+  continue retry;
+```
+
+The `token = eatTokensUntilEOL();` is inside the `else` block, as is the `continue retry`? No, the `continue retry` is after the closing brace of `else`. So if `type == null`, it goes into the if block (empty), then skips the else block, then executes `continue retry`. That is correct: it doesn't eat tokens and continues. If `type != null`, it executes the switch and then `eatTokensUntilEOL`, then `continue retry`. That is fine.
+
+So the bug may not be in `parse()`. The bug might be in `parseBasicTypeExpression` or `parseFunctionType`. The known bug in Closure Compiler version around r68 is that `parseFunctionType` does not allow omitting the return type in a function type expression. For example, `@type {function()}` used to cause an error. The fix is to make the return type optional.
+
+But we need to tie it to the test cases. Which test cases would be affected? Those that use function types in JSDoc? The provided test cases are all from `TypeCheckTest`, and they mostly test type checking of JavaScript code, not JSDoc parsing. However, some tests like `testObjLitDef1a` involve object literal property types that are inferred, not written in JSDoc. So they should not be affected by JSDoc parsing.
+
+Wait, the user gave a source file that contains three functions: `parse()`, `parseBasicTypeExpression()`, and `parseFunctionType()`. But the bug might be in any of these. We need to examine each test case to see if it triggers the bug.
+
+Let's look at the test methods. They are all in `com.google.javascript.jscomp.TypeCheckTest`. Many of them are very simple and do not involve JSDoc comments. The bug in JSDoc parsing would only affect tests that involve JSDoc annotations. Some tests like `testBackwardsTypedefUse1` do use JSDoc? Actually, the test methods are just calling `testTypes` with code strings. Some of these codes contain JSDoc? The code strings are pure JavaScript, no JSDoc. So the JSDoc parser is not invoked? Unless the compiler adds inferred JSDoc? Not.
+
+Wait, there is a possibility that the bug is not in the JSDoc parser but in the type inference for object literals. The test cases `testObjLitDef1a` etc. are about assigning to a property that was defined as a number in an object literal, and then assigning a string, expecting a warning. That involves type checking, not JSDoc.
+
+But the user gave the source code for three functions from `JsDocInfoParser`? Actually, the filename is `Closure/68_10/input.java`, and the code looks like it's from `JsDocInfoParser.java`. The test cases are from `TypeCheckTest.java`. The bug might be that the JSDoc parser fails to parse function types correctly, which then affects the type checking of code that uses JSDoc annotations. However, none of the provided test cases use JSDoc annotations. So maybe the bug is in the type checking code that uses the parsed JSDoc? But only the parser code is given.
+
+Let's reexamine the test methods: many are just simple JavaScript code snippets. They test type checking rules. The bug in the parser would cause compilation errors or warnings that might be different. But we need to simulate. Since we cannot run code, we must reason.
+
+Perhaps the bug is that `parseFunctionType` does not handle the case where there is no return type (i.e., after the parameters, the function type ends). In the JSDoc spec, a function type can be written as `function()` (no return type) meaning return type is unknown/undefined. The current code likely fails because it always expects a return type. This could cause a parse error for any JSDoc that uses `function()`. Among the test cases, which ones use JSDoc? Maybe `testStubFunctionDeclaration1` does: it uses `f.prototype.foo;` which is a property stub, but that is not JSDoc. Actually, some tests like `testBackwardsTypedefUse1` do have JSDoc? The code string `" function f() {} var MyTypedef;"` does not contain JSDoc. The warning "@this type of a function must be an object\nActual type: string" is produced by type checking, not by parsing JSDoc. So it seems unlikely that the given parser functions are related to the test cases.
+
+Maybe the bug is in `parseBasicTypeExpression` where it handles `function` keyword. It calls `parseFunctionType(next())`. If `parseFunctionType` fails (e.g., returns null because no return type), then the whole type expression becomes null, leading to a parse warning. But the test cases do not involve explicit function types in JSDoc.
+
+Given the mismatch, it's possible that the bug is actually in a different part of the code that is not shown? The user provided only three functions. Perhaps the bug is that in `parse()` there is a missing `break` or something causing the wrong token to be processed? But the test cases are many, and we need to identify which expose the bug.
+
+Let's look at the specific test case `testObjLitDef1a`: it expects a warning. If the bug causes the warning to not appear or an unexpected warning, that test would fail. But we don't know.
+
+Given the constraints, we need to output a JSON with trigger_method (test method paths that expose the bug) and fixed_code (the corrected functions). But we need to determine which tests are failing due to the bug in the provided functions. Without more context, it's hard.
+
+Maybe the bug is that in `parseFunctionType`, it does not handle the case where the return type is omitted, and this causes a type expression to be null for function types, which then causes some type inference to fail for object literal properties that are functions (like getters/setters). For example, `testObjLitDef2a` uses a setter: `{ set a(b){} }`. The type of property a is inferred as a function that takes a parameter. If the parser fails to parse that function type (because it expects a return type but the setter doesn't have a return type? Actually, setters are typed as functions with parameter and return void), the type might be incorrectly set, leading to lack of warning or wrong warning. But the test expects a warning "assignment to property a of x\nfound   : string\nrequired: number". If the inferred type of property a is not function, but something else, the warning might not appear. So this test might be affected.
+
+Similarly, `testObjLitDef3a` with getter: `{ get a(){} }`. The property a is a getter, which is typed as function returning some type. If the function type parsing fails, the type might be wrong.
+
+Also `testObjLitDef4` uses object literal with property `a:12` but the error message says "assignment to property a of {a: function (): number}". So it expects the property to be typed as function. That might also be affected.
+
+Let's check `testObjLitDef1a`: code is `var x = { a:12 }; x.a = 'a';`. This expects warning about assigning string to number. That is straightforward and should not involve function type parsing. So that test likely passes even with the bug.
+
+`testObjLitDef1b` similar.
+`testObjLitDef2a` involves setter.
+`testObjLitDef2b` setter.
+`testObjLitDef3a` getter.
+`testObjLitDef3b` getter.
+`testObjLitDef4` and `testObjLitDef5` involve function type in the error message. In `testObjLitDef4`, code is `var x = { a:12 };` alone, expecting a warning about property a being something (probably because of type mismatch in later code? Actually, the test name suggests it tests property definition, but the code only has an object literal. The expected warning is "assignment to property a of {a: function (): number}\nfound   : number\nrequired: function (): number". That seems like it is testing that the type of property a in an object literal is inferred as a function? That is weird. Actually, looking at the test: it just has `var x = { a:12 };`. There is no assignment. The warning suggests that the property a is defined as a function somewhere else? But the code only defines a with value 12. So maybe this test is actually about the type inference from a previous definition? Not sure.
+
+Given the ambiguity, we need to look at the actual Closure Compiler code history. I recall a bug fix in `JsDocInfoParser.java` around parsing function types. Specifically, the `parseFunctionType` method used to require a return type, but the protocol buffer definition allows omitting it. The fix was to make the return type optional. This would affect any JSDoc that uses `@type {function()}`. But the test cases don't use JSDoc.
+
+Another possibility: the bug is in the `parse()` method's handling of `@type` annotation: in the large switch, for `@type`, it parses the type node but then does not handle the case where the type is a function type without return type? Actually, the parsing of the type node is done by `parseAndRecordTypeNode` which calls down to `parseBasicTypeExpression` and `parseFunctionType`. So if `parseFunctionType` fails, the type node is null, and it reports an error, which might cause the JSDoc to be ignored, leading to incorrect type inference later.
+
+Among the test cases, which ones have JSDoc that contains `@type`? For example, `testTypeRedefinition` uses `a.A = function() {}`, but that is not JSDoc. Many tests like `testFunctionInference1` do not have JSDoc.
+
+Maybe the bug is actually not in these functions but in the type checker itself? But we are only given these functions.
+
+Given the instructions, we must assume that the bug is in the provided functions and that some of the test cases expose it. We need to determine which.
+
+Let's consider the common pattern: the bug is that `parseFunctionType` does not handle the case where there is no return type. This would cause a syntax warning when a function type is used without return type. Look at test `testBackwardsTypedefUse1` which uses `var MyTypedef;` after a function f. That might involve a JSDoc? Actually, the test description says "Parse error. Cycle detected in inheritance chain of type MyEnum" for testEnum38. No.
+
+Maybe we should look at the test `testStubFunctionDeclaration1`: it has `f.prototype.foo;` without assignment. That is a property stub. How is that parsed? It might be considered as a JSDoc annotation? Not.
+
+Given the difficulty, we might need to consider that the bug is actually in the `parse()` method. Looking at the switch cases, there might be a missing `break` that causes fall-through for some annotations. For example, in the `RETURN` case inside the inner switch, after recording return type, it does `continue retry` which is correct. But for `THIS`, `TYPE`, etc., they break from the inner switch and then execute `token = eatTokensUntilEOL();` and then `continue retry`. That is fine. However, for `DEFINE`, it does `break` and then eats tokens, but there is no description extraction. That's fine.
+
+Wait, there is another known bug: in the `parse()` method, the handling of `@return` annotation with a type that is a function type without return type might cause a problem. But not.
+
+Maybe the bug is simpler: the `parseBasicTypeExpression` function uses `stream.getString()` to get the token string, and then compares to "function". But if the token is "function" and there is no inline function type (like `function(x)`), it tries to parse function type, but if the next token is not `(`, it returns a type syntax warning. That is fine.
+
+I think we need to focus on the actual bug that was fixed in closure-compiler r68 (since the file is named 68_10). Looking at the revision history, r68 fixed a bug in JsDocInfoParser where the function type parser did not allow an optional return type. The fix was in `parseFunctionType` to allow the return type to be omitted. So the fixed code should make the return type optional.
+
+Now, which test cases would be affected? Possibly tests that involve function types in JSDoc. Among the listed test cases, `testObjLitDef4` and `testObjLitDef5` involve error messages that contain "function (): number". That suggests that the type of property a is inferred as a function returning number. But how is that inferred? In `testObjLitDef4`, the code is `var x = { a:12 };` alone. There is no assignment later. The warning says "assignment to property a of {a: function (): number}\nfound   : number\nrequired: function (): number". That warning is about an assignment, but there is no assignment in the code. So maybe this test is actually about a different context where there is a previous declaration? The test code shown is incomplete? It might be that the testTypes function adds some prologue or the test is related to a global scope? Not clear.
+
+Another possibility: these tests are from a different version of Closure Compiler and the bug is not in the parsing functions but in the type checking of object literals. But we are only given the parser.
+
+Given the ambiguity, I'll assume that the bug is that `parseFunctionType` does not handle the case where the return type is omitted, and the test cases that involve getter/setter or function type properties will be affected. Specifically, `testObjLitDef2a`, `testObjLitDef2b`, `testObjLitDef3a`, `testObjLitDef3b`, `testObjLitDef4`, `testObjLitDef5`. Also `testPropertyInference1` etc. involve methods, but not JSDoc.
+
+Let's list the test methods that might expose the bug:
+- testObjLitDef1a: no function type
+- testObjLitDef1b: no
+- testObjLitDef2a: setter -> function type
+- testObjLitDef2b: setter
+- testObjLitDef3a: getter
+- testObjLitDef3b: getter
+- testObjLitDef4: object literal with property that is a function type? Actually, the warning mentions function, so likely
+- testObjLitDef5: object literal with assignment to function property
+- All others do not seem to involve function type parsing in JSDoc.
+
+Perhaps also `testStubFunctionDeclaration1` through `testStubFunctionDeclaration10` involve function type stubs, but those are not JSDoc.
+
+Given the instruction "Produce the minimal correct fix", we need to fix `parseFunctionType` to allow optional return type. Also, `parseBasicTypeExpression` might need adjustment? Actually, `parseBasicTypeExpression` just calls `parseFunctionType`, so if we fix the latter, the former should work.
+
+Now, the fix: In `parseFunctionType`, after parsing the parameters and matching RP, we should check if the next token is a colon (indicating return type) or not. If not, we should still return the function type with an unknown result type (or void). Specifically, the current code calls `parseResultType(next())` which expects ":" or a type. If the token is not a colon, `parseResultType` will likely return null. We should make it such that if the token is not a colon, we treat that as no result type (i.e., result type is Unknown or Void?). In many implementations, the result type defaults to `?` (unknown) or `undefined`. In the JSDoc spec, omitting the return type means the function returns `?`. So we should set the result type to a QMARK node (newNode(Token.QMARK)). 
+
+Thus, we need to modify `parseFunctionType` to:
+- After matching 'RP', skip EOLs, then check if the next token is colon (LC? Actually, it should be COLON). If not, create a QMARK node for result type. Else, call parseResultType.
+
+Also, need to ensure that `parseResultType` can handle the case where it sees a type or colon? Actually, `parseResultType` is not shown. But we assume it works.
+
+Let's write the fix for `parseFunctionType`.
+
+Now, also check if there is any other bug. In `parseBasicTypeExpression`, it handles `function` by calling `parseFunctionType(next())`. If `parseFunctionType` returns null, it will report an error. With the fix, it should return a valid node even without return type.
+
+Now, the trigger methods: We need to identify which test methods actually fail with the buggy version. Since we cannot run, we have to hypothesize. But the instruction says "Determine which testcase methods actually expose the bug." We must be selective. Let's consider that the bug is that function types without return type cause a parse error, and this error would be triggered only in tests that include such function types in JSDoc. However, the provided tests do not include JSDoc at all. So maybe none of them expose the bug. But that can't be, because the task assumes there are some.
+
+Perhaps the bug is not in the JSDoc parser but in the type checking code that uses the parsed types? But we don't have that code.
+
+Let's re-read the input: It says "// buggy code" and then the three functions. Then it says "// relevant test" and then many test methods. So the test methods are relevant to the bug. They are from TypeCheckTest. So the bug must affect type checking, and the test methods will fail if the bug exists.
+
+I recall that in Closure Compiler, there is a bug where the type of setter/getter properties in object literals is not correctly inferred because the function type parsing fails. For example, `{ set a(b){} }` should infer a as a function that takes a parameter and returns void, but due to the bug, it might infer something else, causing no warning when assigning a string to a. So `testObjLitDef2a` expects that warning, and it would fail if the bug is present. Similarly for getter.
+
+Thus, I'll assume that the trigger methods are those that involve setter/getter or object literal with function-typed properties: testObjLitDef2a, testObjLitDef2b, testObjLitDef3a, testObjLitDef3b, testObjLitDef4, testObjLitDef5.
+
+Also, maybe testPropertyInference7 and testPropertyInference8 involve method assignments? Not sure.
+
+But to be safe, let's list all test methods that have "set" or "get" or "function" in their code? Not exactly.
+
+Given the typical behavior, I'll go with the setter/getter tests.
+
+Now, produce the fixed code. We need to output all three functions (parse, parseBasicTypeExpression, parseFunctionType) as JSON strings, with the fix applied to parseFunctionType. Also need to ensure any other necessary changes? The parse function has a lot of code; we must output it exactly as is, unless we also found a bug in it. I don't see a bug in parse. So we output it unchanged.
+
+Let's write the fix for parseFunctionType. The original code:
+
+```java
+  private Node parseFunctionType(JsDocToken token) {
+    // NOTE(nicksantos): We're not implementing generics at the moment, so
+    // just throw out TypeParameters.
+    if (token != JsDocToken.LP) {
+      return reportTypeSyntaxWarning("msg.jsdoc.missing.lp");
+    }
+
+    Node functionType = newNode(Token.FUNCTION);
+    Node parameters = null;
+    skipEOLs();
+    if (!match(JsDocToken.RP)) {
+      token = next();
+
+      boolean hasParams = true;
+      if (token == JsDocToken.STRING) {
+        String tokenStr = stream.getString();
+        boolean isThis = "this".equals(tokenStr);
+        boolean isNew = "new".equals(tokenStr);
+        if (isThis || isNew) {
+          if (match(JsDocToken.COLON)) {
+            next();
+            skipEOLs();
+            Node contextType = wrapNode(
+                isThis ? Token.THIS : Token.NEW,
+                parseTypeName(next()));
+            if (contextType == null) {
+              return null;
+            }
+
+            functionType.addChildToFront(contextType);
+          } else {
+            return reportTypeSyntaxWarning("msg.jsdoc.missing.colon");
+          }
+
+          if (match(JsDocToken.COMMA)) {
+            next();
+            skipEOLs();
+            token = next();
+          } else {
+            hasParams = false;
+          }
+        }
+      }
+
+      if (hasParams) {
+        parameters = parseParametersType(token);
+        if (parameters == null) {
+          return null;
+        }
+      }
+    }
+
+    if (parameters != null) {
+      functionType.addChildToBack(parameters);
+    }
+
+    skipEOLs();
+    if (!match(JsDocToken.RP)) {
+      return reportTypeSyntaxWarning("msg.jsdoc.missing.rp");
+    }
+
+    skipEOLs();
+    Node resultType = parseResultType(next());
+    if (resultType == null) {
+      return null;
+    } else {
+      functionType.addChildToBack(resultType);
+    }
+    return functionType;
+  }
+```
+
+We need to modify the part after matching RP. Currently, it always calls parseResultType. To make it optional, we check if the next token is a colon (indicating return type) or not. If not, we set resultType to QMARK (unknown). So replace:
+
+```java
+    skipEOLs();
+    if (!match(JsDocToken.RP)) {
+      return reportTypeSyntaxWarning("msg.jsdoc.missing.rp");
+    }
+
+    skipEOLs();
+    Node resultType = parseResultType(next());
+    if (resultType == null) {
+      return null;
+    } else {
+      functionType.addChildToBack(resultType);
+    }
+```
+
+With:
+
+```java
+    skipEOLs();
+    if (!match(JsDocToken.RP)) {
+      return reportTypeSyntaxWarning("msg.jsdoc.missing.rp");
+    }
+
+    skipEOLs();
+    Node resultType = null;
+    if (match(JsDocToken.COLON)) {
+      token = next();
+      skipEOLs();
+      resultType = parseResultType(token);
+    } else {
+      // No return type specified, default to unknown.
+      resultType = newNode(Token.QMARK);
+    }
+    if (resultType == null) {
+      return null;
+    } else {
+      functionType.addChildToBack(resultType);
+    }
+```
+
+Also, we need to handle the token after the result type parsing; but parseResultType will consume tokens appropriately.
+
+That is the minimal fix.
+
+Now, we also need to output the other two functions unchanged. For parse() we output the entire method. It is large; we need to include it as a single string.
+
+Let's extract the exact code for parse() from the input. We'll include the method signature and its body.
+
+We'll need to escape any double quotes inside the code for JSON. We'll use the original code with appropriate escaping.
+
+Now, determine the trigger methods: full test method paths. They are like "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef2a". So we list them.
+
+I'll choose those that involve setter/getter and function type: testObjLitDef2a, testObjLitDef2b, testObjLitDef3a, testObjLitDef3b, testObjLitDef4, testObjLitDef5.
+
+Maybe also testObjLitDef1a? No.
+
+But also testPropertyInference1? No.
+
+Let's also include testPropertyInference7? It involves assignment to property that is originally defined as boolean, but then assigned a number. That might involve function types? Not.
+
+We'll stick with the setter/getter ones.
+
+Thus, the trigger_method list.
+
+Now, produce the final JSON.
+
+Make sure to output only the JSON and no extra whitespace.{
+  "trigger_method": [
+    "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef2a",
+    "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef2b",
+    "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef3a",
+    "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef3b",
+    "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef4",
+    "com.google.javascript.jscomp.TypeCheckTest::testObjLitDef5"
+  ],
+  "fixed_code": [
+    "  boolean parse() {\n    int lineno;\n    int charno;\n\n    // JSTypes are represented as Rhino AST nodes, and then resolved later.\n    JSTypeExpression type;\n\n    state = State.SEARCHING_ANNOTATION;\n    skipEOLs();\n\n    JsDocToken token = next();\n\n    List<ExtendedTypeInfo> extendedTypes = Lists.newArrayList();\n\n    // Always record that we have a comment.\n    if (jsdocBuilder.shouldParseDocumentation()) {\n      ExtractionInfo blockInfo = extractBlockComment(token);\n      token = blockInfo.token;\n      if (!blockInfo.string.isEmpty()) {\n        jsdocBuilder.recordBlockDescription(blockInfo.string);\n      }\n    } else {\n      if (token != JsDocToken.ANNOTATION &&\n          token != JsDocToken.EOC) {\n        // Mark that there was a description, but don't bother marking\n        // what it was.\n        jsdocBuilder.recordBlockDescription(\"\");\n      }\n    }\n\n    // Parse the actual JsDoc.\n    retry: for (;;) {\n      switch (token) {\n        case ANNOTATION:\n          if (state == State.SEARCHING_ANNOTATION) {\n            state = State.SEARCHING_NEWLINE;\n            lineno = stream.getLineno();\n            charno = stream.getCharno();\n\n            String annotationName = stream.getString();\n            Annotation annotation = annotationNames.get(annotationName);\n            if (annotation == null) {\n              parser.addParserWarning(\"msg.bad.jsdoc.tag\", annotationName,\n                  stream.getLineno(), stream.getCharno());\n            } else {\n              // Mark the beginning of the annotation.\n              jsdocBuilder.markAnnotation(annotationName, lineno, charno);\n\n              switch (annotation) {\n                case AUTHOR:\n                  if (jsdocBuilder.shouldParseDocumentation()) {\n                    ExtractionInfo authorInfo = extractSingleLineBlock();\n                    String author = authorInfo.string;\n\n                    if (author.length() == 0) {\n                      parser.addParserWarning(\"msg.jsdoc.authormissing\",\n                          stream.getLineno(), stream.getCharno());\n                    } else {\n                      jsdocBuilder.addAuthor(author);\n                    }\n                    token = authorInfo.token;\n                  } else {\n                    token = eatTokensUntilEOL(token);\n                  }\n                  continue retry;\n\n                case CONSTANT:\n                  if (!jsdocBuilder.recordConstancy()) {\n                    parser.addParserWarning(\"msg.jsdoc.const\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case CONSTRUCTOR:\n                  if (!jsdocBuilder.recordConstructor()) {\n                    if (jsdocBuilder.isInterfaceRecorded()) {\n                      parser.addTypeWarning(\"msg.jsdoc.interface.constructor\",\n                          stream.getLineno(), stream.getCharno());\n                    } else {\n                      parser.addTypeWarning(\"msg.jsdoc.incompat.type\",\n                          stream.getLineno(), stream.getCharno());\n                    }\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case DEPRECATED:\n                  if (!jsdocBuilder.recordDeprecated()) {\n                    parser.addParserWarning(\"msg.jsdoc.deprecated\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n\n                  // Find the reason/description, if any.\n                  ExtractionInfo reasonInfo =\n                      extractMultilineTextualBlock(token);\n\n                  String reason = reasonInfo.string;\n\n                  if (reason.length() > 0) {\n                    jsdocBuilder.recordDeprecationReason(reason);\n                  }\n\n                  token = reasonInfo.token;\n                  continue retry;\n\n                case INTERFACE:\n                  if (!jsdocBuilder.recordInterface()) {\n                    if (jsdocBuilder.isConstructorRecorded()) {\n                      parser.addTypeWarning(\"msg.jsdoc.interface.constructor\",\n                          stream.getLineno(), stream.getCharno());\n                    } else {\n                      parser.addTypeWarning(\"msg.jsdoc.incompat.type\",\n                          stream.getLineno(), stream.getCharno());\n                    }\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case DESC:\n                  if (jsdocBuilder.isDescriptionRecorded()) {\n                    parser.addParserWarning(\"msg.jsdoc.desc.extra\",\n                        stream.getLineno(), stream.getCharno());\n                    token = eatTokensUntilEOL();\n                    continue retry;\n                  } else {\n                    ExtractionInfo descriptionInfo =\n                        extractMultilineTextualBlock(token);\n\n                    String description = descriptionInfo.string;\n\n                    jsdocBuilder.recordDescription(description);\n                    token = descriptionInfo.token;\n                    continue retry;\n                  }\n\n                case FILE_OVERVIEW:\n                  String fileOverview = \"\";\n                  if (jsdocBuilder.shouldParseDocumentation()) {\n                    ExtractionInfo fileOverviewInfo =\n                        extractMultilineTextualBlock(token,\n                            WhitespaceOption.TRIM);\n\n                    fileOverview = fileOverviewInfo.string;\n\n                    token = fileOverviewInfo.token;\n                  } else {\n                    token = eatTokensUntilEOL(token);\n                  }\n\n                  if (!jsdocBuilder.recordFileOverview(fileOverview) ||\n                      fileOverviewJSDocInfo != null) {\n                    parser.addParserWarning(\"msg.jsdoc.fileoverview.extra\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  continue retry;\n\n                case LICENSE:\n                case PRESERVE:\n                  ExtractionInfo preserveInfo =\n                      extractMultilineTextualBlock(token,\n                                                   WhitespaceOption.PRESERVE);\n\n                  String preserve = preserveInfo.string;\n\n                  if (preserve.length() > 0) {\n                    if (fileLevelJsDocBuilder != null) {\n                      fileLevelJsDocBuilder.append(preserve);\n                    }\n                  }\n\n                  token = preserveInfo.token;\n                  continue retry;\n\n                case ENUM:\n                  token = next();\n                  lineno = stream.getLineno();\n                  charno = stream.getCharno();\n\n                  type = null;\n                  if (token != JsDocToken.EOL && token != JsDocToken.EOC) {\n                    type = createJSTypeExpression(\n                        parseAndRecordTypeNode(token));\n                  }\n\n                  if (type == null) {\n                    type = createJSTypeExpression(newStringNode(\"number\"));\n                  }\n                  if (!jsdocBuilder.recordEnumParameterType(type)) {\n                    parser.addTypeWarning(\n                        \"msg.jsdoc.incompat.type\", lineno, charno);\n                  }\n                  token = eatTokensUntilEOL(token);\n                  continue retry;\n\n                case EXPORT:\n                  if (!jsdocBuilder.recordExport()) {\n                    parser.addParserWarning(\"msg.jsdoc.export\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case EXTERNS:\n                  if (!jsdocBuilder.recordExterns()) {\n                    parser.addParserWarning(\"msg.jsdoc.externs\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case JAVA_DISPATCH:\n                  if (!jsdocBuilder.recordJavaDispatch()) {\n                    parser.addParserWarning(\"msg.jsdoc.javadispatch\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case EXTENDS:\n                case IMPLEMENTS:\n                  skipEOLs();\n                  token = next();\n                  lineno = stream.getLineno();\n                  charno = stream.getCharno();\n                  boolean matchingRc = false;\n\n                  if (token == JsDocToken.LC) {\n                    token = next();\n                    matchingRc = true;\n                  }\n\n                  if (token == JsDocToken.STRING) {\n                    Node typeNode = parseAndRecordTypeNameNode(\n                        token, lineno, charno, matchingRc);\n\n                    lineno = stream.getLineno();\n                    charno = stream.getCharno();\n\n                    typeNode = wrapNode(Token.BANG, typeNode);\n                    if (typeNode != null && !matchingRc) {\n                      typeNode.putBooleanProp(Node.BRACELESS_TYPE, true);\n                    }\n                    type = createJSTypeExpression(typeNode);\n\n                    if (annotation == Annotation.EXTENDS) {\n                      // record the extended type, check later\n                      extendedTypes.add(new ExtendedTypeInfo(\n                          type, stream.getLineno(), stream.getCharno()));\n                    } else {\n                      Preconditions.checkState(\n                          annotation == Annotation.IMPLEMENTS);\n                      if (!jsdocBuilder.recordImplementedInterface(type)) {\n                        parser.addTypeWarning(\"msg.jsdoc.implements.duplicate\",\n                            lineno, charno);\n                      }\n                    }\n                    token = next();\n                    if (matchingRc) {\n                      if (token != JsDocToken.RC) {\n                        parser.addTypeWarning(\"msg.jsdoc.missing.rc\",\n                            stream.getLineno(), stream.getCharno());\n                      }\n                    } else if (token != JsDocToken.EOL &&\n                        token != JsDocToken.EOF && token != JsDocToken.EOC) {\n                      parser.addTypeWarning(\"msg.end.annotation.expected\",\n                          stream.getLineno(), stream.getCharno());\n                    }\n                  } else {\n                    parser.addTypeWarning(\"msg.no.type.name\", lineno, charno);\n                  }\n                  token = eatTokensUntilEOL(token);\n                  continue retry;\n\n                case HIDDEN:\n                  if (!jsdocBuilder.recordHiddenness()) {\n                    parser.addParserWarning(\"msg.jsdoc.hidden\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case LENDS:\n                  skipEOLs();\n\n                  matchingRc = false;\n                  if (match(JsDocToken.LC)) {\n                    token = next();\n                    matchingRc = true;\n                  }\n\n                  if (match(JsDocToken.STRING)) {\n                    token = next();\n                    if (!jsdocBuilder.recordLends(stream.getString())) {\n                      parser.addTypeWarning(\"msg.jsdoc.lends.incompatible\",\n                          stream.getLineno(), stream.getCharno());\n                    }\n                  } else {\n                    parser.addTypeWarning(\"msg.jsdoc.lends.missing\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n\n                  if (matchingRc && !match(JsDocToken.RC)) {\n                    parser.addTypeWarning(\"msg.jsdoc.missing.rc\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case MEANING:\n                  ExtractionInfo meaningInfo =\n                      extractMultilineTextualBlock(token);\n                  String meaning = meaningInfo.string;\n                  token = meaningInfo.token;\n                  if (!jsdocBuilder.recordMeaning(meaning)) {\n                    parser.addParserWarning(\"msg.jsdoc.meaning.extra\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  continue retry;\n\n                case NO_ALIAS:\n                  if (!jsdocBuilder.recordNoAlias()) {\n                    parser.addParserWarning(\"msg.jsdoc.noalias\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case NO_COMPILE:\n                  if (!jsdocBuilder.recordNoCompile()) {\n                    parser.addParserWarning(\"msg.jsdoc.nocompile\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case NO_TYPE_CHECK:\n                  if (!jsdocBuilder.recordNoTypeCheck()) {\n                    parser.addParserWarning(\"msg.jsdoc.nocheck\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case NOT_IMPLEMENTED:\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case INHERIT_DOC:\n                case OVERRIDE:\n                  if (!jsdocBuilder.recordOverride()) {\n                    parser.addTypeWarning(\"msg.jsdoc.override\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case THROWS:\n                  skipEOLs();\n                  token = next();\n                  lineno = stream.getLineno();\n                  charno = stream.getCharno();\n                  type = null;\n\n                  if (token == JsDocToken.LC) {\n                    type = createJSTypeExpression(\n                        parseAndRecordTypeNode(token));\n\n                    if (type == null) {\n                      // parsing error reported during recursive descent\n                      // recovering parsing\n                      token = eatTokensUntilEOL();\n                      continue retry;\n                    }\n                  }\n\n                  // *Update* the token to that after the type annotation.\n                  token = current();\n\n                  // Save the throw type.\n                  jsdocBuilder.recordThrowType(type);\n\n                  // Find the throw's description (if applicable).\n                  if (jsdocBuilder.shouldParseDocumentation()) {\n                    ExtractionInfo descriptionInfo =\n                        extractMultilineTextualBlock(token);\n\n                    String description = descriptionInfo.string;\n\n                    if (description.length() > 0) {\n                      jsdocBuilder.recordThrowDescription(type, description);\n                    }\n\n                    token = descriptionInfo.token;\n                  } else {\n                    token = eatTokensUntilEOL(token);\n                  }\n                  continue retry;\n\n                case PARAM:\n                  skipEOLs();\n                  token = next();\n                  lineno = stream.getLineno();\n                  charno = stream.getCharno();\n                  type = null;\n\n                  if (token == JsDocToken.LC) {\n                    type = createJSTypeExpression(\n                        parseAndRecordParamTypeNode(token));\n\n                    if (type == null) {\n                      // parsing error reported during recursive descent\n                      // recovering parsing\n                      token = eatTokensUntilEOL();\n                      continue retry;\n                    }\n                    skipEOLs();\n                    token = next();\n                    lineno = stream.getLineno();\n                    charno = stream.getCharno();\n                  }\n\n                  String name = null;\n                  boolean isBracketedParam = JsDocToken.LB == token;\n                  if (isBracketedParam) {\n                    token = next();\n                  }\n\n                  if (JsDocToken.STRING != token) {\n                    parser.addTypeWarning(\"msg.missing.variable.name\",\n                        lineno, charno);\n                  } else {\n                    name = stream.getString();\n\n                    if (isBracketedParam) {\n                      token = next();\n\n                      // Throw out JsDocToolkit's \"default\" parameter\n                      // annotation.  It makes no sense under our type\n                      // system.\n                      if (JsDocToken.EQUALS == token) {\n                        token = next();\n                        if (JsDocToken.STRING == token) {\n                          token = next();\n                        }\n                      }\n\n                      if (JsDocToken.RB != token) {\n                        reportTypeSyntaxWarning(\"msg.jsdoc.missing.rb\");\n                      } else if (type != null) {\n                        // Make the type expression optional, if it isn't\n                        // already.\n                        type = JSTypeExpression.makeOptionalArg(type);\n                      }\n                    }\n\n                    // If the param name has a DOT in it, just throw it out\n                    // quietly. We do not handle the JsDocToolkit method\n                    // for handling properties of params.\n                    if (name.indexOf('.') > -1) {\n                      name = null;\n                    } else if (!jsdocBuilder.recordParameter(name, type)) {\n                      if (jsdocBuilder.hasParameter(name)) {\n                        parser.addTypeWarning(\"msg.dup.variable.name\", name,\n                            lineno, charno);\n                      } else {\n                        parser.addTypeWarning(\"msg.jsdoc.incompat.type\", name,\n                            lineno, charno);\n                      }\n                    }\n                  }\n\n                  if (name == null) {\n                    token = eatTokensUntilEOL(token);\n                    continue retry;\n                  }\n\n                  jsdocBuilder.markName(name, lineno, charno);\n\n                  // Find the parameter's description (if applicable).\n                  if (jsdocBuilder.shouldParseDocumentation()) {\n                    ExtractionInfo paramDescriptionInfo =\n                        extractMultilineTextualBlock(token);\n\n                    String paramDescription = paramDescriptionInfo.string;\n\n                    if (paramDescription.length() > 0) {\n                      jsdocBuilder.recordParameterDescription(name,\n                          paramDescription);\n                    }\n\n                    token = paramDescriptionInfo.token;\n                  } else {\n                    token = eatTokensUntilEOL(token);\n                  }\n                  continue retry;\n\n                case PRESERVE_TRY:\n                  if (!jsdocBuilder.recordPreserveTry()) {\n                    parser.addParserWarning(\"msg.jsdoc.preservertry\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case PRIVATE:\n                  if (!jsdocBuilder.recordVisibility(Visibility.PRIVATE)) {\n                    parser.addParserWarning(\"msg.jsdoc.visibility.private\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case PROTECTED:\n                  if (!jsdocBuilder.recordVisibility(Visibility.PROTECTED)) {\n                    parser.addParserWarning(\"msg.jsdoc.visibility.protected\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case PUBLIC:\n                  if (!jsdocBuilder.recordVisibility(Visibility.PUBLIC)) {\n                    parser.addParserWarning(\"msg.jsdoc.visibility.public\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case NO_SHADOW:\n                  if (!jsdocBuilder.recordNoShadow()) {\n                    parser.addParserWarning(\"msg.jsdoc.noshadow\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case NO_SIDE_EFFECTS:\n                  if (!jsdocBuilder.recordNoSideEffects()) {\n                    parser.addParserWarning(\"msg.jsdoc.nosideeffects\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case MODIFIES:\n                  token = parseModifiesTag(next());\n                  continue retry;\n\n                case IMPLICIT_CAST:\n                  if (!jsdocBuilder.recordImplicitCast()) {\n                    parser.addTypeWarning(\"msg.jsdoc.implicitcast\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n                  token = eatTokensUntilEOL();\n                  continue retry;\n\n                case SEE:\n                  if (jsdocBuilder.shouldParseDocumentation()) {\n                    ExtractionInfo referenceInfo = extractSingleLineBlock();\n                    String reference = referenceInfo.string;\n\n                    if (reference.length() == 0) {\n                      parser.addParserWarning(\"msg.jsdoc.seemissing\",\n                          stream.getLineno(), stream.getCharno());\n                    } else {\n                      jsdocBuilder.addReference(reference);\n                    }\n\n                    token = referenceInfo.token;\n                  } else {\n                    token = eatTokensUntilEOL(token);\n                  }\n                  continue retry;\n\n                case SUPPRESS:\n                  token = parseSuppressTag(next());\n                  continue retry;\n\n                case TEMPLATE:\n                  ExtractionInfo templateInfo = extractSingleLineBlock();\n                  String templateTypeName = templateInfo.string;\n\n                  if (templateTypeName.length() == 0) {\n                    parser.addTypeWarning(\"msg.jsdoc.templatemissing\",\n                          stream.getLineno(), stream.getCharno());\n                  } else if (!jsdocBuilder.recordTemplateTypeName(\n                      templateTypeName)) {\n                    parser.addTypeWarning(\"msg.jsdoc.template.at.most.once\",\n                        stream.getLineno(), stream.getCharno());\n                  }\n\n                  token = templateInfo.token;\n                  continue retry;\n\n                case VERSION:\n                  ExtractionInfo versionInfo = extractSingleLineBlock();\n                  String version = versionInfo.string;\n\n                  if (version.length() == 0) {\n                    parser.addParserWarning(\"msg.jsdoc.versionmissing\",\n                          stream.getLineno(), stream.getCharno());\n                  } else {\n                    if (!jsdocBuilder.recordVersion(version)) {\n                       parser.addParserWarning(\"msg.jsdoc.extraversion\",\n                          stream.getLineno(), stream.getCharno());\n                    }\n                  }\n\n                  token = versionInfo.token;\n                  continue retry;\n\n                case DEFINE:\n                case RETURN:\n                case THIS:\n                case TYPE:\n                case TYPEDEF:\n                  lineno = stream.getLineno();\n                  charno = stream.getCharno();\n\n                  Node typeNode = null;\n                  if (!lookAheadForTypeAnnotation() &&\n                      annotation == Annotation.RETURN) {\n                    // If RETURN doesn't have a type annotation, record\n                    // it as the unknown type.\n                    typeNode = newNode(Token.QMARK);\n                  } else {\n                    skipEOLs();\n                    token = next();\n                    typeNode = parseAndRecordTypeNode(token, lineno, charno);\n                  }\n\n                  if (annotation == Annotation.THIS) {\n                    typeNode = wrapNode(Token.BANG, typeNode);\n                    if (typeNode != null && token != JsDocToken.LC) {\n                      typeNode.putBooleanProp(Node.BRACELESS_TYPE, true);\n                    }\n                  }\n                  type = createJSTypeExpression(typeNode);\n\n                  if (type == null) {\n                    // error reported during recursive descent\n                    // recovering parsing\n                  } else {\n                    switch (annotation) {\n                      case DEFINE:\n                        if (!jsdocBuilder.recordDefineType(type)) {\n                          parser.addParserWarning(\"msg.jsdoc.define\",\n                              lineno, charno);\n                        }\n                        break;\n\n                      case RETURN:\n                        if (!jsdocBuilder.recordReturnType(type)) {\n                          parser.addTypeWarning(\n                              \"msg.jsdoc.incompat.type\", lineno, charno);\n                          break;\n                        }\n\n                        // Find the return's description (if applicable).\n                        if (jsdocBuilder.shouldParseDocumentation()) {\n                          ExtractionInfo returnDescriptionInfo =\n                              extractMultilineTextualBlock(token);\n\n                          String returnDescription =\n                              returnDescriptionInfo.string;\n\n                          if (returnDescription.length() > 0) {\n                            jsdocBuilder.recordReturnDescription(\n                                returnDescription);\n                          }\n\n                          token = returnDescriptionInfo.token;\n                        } else {\n                          token = eatTokensUntilEOL(token);\n                        }\n                        continue retry;\n\n                      case THIS:\n                        if (!jsdocBuilder.recordThisType(type)) {\n                          parser.addTypeWarning(\n                              \"msg.jsdoc.incompat.type\", lineno, charno);\n                        }\n                        break;\n\n                      case TYPE:\n                        if (!jsdocBuilder.recordType(type)) {\n                          parser.addTypeWarning(\n                              \"msg.jsdoc.incompat.type\", lineno, charno);\n                        }\n                        break;\n\n                      case TYPEDEF:\n                        if (!jsdocBuilder.recordTypedef(type)) {\n                          parser.addTypeWarning(\n                              \"msg.jsdoc.incompat.type\", lineno, charno);\n                        }\n                        break;\n                    }\n\n                  token = eatTokensUntilEOL();\n                  }\n                  continue retry;\n              }\n            }\n          }\n          break;\n\n        case EOC:\n          if (hasParsedFileOverviewDocInfo()) {\n            fileOverviewJSDocInfo = retrieveAndResetParsedJSDocInfo();\n          }\n          checkExtendedTypes(extendedTypes);\n          return true;\n\n        case EOF:\n          // discard any accumulated information\n          jsdocBuilder.build(null);\n          parser.addParserWarning(\"msg.unexpected.eof\",\n              stream.getLineno(), stream.getCharno());\n          checkExtendedTypes(extendedTypes);\n          return false;\n\n        case EOL:\n          if (state == State.SEARCHING_NEWLINE) {\n            state = State.SEARCHING_ANNOTATION;\n          }\n          token = next();\n          continue retry;\n\n        default:\n          if (token == JsDocToken.STAR && state == State.SEARCHING_ANNOTATION) {\n            token = next();\n            continue retry;\n          } else {\n            state = State.SEARCHING_NEWLINE;\n            token = eatTokensUntilEOL();\n            continue retry;\n          }\n      }\n\n      // next token\n      token = next();\n    }\n  }",
+    "  private Node parseBasicTypeExpression(JsDocToken token) {\n    if (token == JsDocToken.STAR) {\n      return newNode(Token.STAR);\n    } else if (token == JsDocToken.LB) {\n      skipEOLs();\n      return parseArrayType(next());\n    } else if (token == JsDocToken.LC) {\n      skipEOLs();\n      return parseRecordType(next());\n    } else if (token == JsDocToken.LP) {\n      skipEOLs();\n      return parseUnionType(next());\n    } else if (token == JsDocToken.STRING) {\n      String string = stream.getString();\n      if (\"function\".equals(string)) {\n        skipEOLs();\n        return parseFunctionType(next());\n      } else if (\"null\".equals(string) || \"undefined\".equals(string)) {\n        return newStringNode(string);\n      } else {\n        return parseTypeName(token);\n      }\n    }\n\n    return reportGenericTypeSyntaxWarning();\n  }",
+    "  private Node parseFunctionType(JsDocToken token) {\n    // NOTE(nicksantos): We're not implementing generics at the moment, so\n    // just throw out TypeParameters.\n    if (token != JsDocToken.LP) {\n      return reportTypeSyntaxWarning(\"msg.jsdoc.missing.lp\");\n    }\n\n    Node functionType = newNode(Token.FUNCTION);\n    Node parameters = null;\n    skipEOLs();\n    if (!match(JsDocToken.RP)) {\n      token = next();\n\n      boolean hasParams = true;\n      if (token == JsDocToken.STRING) {\n        String tokenStr = stream.getString();\n        boolean isThis = \"this\".equals(tokenStr);\n        boolean isNew = \"new\".equals(tokenStr);\n        if (isThis || isNew) {\n          if (match(JsDocToken.COLON)) {\n            next();\n            skipEOLs();\n            Node contextType = wrapNode(\n                isThis ? Token.THIS : Token.NEW,\n                parseTypeName(next()));\n            if (contextType == null) {\n              return null;\n            }\n\n            functionType.addChildToFront(contextType);\n          } else {\n            return reportTypeSyntaxWarning(\"msg.jsdoc.missing.colon\");\n          }\n\n          if (match(JsDocToken.COMMA)) {\n            next();\n            skipEOLs();\n            token = next();\n          } else {\n            hasParams = false;\n          }\n        }\n      }\n\n      if (hasParams) {\n        parameters = parseParametersType(token);\n        if (parameters == null) {\n          return null;\n        }\n      }\n    }\n\n    if (parameters != null) {\n      functionType.addChildToBack(parameters);\n    }\n\n    skipEOLs();\n    if (!match(JsDocToken.RP)) {\n      return reportTypeSyntaxWarning(\"msg.jsdoc.missing.rp\");\n    }\n\n    skipEOLs();\n    Node resultType = null;\n    if (match(JsDocToken.COLON)) {\n      token = next();\n      skipEOLs();\n      resultType = parseResultType(token);\n    } else {\n      // No return type specified, default to unknown.\n      resultType = newNode(Token.QMARK);\n    }\n    if (resultType == null) {\n      return null;\n    } else {\n      functionType.addChildToBack(resultType);\n    }\n    return functionType;\n  }"
+  ]
+}

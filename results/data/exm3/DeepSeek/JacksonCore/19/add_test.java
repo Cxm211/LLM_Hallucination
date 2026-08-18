@@ -1,0 +1,21 @@
+// com/fasterxml/jackson/core/json/TestNumericValues.java
+public void testLongerFloatingPointNegative() throws Exception
+    {
+        StringBuilder input = new StringBuilder();
+        input.append('-');
+        for (int i = 1; i < 200; i++) {
+            input.append(1);
+        }
+        input.append(".0");
+        final String DOC = input.toString();
+
+        JsonParser p;
+
+        p = FACTORY.createParser(new StringReader(DOC));
+        _testLongerFloat(p, DOC);
+        p.close();
+        
+        p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes("UTF-8")));
+        _testLongerFloat(p, DOC);
+        p.close();
+    }

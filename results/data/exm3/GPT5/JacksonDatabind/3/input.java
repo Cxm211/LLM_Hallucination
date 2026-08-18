@@ -1,0 +1,91 @@
+// buggy function
+    public String[] deserialize(JsonParser jp, DeserializationContext ctxt) throws IOException
+    {
+        // Ok: must point to START_ARRAY (or equivalent)
+        if (!jp.isExpectedStartArrayToken()) {
+            return handleNonArray(jp, ctxt);
+        }
+        if (_elementDeserializer != null) {
+            return _deserializeCustom(jp, ctxt);
+        }
+
+        final ObjectBuffer buffer = ctxt.leaseObjectBuffer();
+        Object[] chunk = buffer.resetAndStart();
+        
+        int ix = 0;
+        JsonToken t;
+        
+        while ((t = jp.nextToken()) != JsonToken.END_ARRAY) {
+            // Ok: no need to convert Strings, but must recognize nulls
+            String value;
+            if (t == JsonToken.VALUE_STRING) {
+                value = jp.getText();
+            } else if (t == JsonToken.VALUE_NULL) {
+                value = _elementDeserializer.getNullValue();
+            } else {
+                value = _parseString(jp, ctxt);
+            }
+            if (ix >= chunk.length) {
+                chunk = buffer.appendCompletedChunk(chunk);
+                ix = 0;
+            }
+            chunk[ix++] = value;
+        }
+        String[] result = buffer.completeAndClearBuffer(chunk, ix, String.class);
+        ctxt.returnObjectBuffer(buffer);
+        return result;
+    }
+
+    protected final String[] _deserializeCustom(JsonParser jp, DeserializationContext ctxt) throws IOException
+    {
+        final ObjectBuffer buffer = ctxt.leaseObjectBuffer();
+        Object[] chunk = buffer.resetAndStart();
+        final JsonDeserializer<String> deser = _elementDeserializer;
+        
+        int ix = 0;
+        JsonToken t;
+        
+        while ((t = jp.nextToken()) != JsonToken.END_ARRAY) {
+            // Ok: no need to convert Strings, but must recognize nulls
+            String value = (t == JsonToken.VALUE_NULL) ? null : deser.deserialize(jp, ctxt);
+            if (ix >= chunk.length) {
+                chunk = buffer.appendCompletedChunk(chunk);
+                ix = 0;
+            }
+            chunk[ix++] = value;
+        }
+        String[] result = buffer.completeAndClearBuffer(chunk, ix, String.class);
+        ctxt.returnObjectBuffer(buffer);
+        return result;
+    }
+
+// trigger testcase
+// com/fasterxml/jackson/databind/deser/TestArrayDeserialization.java::testStringArray
+public void testStringArray() throws Exception
+    {
+        final String[] STRS = new String[] {
+            "a", "b", "abcd", "", "???", "\"quoted\"", "lf: \n",
+        };
+        StringWriter sw = new StringWriter();
+        JsonGenerator jg = MAPPER.getFactory().createGenerator(sw);
+        jg.writeStartArray();
+        for (String str : STRS) {
+            jg.writeString(str);
+        }
+        jg.writeEndArray();
+        jg.close();
+
+        String[] result = MAPPER.readValue(sw.toString(), String[].class);
+        assertNotNull(result);
+
+        assertEquals(STRS.length, result.length);
+        for (int i = 0; i < STRS.length; ++i) {
+            assertEquals(STRS[i], result[i]);
+        }
+
+        // [#479]: null handling was busted in 2.4.0
+        result = MAPPER.readValue(" [ null ]", String[].class);
+        assertNotNull(result);
+        assertEquals(1, result.length);
+        assertNull(result[0]);
+    }

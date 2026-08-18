@@ -1,0 +1,268 @@
+We are given a source file with a few functions and a huge list of test methods. The buggy functions are:
+
+1. `private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop)` 
+2. `private void visitLabel(Node node, Node parent)`
+
+The buggy functions seem to be from the `InlineFunctions` pass (or related renamer). The tests included are from various test classes: `CommandLineRunnerTest`, `FunctionInjectorTest`, `FunctionToBlockMutatorTest`, `InlineFunctionsTest`. We need to determine which test methods actually expose bugs in the given functions. 
+
+First, analyze the buggy functions:
+
+`makeLocalNamesUnique`:
+```java
+private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop) {
+    Supplier<String> idSupplier = compiler.getUniqueNameIdSupplier();
+    // Make variable names unique to this instance.
+    NodeTraversal.traverse(
+        compiler, fnNode, new MakeDeclaredNamesUnique(
+            new InlineRenamer(
+                idSupplier,
+                "inline_",
+                isCallInLoop)));
+    // Make label names unique to this instance.
+}
+```
+This function is called during inlining. It uses `MakeDeclaredNamesUnique` with an `InlineRenamer`. The problem might be that it only does variable names but does not handle label names (see comment: "// Make label names unique to this instance." but the code doesn't have any label renaming). That could cause label conflicts.
+
+`visitLabel`:
+```java
+private void visitLabel(Node node, Node parent) {
+    Node nameNode = node.getFirstChild();
+    Preconditions.checkState(nameNode != null);
+    String name = nameNode.getString();
+    LabelInfo li = getLabelInfo(name);
+    // This is a label...
+    if (li.referenced) {
+        String newName = getNameForId(li.id);
+        if (!name.equals(newName)) {
+            // ... and it is used, give it the short name.
+            nameNode.setString(newName);
+            compiler.reportCodeChange();
+        }
+    } else {
+        // ... and it is not referenced, just remove it.
+        Node newChild = node.getLastChild();
+        node.removeChild(newChild);
+        parent.replaceChild(node, newChild);
+        if (newChild.getType() == Token.BLOCK) {
+            NodeUtil.tryMergeBlock(newChild);
+        }
+        compiler.reportCodeChange();
+    }
+
+    // Remove the label from the current stack of labels.
+    namespaceStack.peek().renameMap.remove(name);
+}
+```
+This `visitLabel` looks like it's from a `LabelNameFixer` or similar. It renames labels to short names. The potential bug: when removing a label (the else branch), it uses `node.removeChild(newChild)` and then `parent.replaceChild(node, newChild)`. But after removing the child, the node might be in an inconsistent state. Also, it doesn't update the rename map properly? The line `namespaceStack.peek().renameMap.remove(name)` uses `name` (original) but after renaming, the map might have the new name. Actually, if referenced, it renames the label node, but does it update the renameMap? It only removes the old name, but does not add the new name. However, the code says "Remove the label from the current stack of labels." Maybe it's intended to remove when done with the label.
+
+But looking at the tests, many are unrelated to labels. The functions are likely from a class that deals with inlining and renaming. The bug might be that `makeLocalNamesUnique` does not rename labels, leading to label conflicts. Or the `visitLabel` method corrupts the AST when removing unreferenced labels.
+
+Which tests would exercise label renaming? Possibly tests that involve labels or inlining of functions that have labels. In the `InlineFunctionsTest`, there is `testInlineFunctions31` which involves a label: `"function foo(){ lab:{4;} } lab:{foo();}"`. That test might expose label handling issues. Also, tests that involve inlining with loops and labels (like `testInlineIntoLoop` in `FunctionInjectorTest` has "JSCompiler_inline_label_foo_4").
+
+We need to trace each test method to see if it calls the buggy functions. The buggy functions are internal to the compiler passes. They would be called during compilation when inlining functions or renaming labels. Many test methods in the list call `test` or `testSame` which trigger compilation. So potentially many tests could trigger the buggy code.
+
+But we need to find which tests actually fail due to the bug. Since we don't have the actual execution, we must reason based on the code.
+
+Notice that the source file provided only includes two functions. The rest of the file is missing (the class definition, other methods). But we have only these two. The bug likely lies in one or both of these functions.
+
+Let's examine `visitLabel` more carefully. There is a possible bug: when removing a label (else branch), it does:
+```java
+Node newChild = node.getLastChild();
+node.removeChild(newChild);
+parent.replaceChild(node, newChild);
+if (newChild.getType() == Token.BLOCK) {
+    NodeUtil.tryMergeBlock(newChild);
+}
+```
+But after `node.removeChild(newChild)`, the node (`node` itself) still exists, and then we replace the node in the parent with `newChild`. However, `newChild` was just removed from `node`. This might be okay if `newChild` is not connected elsewhere. But the problem might be that after removal, `node.getLastChild()` is called again? No, it's done only once. But there is a subtlety: if the label has more than one child? Labels typically have a name child and a statement child. `getLastChild()` would get the statement (the body). After removing that, the node has only the name child. Then we replace the label node with the statement. That's correct for removing the label. However, there is a potential bug: after removing the label, the `nameNode` is still attached to the label node? But we are replacing the label node entirely, so the name node becomes orphaned. That might be fine.
+
+But consider: what if the label is not referenced but the body is not a block? It could be any statement. The code seems to handle that.
+
+Another issue: after replacing, if the body is a block, it tries to merge it. That is fine.
+
+Now, look at `makeLocalNamesUnique`. The comment says "Make label names unique to this instance." But the code only creates `MakeDeclaredNamesUnique` for variable names; it does not handle labels. So labels are not renamed uniquely. This could cause a bug when inlining a function that has a label that conflicts with an outer label. The test `testInlineFunctions31` specifically tests inlining a function with a label and an outer label. The expected output is `"lab:{{JSCompiler_inline_label_0:{4}}}"` which includes a generated unique label name `JSCompiler_inline_label_0`. For that to work, the `makeLocalNamesUnique` must rename labels. But as written, it does not. Therefore, this test might be failing because labels are not made unique.
+
+Also, in `testCanInlineReferenceToFunction` tests with `INLINE_BLOCK` that involve inline label names, like `testInlineIntoLoop` in `FunctionInjectorTest`, they produce `JSCompiler_inline_label_foo_4`. So again, label renaming is needed.
+
+Thus, the bug is likely that `makeLocalNamesUnique` does not actually make label names unique. The fix would be to also traverse and rename labels.
+
+Now, we need to identify which test methods expose this bug. The bug is in `makeLocalNamesUnique`, which is called during inlining. So any test that triggers inlining of a function that contains a label could be affected. Also, tests that involve inline block inlining with control flow (like `testInlineFunctions31`) will rely on label renaming.
+
+However, many tests in `CommandLineRunnerTest` do not involve inlining at all; they test other passes. Only a few tests might involve inlining, like `testDebugFlag2`, `testDebugFlag4`, etc., but those are about variable renaming, not label renaming. But they might still call `makeLocalNamesUnique` when inlining functions? The debug flag tests set `--debug=true` and expect variables to be renamed with `$a$$` etc. They don't involve labels.
+
+What about tests in `InlineFunctionsTest`? Many of them expect label renaming (like `testInlineFunctions31`). But also tests like `testInlineFunctions22`, `testInlineFunctions23` involve `JSCompiler_inline_label_plex_2` etc. Those would be affected.
+
+Also, in `FunctionInjectorTest`, tests like `testInlineIntoLoop`, `testMutateWithMultipleReturns` from `FunctionToBlockMutatorTest`, etc., use inline labels.
+
+So the list of potential triggering tests is long. But we must only include those that actually fail due to the bug. Since we don't have execution, we need to infer based on the code: if a test expects label renaming to occur, and the bug prevents that renaming, the test should fail. But maybe some tests don't rely on label renaming because the labels are not conflicting? The fix is to add label name uniqueness.
+
+Let's analyze `makeLocalNamesUnique`: it only traverses `fnNode` with `MakeDeclaredNamesUnique` for variable names. That pass will rename variables, but not labels. The labels inside the function will remain with their original names. When inlining, the inline code will be inserted into the caller's scope, possibly causing label name conflicts. The compiler's inline functions likely have a separate step to handle label uniqueness? But the buggy code suggests that this function should handle both but only does variables.
+
+Thus, the fix is to add a second traversal that renames labels uniquely. Probably using a `MakeUniqueNames` for labels as well.
+
+Given that we only have the two methods, we need to provide the fixed code for both. But note: the source file includes only these two methods. The `fixed_code` should include all functions from input, which are these two? The input includes: `makeLocalNamesUnique` and `visitLabel`. So we need to output both in fixed version. However, we might need to fix `makeLocalNamesUnique` (to include label renaming) and possibly `visitLabel` if it has a bug. But we should also check if `visitLabel` has a bug that is exposed by tests.
+
+Let's see `visitLabel`: In the else branch, it removes the label. But after removing, it does `namespaceStack.peek().renameMap.remove(name)`. However, if the label was referenced, it renames the label node but does not update the renameMap. But then it removes the original name from the renameMap. That might be okay because the renameMap is used for something else. Not sure.
+
+One potential bug: In the else branch, after replacing the parent, it tries to merge the block if newChild is a block. But what if the body is not a block? It's fine.
+
+But there could be a bug with `NodeUtil.tryMergeBlock(newChild)`. If newChild is a block, it merges it with its parent. However, after replacing the label node with the block, the block's parent is now the same as the label's parent. Calling tryMergeBlock might merge the block with the parent if the parent is also a block? Not sure.
+
+However, looking at the test `testInlineFunctions31`, it expects a specific structure with a unique label. The failure could be due to `makeLocalNamesUnique` not renaming labels. So the fix is to add label renaming there.
+
+To be safe, we should fix `makeLocalNamesUnique` to also rename labels. Possibly by adding a second traversal that does label renaming. But we might not have the class details. We need to produce a minimal fix.
+
+Assume the fix is: in `makeLocalNamesUnique`, after the variable renaming, add a traversal to rename labels. The code might be:
+```java
+NodeTraversal.traverse(
+    compiler, fnNode, new MakeDeclaredNamesUnique(
+        new InlineRenamer(
+            idSupplier,
+            "inline_",
+            isCallInLoop),
+        true)); // true to rename labels?
+```
+But we don't know the API. Alternatively, we could simply add a call to rename labels using a different pass. Since we don't have full context, we must provide a plausible fix.
+
+Given the instructions, we must output minimal correct fix. The bug is that `makeLocalNamesUnique` does not rename labels. The fix is to add label renaming. We might need to modify the method to include label renaming. Since we only have these two methods, we will output both with the fix in `makeLocalNamesUnique`. However, `visitLabel` might also be buggy, but we should keep it as is if it's correct.
+
+Considering the tests, many from `InlineFunctionsTest` and `FunctionInjectorTest` test label renaming. But also some from `CommandLineRunnerTest`? Probably not.
+
+Now, which test methods are considered "trigger_method"? We need to list the full method paths. For example, "com.google.javascript.jscomp.InlineFunctionsTest::testInlineFunctions31" etc.
+
+I'll identify tests that involve labels and expect unique label names. I'll list them from the input:
+
+From `InlineFunctionsTest`:
+- testInlineFunctions31 (explicit label)
+- testInlineFunctions22 (plex label)
+- testInlineFunctions23 (complex label)
+- testMixedModeInlining? no labels
+- testInlineIntoLoop (from FunctionInjectorTest) has inline labels
+- testMutateWithMultipleReturns (from FunctionToBlockMutatorTest) uses JSCompiler_inline_label_foo_0
+- testMutateInitializeUninitializedVars2 uses JSCompiler_inline_label_foo_4
+
+Also, tests that use `INLINE_BLOCK` and have multiple returns create inline labels.
+
+But many tests in `FunctionInjectorTest` like `testCanInlineReferenceToFunction27` etc., when they do block inlining with `INLINE_BLOCK`, they may produce labels if the function has multiple returns? Actually, the block inlining uses labels to break. So many of those test cases will generate inline labels. For example, `testInline14` in `FunctionInjectorTest` uses `JSCompiler_inline_label_foo_4`. So many function injector tests.
+
+Given the large number, we need to list only those that are likely to fail. Since we cannot execute, we must assume that any test that expects a label like `JSCompiler_inline_label_...` would fail if label renaming is not done.
+
+But wait: the bug is that `makeLocalNamesUnique` does not rename labels inside the function being inlined. However, the inline label generation (like `JSCompiler_inline_label_foo_4`) is done during inlining, not inside the function being inlined. The labels inside the function being inlined (e.g., `lab:{4;}`) are the ones that need to be renamed to avoid conflicts. In `testInlineFunctions31`, the function `foo` has a label `lab`. When inlined into the outer `lab:{}`, there would be two labels named `lab` if not renamed. The expected output shows `JSCompiler_inline_label_0` which is a unique name for the inner label. So yes, the bug would cause this test to fail.
+
+Similarly, in `testInlineFunctions22` and `23`, the inner function `complex` and `plex` have labels? Actually, they have multiple returns, and the block inlining creates inline labels like `JSCompiler_inline_label_plex_2`. But those are generated by the inlining mechanism, not from the source. So they might not be affected by `makeLocalNamesUnique` because they are created fresh. `makeLocalNamesUnique` is called on the function being inlined before inlining to rename its variables and labels. If the function has a label, it needs to be renamed. But if the function has no label, there's no issue. So tests that involve functions with labels are the ones affected.
+
+In `testInlineFunctions31`, the function has a label `lab`. So it's affected.
+In `testInlineFunctions22`, the function `plex` has no explicit labels; it has `if` statements but no labels. The `JSCompiler_inline_label_plex_2` is generated by the block inlining code, not from the source. So `makeLocalNamesUnique` might not need to rename anything. So it's probably not affected.
+
+Similarly, `testInlineFunctions23` - `complex` has no labels.
+
+In `FunctionInjectorTest`, many tests: `testInline14` produces `JSCompiler_inline_label_foo_4`, but the function `foo(a){return a+a}` has no labels, so it's not affected.
+
+Therefore, the only tests that are affected are those where the function to be inlined has a label. Looking at all test cases, only `testInlineFunctions31` explicitly has a label in the source function.
+
+Are there any other tests with labels in the function? Possibly none. In `CommandLineRunnerTest`, there are tests with `--debug` flag that rename variables, but not labels.
+
+Thus, the only test that triggers the bug is `testInlineFunctions31`.
+
+But wait, there is also `testInlineFunctions30` which uses `eval`, but that is not inlined. `testInlineFunctions29` no labels.
+
+Also, `testInlineIntoLoop` in `FunctionInjectorTest` has a function `foo(a){for(var b in c)return a;}` that has a for-in loop but no labels. The label generated is from the inlining, not from the function.
+
+So likely only `testInlineFunctions31`.
+
+But we should also check `visitLabel` for bugs. Perhaps `visitLabel` causes a bug when removing labels. That could affect tests that involve label removal. For example, `testInlineFunctions31` expects the label to be removed? Actually, the label is renamed, not removed, because it is referenced (the function uses it? Wait, the function has `lab:{4;}` which is a label statement. After inlining, the label is renamed and kept. The expected output is `"lab:{{JSCompiler_inline_label_0:{4}}}"`. So the outer label remains, inner label is renamed. The bug in `visitLabel` might affect the renaming or removal of labels during the label fixing pass. But the test expects the outer label to remain. So if `visitLabel` incorrectly removes a label that is referenced, that could cause failure. But in `testInlineFunctions31`, the outer label `lab:` is used? The code is `lab:{foo();}` where `foo()` is the call. The label `lab` is referenced by `break lab`? Not in this simple code. So the label `lab` is not referenced; it's just a label. According to `visitLabel`, if a label is not referenced, it will be removed. In the test, the expected output includes `lab:` as the outer label. So if `visitLabel` removes it, the test would fail. Therefore, the bug might be that `visitLabel` incorrectly removes unreferenced labels that should be kept? Actually, in the source, the label `lab` is not used by any break statement; it's just a label on a expression. However, that label might be considered referenced if there is a break inside its body? There is `foo();` which is a call. No break. So the label is unreferenced. According to `visitLabel`, if `li.referenced` is false, it removes the label. So the outer label would be removed. But the expected output keeps it. So either the label is considered referenced somehow, or the `visitLabel` is not supposed to remove labels that are not used? Perhaps the condition is wrong. In the test, the outer label `lab:` is present in both input and output. So the compiler must keep it. Therefore, `visitLabel` should not remove it. This suggests that `visitLabel` might be buggy: it should only remove if the label is unreferenced and maybe also if it's inside a certain scope? But the test suggests that labels are kept even if not referenced? Actually, in JavaScript, unused labels are useless but not an error. Whether the compiler removes them depends on the pass. The test expects it to be kept. So `visitLabel` might have a bug that removes labels that should not be removed.
+
+Alternatively, maybe the `visitLabel` here is from a different pass that only runs after inlining to clean up? Possibly it's part of `LabelNameFixer` that renames labels to short names. It might only run on labels that are in the inline temp code? Not sure.
+
+Given that we have both functions, and the test `testInlineFunctions31` involves labels, it's likely that either `makeLocalNamesUnique` or `visitLabel` (or both) are buggy. The test would expose the bug.
+
+Also, note that the comment in `makeLocalNamesUnique` says "Make label names unique to this instance." but it doesn't do it. So that is a clear bug.
+
+Thus, the triggering test is `com.google.javascript.jscomp.InlineFunctionsTest::testInlineFunctions31`.
+
+But we should also consider if any other test might fail due to `visitLabel` removing labels incorrectly. For example, tests that have labels in source but expect them to remain. In the provided tests, `testInlineFunctions31` is the only one with explicit labels. Also, `testInlineFunctions30` has `eval`, but no labels.
+
+So I'll go with that.
+
+Now, the fixed_code: we need to output both functions as JSON strings. We must fix `makeLocalNamesUnique` to also rename labels. How? Possibly by adding another traversal with a `MakeUniqueNames` that targets labels. Since we don't have the API, we can assume we can pass a parameter to `MakeDeclaredNamesUnique` to also rename labels. Or we can call a different method.
+
+I'll propose a fix that adds label renaming by using the same `MakeDeclaredNamesUnique` but with a flag for labels. Or we can simply duplicate the traversal with a different renamer that renames labels. But to be minimal, we can change the call to include a boolean `renameLabels` parameter.
+
+From the context, `MakeDeclaredNamesUnique` likely has a constructor that takes a `Renamer` and maybe a boolean for labels. But we don't know. Alternatively, we can import a new class but we can't change imports. So we need to produce a plausible fix.
+
+Given that the source is incomplete, but we only need to provide the fixed code for the given functions, we can keep `visitLabel` as is (maybe it's correct) and fix `makeLocalNamesUnique` by adding label renaming.
+
+I'll write:
+
+```java
+private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop) {
+    Supplier<String> idSupplier = compiler.getUniqueNameIdSupplier();
+    // Make variable names unique to this instance.
+    NodeTraversal.traverse(
+        compiler, fnNode, new MakeDeclaredNamesUnique(
+            new InlineRenamer(
+                idSupplier,
+                "inline_",
+                isCallInLoop)));
+    // Make label names unique to this instance.
+    NodeTraversal.traverse(
+        compiler, fnNode, new MakeDeclaredNamesUnique(
+            new InlineRenamer(
+                idSupplier,
+                "inline_",
+                isCallInLoop),
+            true));  // true to rename labels as well
+}
+```
+
+But we need to be consistent with the class. Perhaps the second parameter is "renameLabels". Or we can use a different pass: `NodeTraversal.traverse(compiler, fnNode, new RenameLabels(...))`. But we don't have that.
+
+Maybe the bug is actually simpler: the `makeLocalNamesUnique` was supposed to call something for labels but missed. The fix might be to uncomment a line or add a single call. But we don't have the rest of the class.
+
+Given the instructions, we must produce a minimal fix. I'll assume that `MakeDeclaredNamesUnique` can take a second boolean parameter to also rename labels. I'll add that.
+
+Alternatively, the bug might be in `visitLabel`: the else branch should not remove the label if it's not referenced? Actually, the removal is correct for unreferenced labels. So why does the test expect the label to remain? Maybe the label is considered referenced because there is a `break lab` somewhere? In the test input, there is no break. But maybe the label is implicitly used? No. So perhaps the test does not go through `visitLabel` for the outer label because it's not a label in the inlined function? The `visitLabel` function is called during a pass that renames labels to short names. That pass might only run on labels that are in the current function scope. The outer label might not be affected.
+
+Given the complexity, I'll stick with the most obvious bug: missing label renaming in `makeLocalNamesUnique`.
+
+Thus, the trigger_method will be `com.google.javascript.jscomp.InlineFunctionsTest::testInlineFunctions31`.
+
+We should also include `visitLabel` unchanged in the fixed_code.
+
+Now, output format: JSON object with "trigger_method" array and "fixed_code" array. Each element in fixed_code is a full function as a JSON string (escape quotes and newlines as needed).
+
+We need to ensure the JSON is valid.
+
+Let's construct.
+
+For trigger_method: ["com.google.javascript.jscomp.InlineFunctionsTest::testInlineFunctions31"]
+
+For fixed_code: both functions. We'll write them as strings.
+
+We need to preserve the original code exactly except the fix. So `visitLabel` remains the same.
+
+Write the fixed makeLocalNamesUnique: add the label renaming traversal.
+
+I'll produce:
+
+```json
+{
+  "trigger_method": ["com.google.javascript.jscomp.InlineFunctionsTest::testInlineFunctions31"],
+  "fixed_code": [
+    "  private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop) {\n    Supplier<String> idSupplier = compiler.getUniqueNameIdSupplier();\n    // Make variable names unique to this instance.\n    NodeTraversal.traverse(\n        compiler, fnNode, new MakeDeclaredNamesUnique(\n            new InlineRenamer(\n                idSupplier,\n                \"inline_\",\n                isCallInLoop)));\n    // Make label names unique to this instance.\n    NodeTraversal.traverse(\n        compiler, fnNode, new MakeDeclaredNamesUnique(\n            new InlineRenamer(\n                idSupplier,\n                \"inline_\",\n                isCallInLoop),\n            true));\n  }",
+    "    private void visitLabel(Node node, Node parent) {\n      Node nameNode = node.getFirstChild();\n      Preconditions.checkState(nameNode != null);\n      String name = nameNode.getString();\n      LabelInfo li = getLabelInfo(name);\n      // This is a label...\n      if (li.referenced) {\n        String newName = getNameForId(li.id);\n        if (!name.equals(newName)) {\n          // ... and it is used, give it the short name.\n          nameNode.setString(newName);\n          compiler.reportCodeChange();\n        }\n      } else {\n        // ... and it is not referenced, just remove it.\n        Node newChild = node.getLastChild();\n        node.removeChild(newChild);\n        parent.replaceChild(node, newChild);\n        if (newChild.getType() == Token.BLOCK) {\n          NodeUtil.tryMergeBlock(newChild);\n        }\n        compiler.reportCodeChange();\n      }\n\n      // Remove the label from the current stack of labels.\n      namespaceStack.peek().renameMap.remove(name);\n    }"
+  ]
+}
+```
+
+But we need to ensure the strings are properly escaped for JSON. I'll escape the double quotes inside the strings.
+
+Alternatively, we can write them as multi-line strings with \n.
+
+I'll produce the final output.{
+  "trigger_method": ["com.google.javascript.jscomp.InlineFunctionsTest::testInlineFunctions31"],
+  "fixed_code": [
+    "  private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop) {\n    Supplier<String> idSupplier = compiler.getUniqueNameIdSupplier();\n    // Make variable names unique to this instance.\n    NodeTraversal.traverse(\n        compiler, fnNode, new MakeDeclaredNamesUnique(\n            new InlineRenamer(\n                idSupplier,\n                \"inline_\",\n                isCallInLoop)));\n    // Make label names unique to this instance.\n    NodeTraversal.traverse(\n        compiler, fnNode, new MakeDeclaredNamesUnique(\n            new InlineRenamer(\n                idSupplier,\n                \"inline_\",\n                isCallInLoop),\n            true));\n  }",
+    "    private void visitLabel(Node node, Node parent) {\n      Node nameNode = node.getFirstChild();\n      Preconditions.checkState(nameNode != null);\n      String name = nameNode.getString();\n      LabelInfo li = getLabelInfo(name);\n      // This is a label...\n      if (li.referenced) {\n        String newName = getNameForId(li.id);\n        if (!name.equals(newName)) {\n          // ... and it is used, give it the short name.\n          nameNode.setString(newName);\n          compiler.reportCodeChange();\n        }\n      } else {\n        // ... and it is not referenced, just remove it.\n        Node newChild = node.getLastChild();\n        node.removeChild(newChild);\n        parent.replaceChild(node, newChild);\n        if (newChild.getType() == Token.BLOCK) {\n          NodeUtil.tryMergeBlock(newChild);\n        }\n        compiler.reportCodeChange();\n      }\n\n      // Remove the label from the current stack of labels.\n      namespaceStack.peek().renameMap.remove(name);\n    }"
+  ]
+}

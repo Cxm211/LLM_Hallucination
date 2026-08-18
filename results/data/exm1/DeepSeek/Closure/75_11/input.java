@@ -1,0 +1,3310 @@
+// buggy code
+  static Double getStringNumberValue(String rawJsString) {
+      // vertical tab is not always whitespace
+
+    String s = trimJsWhiteSpace(rawJsString);
+    // return ScriptRuntime.toNumber(s);
+    if (s.length() == 0) {
+      return 0.0;
+    }
+
+    if (s.length() > 2
+        && s.charAt(0) == '0'
+        && (s.charAt(1) == 'x' || s.charAt(1) == 'X')) {
+      // Attempt to convert hex numbers.
+      try {
+        return Double.valueOf(Integer.parseInt(s.substring(2), 16));
+      } catch (NumberFormatException e) {
+        return Double.NaN;
+      }
+    }
+
+    if (s.length() > 3
+        && (s.charAt(0) == '-' || s.charAt(0) == '+')
+        && s.charAt(1) == '0'
+        && (s.charAt(2) == 'x' || s.charAt(2) == 'X')) {
+      // hex numbers with explicit signs vary between browsers.
+      return null;
+    }
+
+    // FireFox and IE treat the "Infinity" differently. FireFox is case
+    // insensitive, but IE treats "infinity" as NaN.  So leave it alone.
+    if (s.equals("infinity")
+        || s.equals("-infinity")
+        || s.equals("+infinity")) {
+      return null;
+    }
+
+    try {
+      return Double.parseDouble(s);
+    } catch (NumberFormatException e) {
+      return Double.NaN;
+    }
+  }
+
+  static TernaryValue isStrWhiteSpaceChar(int c) {
+    switch (c) {
+      case '\u000B': // <VT>
+        return TernaryValue.TRUE;
+      case ' ': // <SP>
+      case '\n': // <LF>
+      case '\r': // <CR>
+      case '\t': // <TAB>
+      case '\u00A0': // <NBSP>
+      case '\u000C': // <FF>
+      case '\u2028': // <LS>
+      case '\u2029': // <PS>
+      case '\uFEFF': // <BOM>
+        return TernaryValue.TRUE;
+      default:
+        return (Character.getType(c) == Character.SPACE_SEPARATOR)
+            ? TernaryValue.TRUE : TernaryValue.FALSE;
+    }
+  }
+
+// relevant test
+// com.google.javascript.jscomp.NormalizeTest::testPropertyIsConstant1
+  public void testPropertyIsConstant1() throws Exception {
+    testSame("var a = {};a.CONST = 3; var b = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testPropertyIsConstant2
+  public void testPropertyIsConstant2() throws Exception {
+    testSame("var a = {CONST: 3}; var b = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testGetterPropertyIsConstant
+  public void testGetterPropertyIsConstant() throws Exception {
+    testSame("var a = { get CONST() {return 3} }; " +
+             "var b = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testSetterPropertyIsConstant
+  public void testSetterPropertyIsConstant() throws Exception {
+    
+    testSame("var a = { set CONST(b) {throw 'invalid'} }; " +
+             "var c = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testRenamingConstantProperties
+  public void testRenamingConstantProperties() {
+    
+    
+    
+    new WithCollapse().testConstantProperties();
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPostprocessTest::testFooDotBar
+  public void testFooDotBar() {
+    testPass("goog.global, foo.bar", "foo, 'bar'");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPostprocessTest::testFooGetElemBar
+  public void testFooGetElemBar() {
+    testPass("goog.global, foo[bar]", "foo, bar");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPostprocessTest::testFooBar
+  public void testFooBar() {
+    testPass("goog.global, foo$bar", "goog.global, 'foo$bar'");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testDeclaration
+  public void testDeclaration() {
+    test("goog.testing.ObjectPropertyString = function() {}",
+         "JSCompiler_ObjectPropertyString = function() {}");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testFooBar
+  public void testFooBar() {
+    test("new goog.testing.ObjectPropertyString(foo, 'bar')",
+         "new JSCompiler_ObjectPropertyString(goog.global, foo.bar)");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testFooPrototypeBar
+  public void testFooPrototypeBar() {
+    test("new goog.testing.ObjectPropertyString(foo.prototype, 'bar')",
+         "new JSCompiler_ObjectPropertyString(goog.global, " +
+         "foo.prototype.bar)");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testInvalidNumArgumentsError
+  public void testInvalidNumArgumentsError() {
+    testSame(new String[] {"new goog.testing.ObjectPropertyString()"},
+        ObjectPropertyStringPreprocess.INVALID_NUM_ARGUMENTS_ERROR);
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testQualifedNameExpectedError
+  public void testQualifedNameExpectedError() {
+    testSame(
+        new String[] {
+          "new goog.testing.ObjectPropertyString(foo[a], 'bar')"
+        },
+        ObjectPropertyStringPreprocess.QUALIFIED_NAME_EXPECTED_ERROR);
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testStringLiteralExpectedError
+  public void testStringLiteralExpectedError() {
+    testSame(new String[] {"new goog.testing.ObjectPropertyString(foo, bar)"},
+        ObjectPropertyStringPreprocess.STRING_LITERAL_EXPECTED_ERROR);
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testNoFix
+  public void testNoFix() {
+    testSame("x = x");
+    testSame("x = x = x");
+    testSame("x = x = x(x)");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testFix
+  public void testFix() {
+    test("       var a,b,x; x = a[x] = b[x]",
+         "var c; var a,b,x; c = a[x] = b[x], x = c");
+    test("       var a,b,x; x = a[1] = x.b",
+         "var c; var a,b,x; c = a[1] = x.b, x = c");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testCombinedFix
+  public void testCombinedFix() {
+    test("       var a,b,c, x; x = a[x] = b[x] = c[x]",
+         "var d; var a,b,c, x; d = a[x] = b[x] = c[x], x = d");
+    test("       var a,b,c, x; x = a[1] = b[1] = x[1]",
+         "var d; var a,b,c, x; d = a[1] = b[1] = x[1], x = d");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testNestedFix1
+  public void testNestedFix1() {
+    test("            var a,b,c,x,y;y= x = a[x] = b[y] = c[x];",
+         "var e;var d;var a,b,c,x,y;d=(e = a[x] = b[y] = c[x], x=e), y=d;");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testNestedFix2
+  public void testNestedFix2() {
+    test("            var a,b,c,x,y;y=a[x]= x=a[x]=b[y]=c[x];",
+         "var e;var d;var a,b,c,x,y;d=a[x]=(e=a[x]=b[y]=c[x], x=e), y=d;");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testJqueryTest
+  public void testJqueryTest() {
+    test("       z = bar[z] = bar[z] || [];",
+         "var a; a = bar[z] = bar[z] || [], z=a");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testNoCrossingScope
+  public void testNoCrossingScope() {
+    testSame("x = function(x) { return a[x] + b[x] }");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testForLoops
+  public void testForLoops() {
+    test("       var a,b,x;for(x = a[x] = b[x];;)        {}",
+         "var c; var a,b,x;for(c = a[x] = b[x], x = c;;) {}");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testForInLoops
+  public void testForInLoops() {
+    test("       var a,b,x;for(var j in  x = a[x] = b[x])         {}",
+         "var c; var a,b,x;for(var j in (c = a[x] = b[x], x = c)) {}");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testUsedInCondition
+  public void testUsedInCondition() {
+    test("       var a,b,x;if(x = a[x] = b[x]) {}",
+         "var c; var a,b,x;if((c = a[x] = b[x], x = c)) {}");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testUsedInExpression
+  public void testUsedInExpression() {
+    test("       var a,b,x; FOO( x = a[x] = b[x]);",
+         "var c; var a,b,x; FOO((c = a[x] = b[x], x = c));");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testLocalScope
+  public void testLocalScope() {
+    test("function FOO() {       var a,b,x; x = a[x] = b[x]}",
+         "function FOO() {var c; var a,b,x; c = a[x] = b[x], x = c}");
+    test("function FOO() {       var a,b,x; x = a[1] = x.b}",
+         "function FOO() {var c; var a,b,x; c = a[1] = x.b, x = c}");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testProperNames1
+  public void testProperNames1() {
+    test("var a,b,c,d,x;" +
+         "function f() {" +
+         "  function g() { return a }" +
+         "  x = a[x] = b[x];" +
+         "  return g();" +
+         "}",
+
+         "var a,b,c,d,x;" +
+         "function f() {" +
+         "  var e;" +
+         "  function g() { return a }" +
+         "  e = a[x] = b[x], x = e;" +
+         "  return g();" +
+         "}");
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testProperNames2
+  public void testProperNames2() {
+    test("var a;",
+         "function f() {" +
+         " var b,x; x = a[x] = b[x];" +
+         " return g();" +
+         "}",
+
+         "function f() {" +
+         " var c;" +
+         " var b,x; c = a[x] = b[x], x = c;" +
+         " return g();" +
+         "}", null, null);
+  }
+
+// com.google.javascript.jscomp.OperaCompoundAssignFixTest::testSaveShadowing
+  public void testSaveShadowing() {
+    
+    test("       var a,b,x; x = a[x] = b[x];" +
+         "function FOO() {       var a,b,x; x = a[x] = b[x]}",
+
+         "var c; var a,b,x; c = a[x] = b[x], x = c;" +
+         "function FOO() {var c; var a,b,x; c = a[x] = b[x], x = c}");
+
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testSimple
+  public void testSimple() {
+    test("function foo()   { alert(arguments[0]); }",
+         "function foo(p0) { alert(p0); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoVarArgs
+  public void testNoVarArgs() {
+    testSame("function f(a,b,c) { alert(a + b + c) }");
+
+    test("function f(a,b,c) { alert(arguments[0]) }",
+         "function f(a,b,c) { alert(a) }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testMissingVarArgs
+  public void testMissingVarArgs() {
+    testSame("function f() { alert(arguments[x]) }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testArgumentRefOnNamedParameter
+  public void testArgumentRefOnNamedParameter() {
+    test("function f(a,b) { alert(arguments[0]) }",
+         "function f(a,b) { alert(a) }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoVarArgs
+  public void testTwoVarArgs() {
+    test("function foo(a) { alert(arguments[1] + arguments[2]); }",
+         "function foo(a, p0, p1) { alert(p0 + p1); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoFourArgsTwoUsed
+  public void testTwoFourArgsTwoUsed() {
+    test("function foo() { alert(arguments[0] + arguments[3]); }",
+         "function foo(p0, p1, p2, p3) { alert(p0 + p3); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testOneRequired
+  public void testOneRequired() {
+    test("function foo(req0, var_args) { alert(req0 + arguments[1]); }",
+         "function foo(req0, var_args) { alert(req0 + var_args); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoRequiredSixthVarArgReferenced
+  public void testTwoRequiredSixthVarArgReferenced() {
+    test("function foo(r0, r1, var_args) {alert(r0 + r1 + arguments[5]);}",
+         "function foo(r0, r1, var_args, p0, p1, p2) { alert(r0 + r1 + p2); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoRequiredOneOptionalFifthVarArgReferenced
+  public void testTwoRequiredOneOptionalFifthVarArgReferenced() {
+    test("function foo(r0, r1, opt_1)"
+       + "  {alert(r0 + r1 + opt_1 + arguments[4]);}",
+         "function foo(r0, r1, opt_1, p0, p1)"
+       + "  {alert(r0 + r1 + opt_1 + p1); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoRequiredTwoOptionalSixthVarArgReferenced
+  public void testTwoRequiredTwoOptionalSixthVarArgReferenced() {
+    test("function foo(r0, r1, opt_1, opt_2)"
+       + "  {alert(r0 + r1 + opt_1 + opt_2 + arguments[5]);}",
+         "function foo(r0, r1, opt_1, opt_2, p0, p1)"
+       + "  {alert(r0 + r1 + opt_1 + opt_2 + p1); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctions
+  public void testInnerFunctions() {
+    test("function f() { function b(  ) { arguments[0]  }}",
+         "function f() { function b(p0) {            p0 }}");
+
+    test("function f(  ) { function b() { }  arguments[0] }",
+         "function f(p0) { function b() { }            p0 }");
+
+    test("function f( )  { arguments[0]; function b(  ) { arguments[0] }}",
+         "function f(p1) {           p1; function b(p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsWithNamedArgumentInInnerFunction
+  public void testInnerFunctionsWithNamedArgumentInInnerFunction() {
+    test("function f() { function b(x   ) { arguments[1] }}",
+         "function f() { function b(x,p0) {           p0 }}");
+
+    test("function f(  ) { function b(x) { }  arguments[0] }",
+         "function f(p0) { function b(x) { }            p0 }");
+
+    test("function f( )  { arguments[0]; function b(x   ) { arguments[1] }}",
+         "function f(p1) {           p1; function b(x,p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsWithNamedArgumentInOutterFunction
+  public void testInnerFunctionsWithNamedArgumentInOutterFunction() {
+    test("function f(x) { function b(  ) { arguments[0] }}",
+         "function f(x) { function b(p0) {           p0 }}");
+
+    test("function f(x   ) { function b() { }  arguments[1] }",
+         "function f(x,p0) { function b() { }            p0 }");
+
+    test("function f(x   ) { arguments[1]; function b(  ) { arguments[0] }}",
+         "function f(x,p1) {           p1; function b(p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsWithNamedArgumentInInnerAndOutterFunction
+  public void testInnerFunctionsWithNamedArgumentInInnerAndOutterFunction() {
+    test("function f(x) { function b(x   ) { arguments[1] }}",
+         "function f(x) { function b(x,p0) {           p0 }}");
+
+    test("function f(x   ) { function b(x) { }  arguments[1] }",
+         "function f(x,p0) { function b(x) { }            p0 }");
+
+    test("function f(x   ) { arguments[1]; function b(x   ) { arguments[1] }}",
+         "function f(x,p1) {           p1; function b(x,p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsAfterArguments
+  public void testInnerFunctionsAfterArguments() {
+    
+    
+    test("function f(  ) { arguments[0]; function b() { function c() { }} }",
+         "function f(p0) {           p0; function b() { function c() { }} }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoOptimizationWhenGetProp
+  public void testNoOptimizationWhenGetProp() {
+    testSame("function f() { arguments[0]; arguments.size }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoOptimizationWhenIndexIsNotNumberConstant
+  public void testNoOptimizationWhenIndexIsNotNumberConstant() {
+    testSame("function f() { arguments[0]; arguments['callee'].length}");
+    testSame("function f() { arguments[0]; arguments.callee.length}");
+    testSame(
+        "function f() { arguments[0]; var x = 'callee'; arguments[x].length}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoOptimizationWhenArgumentIsUsedAsFunctionCall
+  public void testNoOptimizationWhenArgumentIsUsedAsFunctionCall() {
+    testSame("function f() {arguments[0]()}");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoRemoval
+  public void testNoRemoval() {
+    testSame("function foo(p1) { } foo(1); foo(2)");
+    testSame("function foo(p1) { } foo(1,2); foo(3,4)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testSimpleRemoval
+  public void testSimpleRemoval() {
+    test("function foo(p1) { } foo(); foo()",
+         "function foo() {var p1;} foo(); foo()");
+    test("function foo(p1) { } foo(1); foo(1)",
+         "function foo() {var p1 = 1;} foo(); foo()");
+    test("function foo(p1) { } foo(1,2); foo(1,4)",
+         "function foo() {var p1 = 1;} foo(2); foo(4)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNotAFunction
+  public void testNotAFunction() {
+    testSame("var x = 1; x; x = 2");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalNamedFunction
+  public void testRemoveOneOptionalNamedFunction() {
+    test("function foo(p1) { } foo()", "function foo() {var p1} foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDifferentScopes
+  public void testDifferentScopes() {
+    test("function f(a, b) {} f(1, 2); f(1, 3); " +
+        "function h() {function g(a) {} g(4); g(5);} f(1, 2);",
+        "function f(b) {var a = 1} f(2); f(3); " +
+        "function h() {function g(a) {} g(4); g(5);} f(2);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testOptimizeOnlyImmutableValues
+  public void testOptimizeOnlyImmutableValues() {
+    test("function foo(a) {}; foo(undefined);",
+         "function foo() {var a = undefined}; foo()");
+    test("function foo(a) {}; foo(null);",
+        "function foo() {var a = null}; foo()");
+    test("function foo(a) {}; foo(1);",
+         "function foo() {var a = 1}; foo()");
+    test("function foo(a) {}; foo('abc');",
+        "function foo() {var a = 'abc'}; foo()");
+
+    test("var foo = function(a) {}; foo(undefined);",
+         "var foo = function() {var a = undefined}; foo()");
+    test("var foo = function(a) {}; foo(null);",
+         "var foo = function() {var a = null}; foo()");
+    test("var foo = function(a) {}; foo(1);",
+         "var foo = function() {var a = 1}; foo()");
+    test("var foo = function(a) {}; foo('abc');",
+         "var foo = function() {var a = 'abc'}; foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalVarAssignment
+  public void testRemoveOneOptionalVarAssignment() {
+    test("var foo = function (p1) { }; foo()",
+        "var foo = function () {var p1}; foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoOptimizeCall
+  public void testDoOptimizeCall() {
+    testSame("var foo = function () {}; foo(); foo.call();");
+    
+    testSame("var foo = function () {}; foo(); foo.call(this);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.call(this, 1);");
+    testSame("var foo = function () {}; foo(); foo.call(null);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.call(null, 1);");
+
+    testSame("var foo = function () {}; foo.call();");
+    
+    testSame("var foo = function () {}; foo.call(this);");
+    testSame("var foo = function (a, b) {}; foo.call(this, 1);");
+    testSame("var foo = function () {}; foo.call(null);");
+    testSame("var foo = function (a, b) {}; foo.call(null, 1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoOptimizeApply
+  public void testDoOptimizeApply() {
+    testSame("var foo = function () {}; foo(); foo.apply();");
+    testSame("var foo = function () {}; foo(); foo.apply(this);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.apply(this, 1);");
+    testSame("var foo = function () {}; foo(); foo.apply(null);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.apply(null, []);");
+
+    testSame("var foo = function () {}; foo.apply();");
+    testSame("var foo = function () {}; foo.apply(this);");
+    testSame("var foo = function (a, b) {}; foo.apply(this, 1);");
+    testSame("var foo = function () {}; foo.apply(null);");
+    testSame("var foo = function (a, b) {}; foo.apply(null, []);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalExpressionAssign
+  public void testRemoveOneOptionalExpressionAssign() {
+    
+    
+    testSame("var foo; foo = function (p1) { }; foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalOneRequired
+  public void testRemoveOneOptionalOneRequired() {
+    test("function foo(p1, p2) { } foo(1); foo(2)",
+        "function foo(p1) {var p2} foo(1); foo(2)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalMultipleCalls
+  public void testRemoveOneOptionalMultipleCalls() {
+    test( "function foo(p1, p2) { } foo(1); foo(2); foo()",
+        "function foo(p1) {var p2} foo(1); foo(2); foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalMultiplePossibleDefinition
+  public void testRemoveOneOptionalMultiplePossibleDefinition() {
+    String src = "var goog = {};" +
+        "goog.foo = function (p1, p2) { };" +
+        "goog.foo = function (q1, q2) { };" +
+        "goog.foo = function (r1, r2) { };" +
+        "goog.foo(1); goog.foo(2); goog.foo()";
+
+    String expected = "var goog = {};" +
+        "goog.foo = function (p1) { var p2 };" +
+        "goog.foo = function (q1) { var q2 };" +
+        "goog.foo = function (r1) { var r2 };" +
+        "goog.foo(1); goog.foo(2); goog.foo()";
+    
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveTwoOptionalMultiplePossibleDefinition
+  public void testRemoveTwoOptionalMultiplePossibleDefinition() {
+    String src = "var goog = {};" +
+        "goog.foo = function (p1, p2, p3, p4) { };" +
+        "goog.foo = function (q1, q2, q3, q4) { };" +
+        "goog.foo = function (r1, r2, r3, r4) { };" +
+        "goog.foo(1,0); goog.foo(2,1); goog.foo()";
+
+    String expected = "var goog = {};" +
+        "goog.foo = function(p1, p2) { var p4; var p3};" +
+        "goog.foo = function(q1, q2) { var q4; var q3};" +
+        "goog.foo = function(r1, r2) { var r4; var r3};" +
+        "goog.foo(1,0); goog.foo(2,1); goog.foo()";
+    
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testConstructorOptArgsNotRemoved
+  public void testConstructorOptArgsNotRemoved() {
+    String src =
+        "" +
+        "var goog = function(){};" +
+        "goog.prototype.foo = function(a,b) {};" +
+        "goog.prototype.bar = function(a) {};" +
+        "goog.bar.inherits(goog.foo);" +
+        "new goog.foo(2,3);" +
+        "new goog.foo(1,2);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMultipleUnknown
+  public void testMultipleUnknown() {
+    String src = "var goog1 = {};" +
+        "goog1.foo = function () { };" +
+        "var goog2 = {};" +
+        "goog2.foo = function (p1) { };" +
+        "var x = getGoog();" +
+        "x.foo()";
+
+    String expected = "var goog1 = {};" +
+        "goog1.foo = function () { };" +
+        "var goog2 = {};" +
+        "goog2.foo = function () { var p1 };" +
+        "var x = getGoog();" +
+        "x.foo()";
+    
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testSingleUnknown
+  public void testSingleUnknown() {
+    String src =
+        "var goog2 = {};" +
+        "goog2.foo = function (p1) { };" +
+        "var x = getGoog();" +
+        "x.foo()";
+
+    String expected =
+        "var goog2 = {};" +
+        "goog2.foo = function () { var p1 };" +
+        "var x = getGoog();" +
+        "x.foo()";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveVarArg
+  public void testRemoveVarArg() {
+    test("function foo(p1, var_args) { } foo(1); foo(2)",
+        "function foo(p1) { var var_args } foo(1); foo(2)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize
+  public void testAliasMethodsDontGetOptimize() {
+    String src =
+        "var foo = function(a, b) {};" +
+        "var goog = {};" +
+        "goog.foo = foo;" +
+        "goog.prototype.bar = goog.foo;" +
+        "new goog().bar(1,2);" +
+        "foo(2);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize2
+  public void testAliasMethodsDontGetOptimize2() {
+    String src =
+        "var foo = function(a, b) {};" +
+        "var bar = foo;" +
+        "foo(1);" +
+        "bar(2,3);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize3
+  public void testAliasMethodsDontGetOptimize3() {
+    String src =
+        "var array = {};" +
+        "array[0] = function(a, b) {};" +
+        "var foo = array[0];" + 
+        "foo(1);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize4
+  public void testAliasMethodsDontGetOptimize4() {
+    String src = "function foo(bar) {};" +
+        "baz = function(a) {};" +
+        "baz(1);" +
+        "foo(baz);"; 
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMethodsDefinedInArraysDontGetOptimized
+  public void testMethodsDefinedInArraysDontGetOptimized() {
+    String src =
+        "var array = [true, function (a) {}];" +
+        "array[1](1)";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMethodsDefinedInObjectDontGetOptimized
+  public void testMethodsDefinedInObjectDontGetOptimized() {
+    String src =
+      "var object = { foo: function bar() {} };" +
+      "object.foo(1)";
+    testSame(src);
+    src =
+      "var object = { foo: function bar() {} };" +
+      "object['foo'](1)";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveConstantArgument
+  public void testRemoveConstantArgument() {
+    
+    test("function foo(p1, p2) {}; foo(1,2); foo(2,2);",
+         "function foo(p1) {var p2 = 2}; foo(1); foo(2)");
+
+    
+    testSame("function foo(p1, p2) {}; foo(1); foo(2,3);");
+
+    
+    test("function foo(a,b,c){}; foo(1, 2, 3); foo(1, 2, 4); foo(2, 2, 3)",
+         "function foo(a,c){var b=2}; foo(1, 3); foo(1, 4); foo(2, 3)");
+
+    
+    test("function foo(a) {}; foo(1); foo(1.0);",
+         "function foo() {var a = 1;}; foo(); foo();");
+
+    
+    String src =
+        "" +
+        "function Person(){}; Person.prototype.run = function(a, b) {};" +
+        "Person.run(1, 'a'); Person.run(2, 'a')";
+    String expected =
+        "function Person(){}; Person.prototype.run = " +
+        "function(a) {var b = 'a'};" +
+        "Person.run(1); Person.run(2)";
+    test(src, expected);
+
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testCanDeleteArgumentsAtAnyPosition
+  public void testCanDeleteArgumentsAtAnyPosition() {
+    
+    String src =
+        "function foo(a,b,c,d,e) {};" +
+        "foo(1,2,3,4,5);" +
+        "foo(2,2,4,4,5);";
+    String expected =
+        "function foo(a,c) {var b=2; var d=4; var e=5;};" +
+        "foo(1,3);" +
+        "foo(2,4);";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoOptimizationForExternsFunctions
+  public void testNoOptimizationForExternsFunctions() {
+    testSame("function _foo(x, y, z){}; _foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoOptimizationForGoogExportSymbol
+  public void testNoOptimizationForGoogExportSymbol() {
+    testSame("goog.exportSymbol('foo', foo);" +
+             "function foo(x, y, z){}; foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoArgumentRemovalNonEqualNodes
+  public void testNoArgumentRemovalNonEqualNodes() {
+    testSame("function foo(a){}; foo('bar'); foo('baz');");
+    testSame("function foo(a){}; foo(1.0); foo(2.0);");
+    testSame("function foo(a){}; foo(true); foo(false);");
+    testSame("var a = 1, b = 2; function foo(a){}; foo(a); foo(b);");
+    testSame("function foo(a){}; foo(/&/g); foo(/</g);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testFunctionPassedAsParam
+  public void testFunctionPassedAsParam() {
+    String src =
+        " function person(){}; " +
+        "person.prototype.run = function(a, b) {};" +
+        "person.prototype.walk = function() {};" +
+        "person.prototype.foo = function() { this.run(this.walk, 0.1)};" +
+        "person.foo();";
+    String expected =
+        "function person(){}; person.prototype.run = function(a) {" +
+        "  var b = 0.1;};" +
+        "person.prototype.walk = function() {};" +
+        "person.prototype.foo = function() { this.run(this.walk)};" +
+        "person.foo();";
+
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testCallIsIgnore
+  public void testCallIsIgnore() {
+    testSame("var goog;" +
+        "goog.foo = function(a, opt) {};" +
+        "var bar = function(){goog.foo.call(this, 1)};" +
+        "goog.foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testApplyIsIgnore
+  public void testApplyIsIgnore() {
+    testSame("var goog;" +
+        "goog.foo = function(a, opt) {};" +
+        "var bar = function(){goog.foo.apply(this, 1)};" +
+        "goog.foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testFunctionWithReferenceToArgumentsShouldNotBeOptimize
+  public void testFunctionWithReferenceToArgumentsShouldNotBeOptimize() {
+    testSame("function foo(a,b,c) { return arguments.size; };" +
+             "foo(1);");
+    testSame("var foo = function(a,b,c) { return arguments.size }; foo(1);");
+    testSame("var foo = function bar(a,b,c) { return arguments.size }; " +
+             "foo(2); bar(2);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testFunctionWithTwoNames
+  public void testFunctionWithTwoNames() {
+    testSame("var foo = function bar(a,b) {};");
+    testSame("var foo = function bar(a,b) {}; foo(1)");
+    testSame("var foo = function bar(a,b) {}; bar(1);");
+    testSame("var foo = function bar(a,b) {}; foo(1); foo(2)");
+    testSame("var foo = function bar(a,b) {}; foo(1); bar(1)");
+    testSame("var foo = function bar(a,b) {}; foo(1); bar(2)");
+    testSame("var foo = function bar(a,b) {}; foo(1,2); bar(2,1)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRecursion
+  public void testRecursion() {
+    test("var foo = function (a,b) {foo(1, b)}; foo(1, 2)",
+         "var foo = function (b) {var a=1; foo(b)}; foo(2)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testConstantArgumentsToConstructorCanBeOptimized
+  public void testConstantArgumentsToConstructorCanBeOptimized() {
+    String src = "function foo(a) {};" +
+        "var bar = new foo(1);";
+    String expected = "function foo() {var a=1;};" +
+        "var bar = new foo();";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testOptionalArgumentsToConstructorCanBeOptimized
+  public void testOptionalArgumentsToConstructorCanBeOptimized() {
+    String src = "function foo(a) {};" +
+        "var bar = new foo();";
+    String expected = "function foo() {var a;};" +
+        "var bar = new foo();";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRegexesCanBeInlined
+  public void testRegexesCanBeInlined() {
+    test("function foo(a) {}; foo(/abc/);",
+         "function foo() {var a = /abc/}; foo();");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testConstructorUsedAsFunctionCanBeOptimized
+  public void testConstructorUsedAsFunctionCanBeOptimized() {
+    String src = "function foo(a) {};" +
+        "var bar = new foo(1);" +
+        "foo(1);";
+    String expected = "function foo() {var a=1;};" +
+        "var bar = new foo();" +
+        "foo();";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeConstructorWhenArgumentsAreNotEqual
+  public void testDoNotOptimizeConstructorWhenArgumentsAreNotEqual() {
+    testSame("function Foo(a) {};" +
+        "var bar = new Foo(1);" +
+        "var baz = new Foo(2);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeArrayElements
+  public void testDoNotOptimizeArrayElements() {
+    testSame("var array = [function (a, b) {}];");
+    testSame("var array = [function f(a, b) {}]");
+
+    testSame("var array = [function (a, b) {}];" +
+        "array[0](1, 2);" +
+        "array[0](1);");
+
+    testSame("var array = [];" +
+        "function foo(a, b) {};" +
+        "array[0] = foo;");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testOptimizeThis
+  public void testOptimizeThis() {
+    String src = "function foo() {" +
+        "var bar = function (a, b) {};" +
+        "this.bar = function (a, b) {};" +
+        "this.bar(3);" +
+        "bar(2);}";
+    String expected = "function foo() {" +
+        "var bar = function () {var b; var a = 2;};" +
+        "this.bar = function () {var b; var a = 3;};" +
+        "this.bar();" +
+        "bar();}";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeWhenArgumentsPassedAsParameter
+  public void testDoNotOptimizeWhenArgumentsPassedAsParameter() {
+    testSame("function foo(a) {}; foo(arguments)");
+    testSame("function foo(a) {}; foo(arguments[0])");
+
+    test("function foo(a, b) {}; foo(arguments, 1)",
+         "function foo(a) {var b = 1}; foo(arguments)");
+
+    test("function foo(a, b) {}; foo(arguments)",
+         "function foo(a) {var b}; foo(arguments)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeGoogExportFunctions
+  public void testDoNotOptimizeGoogExportFunctions() {
+    testSame("function foo(a, b) {}; foo(); goog.export_function(foo);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeJSCompiler_renameProperty
+  public void testDoNotOptimizeJSCompiler_renameProperty() {
+    testSame("function JSCompiler_renameProperty(a) {return a};" +
+             "JSCompiler_renameProperty('a');");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeJSCompiler_ObjectPropertyString
+  public void testDoNotOptimizeJSCompiler_ObjectPropertyString() {
+    testSame("function JSCompiler_ObjectPropertyString(a, b) {return a[b]};" +
+             "JSCompiler_renameProperty(window,'b');");
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteUsedResult1
+  public void testNoRewriteUsedResult1() throws Exception {
+    String source = newlineJoin(
+        "function a(){return 1}",
+        "var x = a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteUsedResult2
+  public void testNoRewriteUsedResult2() throws Exception {
+    String source = newlineJoin(
+        "var a = function(){return 1}",
+        "a(); var b = a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult1
+  public void testRewriteUnusedResult1() throws Exception {
+    String source = newlineJoin(
+        "function a(){return 1}",
+        "a()");
+    String expected = newlineJoin(
+        "function a(){return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult2
+  public void testRewriteUnusedResult2() throws Exception {
+    String source = newlineJoin(
+        "var a; a = function(){return 1}",
+        "a()");
+    String expected = newlineJoin(
+        "var a; a = function(){return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult3
+  public void testRewriteUnusedResult3() throws Exception {
+    String source = newlineJoin(
+        "var a = function(){return 1}",
+        "a()");
+    String expected = newlineJoin(
+        "var a = function(){return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult4a
+  public void testRewriteUnusedResult4a() throws Exception {
+    String source = newlineJoin(
+        "var a = function(){return a()}",
+        "a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult4b
+  public void testRewriteUnusedResult4b() throws Exception {
+    String source = newlineJoin(
+        "var a = function b(){return b()}",
+        "a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult4c
+  public void testRewriteUnusedResult4c() throws Exception {
+    String source = newlineJoin(
+        "function a(){return a()}",
+        "a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult5
+  public void testRewriteUnusedResult5() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return args};",
+        "var o = new a;",
+        "o.foo()");
+    String expected = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return};",
+        "var o = new a;",
+        "o.foo()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult6
+  public void testRewriteUnusedResult6() throws Exception {
+    String source = newlineJoin(
+        "function a(){return (g = 1)}",
+        "a()");
+    String expected = newlineJoin(
+        "function a(){g = 1;return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult7a
+  public void testRewriteUnusedResult7a() throws Exception {
+    String source = newlineJoin(
+        "function a() { return 1 }",
+        "function b() { return a() }",
+        "function c() { return b() }",
+        "c();");
+
+    String expected = newlineJoin(
+        "function a() { return 1 }",
+        "function b() { return a() }",
+        "function c() { b(); return }",
+        "c();");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult7b
+  public void testRewriteUnusedResult7b() throws Exception {
+    String source = newlineJoin(
+        "c();",
+        "function c() { return b() }",
+        "function b() { return a() }",
+        "function a() { return 1 }");
+
+    
+    String expected = newlineJoin(
+        "c();",
+        "function c() { b(); return }",
+        "function b() { return a() }",
+        "function a() { return 1 }");
+    test(source, expected);
+
+    
+    source = expected;
+    expected = newlineJoin(
+        "c();",
+        "function c() { b(); return }",
+        "function b() { a(); return }",
+        "function a() { return 1 }");
+    test(source, expected);
+
+    
+    source = expected;
+    expected = newlineJoin(
+        "c();",
+        "function c() { b(); return }",
+        "function b() { a(); return }",
+        "function a() { return }");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult8
+  public void testRewriteUnusedResult8() throws Exception {
+    String source = newlineJoin(
+        "function a() { return c() }",
+        "function b() { return a() }",
+        "function c() { return b() }",
+        "c();");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteObjLit1
+  public void testNoRewriteObjLit1() throws Exception {
+    String source = newlineJoin(
+        "var a = {b:function(){return 1;}}",
+        "for(c in a) (a[c])();",
+        "a.b()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteObjLit2
+  public void testNoRewriteObjLit2() throws Exception {
+    String source = newlineJoin(
+        "var a = {b:function fn(){return 1;}}",
+        "for(c in a) (a[c])();",
+        "a.b()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteArrLit
+  public void testNoRewriteArrLit() throws Exception {
+    String source = newlineJoin(
+        "var a = [function(){return 1;}]",
+        "(a[0])();");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod1
+  public void testPrototypeMethod1() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "var x = new c;",
+        "x.a()");
+    String result = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return}",
+        "var x = new c;",
+        "x.a()");
+    test(source, result);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod2
+  public void testPrototypeMethod2() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "goog.reflect.object({a: 'v'})",
+        "var x = new c;",
+        "x.a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod3
+  public void testPrototypeMethod3() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "var x = new c;",
+        "for(var key in goog.reflect.object({a: 'v'})){ x[key](); }",
+        "x.a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod4
+  public void testPrototypeMethod4() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "var x = new c;",
+        "for(var key in goog.reflect.object({a: 'v'})){ x[key](); }");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testCallOrApply
+  public void testCallOrApply() throws Exception {
+    
+    testSame("function a() {return 1}; a.call(new foo);");
+
+    testSame("function a() {return 1}; a.apply(new foo);");
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUseSiteRemoval
+  public void testRewriteUseSiteRemoval() throws Exception {
+    String source = newlineJoin(
+        "function a() { return {\"_id\" : 1} }",
+        "a();");
+    String expected = newlineJoin(
+        "function a() { return }",
+        "a();");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testNoFunction
+  public void testNoFunction() {
+    replace("\"foo\"");
+    replace("var foo");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testOneFunction
+  public void testOneFunction() {
+    replace("\"foo\";function foo(){\"foo\"}");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testTwoFunctions
+  public void testTwoFunctions() {
+    replace("\"foo\";function f1(){\"foo\"}function f2(){\"foo\"}");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testInnerFunctions
+  public void testInnerFunctions() {
+    replace("\"foo\";function f1(){\"foo\";function f2(){\"foo\"}}");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testManyFunctions
+  public void testManyFunctions() {
+    StringBuilder sb = new StringBuilder("\"foo\";");
+    for (int i = 0; i < 20; i++) {
+      sb.append("function f");
+      sb.append(i);
+      sb.append("(){\"foo\"}");
+    }
+    replace(sb.toString());
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison1
+  public void testUndefinedComparison1() {
+    fold("undefined == undefined", "true");
+    fold("undefined == null", "true");
+    fold("undefined == void 0", "true");
+
+    fold("undefined == 0", "false");
+    fold("undefined == 1", "false");
+    fold("undefined == 'hi'", "false");
+    fold("undefined == true", "false");
+    fold("undefined == false", "false");
+
+    fold("undefined === undefined", "true");
+    fold("undefined === null", "false");
+    fold("undefined === void 0", "true");
+
+    foldSame("undefined == this");
+    foldSame("undefined == x");
+
+    fold("undefined != undefined", "false");
+    fold("undefined != null", "false");
+    fold("undefined != void 0", "false");
+
+    fold("undefined != 0", "true");
+    fold("undefined != 1", "true");
+    fold("undefined != 'hi'", "true");
+    fold("undefined != true", "true");
+    fold("undefined != false", "true");
+
+    fold("undefined !== undefined", "false");
+    fold("undefined !== void 0", "false");
+    fold("undefined !== null", "true");
+
+    foldSame("undefined != this");
+    foldSame("undefined != x");
+
+    fold("undefined < undefined", "false");
+    fold("undefined > undefined", "false");
+    fold("undefined >= undefined", "false");
+    fold("undefined <= undefined", "false");
+
+    fold("0 < undefined", "false");
+    fold("true > undefined", "false");
+    fold("'hi' >= undefined", "false");
+    fold("null <= undefined", "false");
+
+    fold("undefined < 0", "false");
+    fold("undefined > true", "false");
+    fold("undefined >= 'hi'", "false");
+    fold("undefined <= null", "false");
+
+    fold("null == undefined", "true");
+    fold("0 == undefined", "false");
+    fold("1 == undefined", "false");
+    fold("'hi' == undefined", "false");
+    fold("true == undefined", "false");
+    fold("false == undefined", "false");
+    fold("null === undefined", "false");
+    fold("void 0 === undefined", "true");
+
+    foldSame("this == undefined");
+    foldSame("x == undefined");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison2
+  public void testUndefinedComparison2() {
+    fold("\"123\" !== void 0", "true");
+    fold("\"123\" === void 0", "false");
+
+    fold("void 0 !== \"123\"", "true");
+    fold("void 0 === \"123\"", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison3
+  public void testUndefinedComparison3() {
+    fold("\"123\" !== undefined", "true");
+    fold("\"123\" === undefined", "false");
+
+    fold("undefined !== \"123\"", "true");
+    fold("undefined === \"123\"", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison4
+  public void testUndefinedComparison4() {
+    fold("1 !== void 0", "true");
+    fold("1 === void 0", "false");
+
+    fold("null !== void 0", "true");
+    fold("null === void 0", "false");
+
+    fold("undefined !== void 0", "false");
+    fold("undefined === void 0", "true");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUnaryOps
+  public void testUnaryOps() {
+    
+    foldSame("!foo()");
+    foldSame("~foo()");
+    foldSame("-foo()");
+
+    
+    fold("a=!true", "a=false");
+    fold("a=!10", "a=false");
+    fold("a=!false", "a=true");
+    fold("a=!foo()", "a=!foo()");
+    fold("a=-0", "a=0");
+    fold("a=-Infinity", "a=-Infinity");
+    fold("a=-NaN", "a=NaN");
+    fold("a=-foo()", "a=-foo()");
+    fold("a=~~0", "a=0");
+    fold("a=~~10", "a=10");
+    fold("a=~-7", "a=6");
+
+    fold("a=+true", "a=1");
+    fold("a=+10", "a=10");
+    fold("a=+false", "a=0");
+    foldSame("a=+foo()");
+    foldSame("a=+f");
+    fold("a=+(f?true:false)", "a=+(f?1:0)"); 
+    fold("a=+0", "a=0");
+    fold("a=+Infinity", "a=Infinity");
+    fold("a=+NaN", "a=NaN");
+    fold("a=+-7", "a=-7");
+    fold("a=+.5", "a=.5");
+
+    fold("a=~0x100000000", "a=~0x100000000",
+         PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("a=~-0x100000000", "a=~-0x100000000",
+         PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("a=~.5", "~.5", PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUnaryOpsStringCompare
+  public void testUnaryOpsStringCompare() {
+    
+    assertResultString("a=-1", "a=-1");
+    assertResultString("a=~0", "a=-1");
+    assertResultString("a=~1", "a=-2");
+    assertResultString("a=~101", "a=-102");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLogicalOp
+  public void testFoldLogicalOp() {
+    fold("x = true && x", "x = x");
+    foldSame("x = [foo()] && x");
+
+    fold("x = false && x", "x = false");
+    fold("x = true || x", "x = true");
+    fold("x = false || x", "x = x");
+    fold("x = 0 && x", "x = 0");
+    fold("x = 3 || x", "x = 3");
+    fold("x = false || 0", "x = 0");
+
+    
+    fold("a = x && true", "a=x&&true");
+    fold("a = x && false", "a=x&&false");
+    fold("a = x || 3", "a=x||3");
+    fold("a = x || false", "a=x||false");
+    fold("a = b ? c : x || false", "a=b?c:x||false");
+    fold("a = b ? x || false : c", "a=b?x||false:c");
+    fold("a = b ? c : x && true", "a=b?c:x&&true");
+    fold("a = b ? x && true : c", "a=b?x&&true:c");
+
+    
+    foldSame("a = x || false ? b : c");
+    foldSame("a = x && true ? b : c");
+
+    fold("x = foo() || true || bar()", "x = foo()||true");
+    fold("x = foo() || false || bar()", "x = foo()||bar()");
+    fold("x = foo() || true && bar()", "x = foo()||bar()");
+    fold("x = foo() || false && bar()", "x = foo()||false");
+    fold("x = foo() && false && bar()", "x = foo()&&false");
+    fold("x = foo() && true && bar()", "x = foo()&&bar()");
+    fold("x = foo() && false || bar()", "x = foo()&&false||bar()");
+
+    fold("1 && b()", "b()");
+    fold("a() && (1 && b())", "a() && b()");
+    
+    
+    fold("(a() && 1) && b()", "(a() && 1) && b()");
+
+    
+    
+    
+    foldSame("x = foo() && true || bar()");
+    foldSame("foo() && true || bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitwiseOp
+  public void testFoldBitwiseOp() {
+    fold("x = 1 & 1", "x = 1");
+    fold("x = 1 & 2", "x = 0");
+    fold("x = 3 & 1", "x = 1");
+    fold("x = 3 & 3", "x = 3");
+
+    fold("x = 1 | 1", "x = 1");
+    fold("x = 1 | 2", "x = 3");
+    fold("x = 3 | 1", "x = 3");
+    fold("x = 3 | 3", "x = 3");
+
+    fold("x = 1 ^ 1", "x = 0");
+    fold("x = 1 ^ 2", "x = 3");
+    fold("x = 3 ^ 1", "x = 2");
+    fold("x = 3 ^ 3", "x = 0");
+
+    fold("x = -1 & 0", "x = 0");
+    fold("x = 0 & -1", "x = 0");
+    fold("x = 1 & 4", "x = 0");
+    fold("x = 2 & 3", "x = 2");
+
+    
+    
+    fold("x = 1 & 1.1", "x = 1");
+    fold("x = 1.1 & 1", "x = 1");
+    fold("x = 1 & 3000000000", "x = 0");
+    fold("x = 3000000000 & 1", "x = 0");
+
+    
+    fold("x = 1 | 4", "x = 5");
+    fold("x = 1 | 3", "x = 3");
+    fold("x = 1 | 1.1", "x = 1");
+    foldSame("x = 1 | 3E9");
+    fold("x = 1 | 3000000001", "x = -1294967295");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitwiseOp2
+  public void testFoldBitwiseOp2() {
+    fold("x = y & 1 & 1", "x = y & 1");
+    fold("x = y & 1 & 2", "x = y & 0");
+    fold("x = y & 3 & 1", "x = y & 1");
+    fold("x = 3 & y & 1", "x = y & 1");
+    fold("x = y & 3 & 3", "x = y & 3");
+    fold("x = 3 & y & 3", "x = y & 3");
+
+    fold("x = y | 1 | 1", "x = y | 1");
+    fold("x = y | 1 | 2", "x = y | 3");
+    fold("x = y | 3 | 1", "x = y | 3");
+    fold("x = 3 | y | 1", "x = y | 3");
+    fold("x = y | 3 | 3", "x = y | 3");
+    fold("x = 3 | y | 3", "x = y | 3");
+
+    fold("x = y ^ 1 ^ 1", "x = y ^ 0");
+    fold("x = y ^ 1 ^ 2", "x = y ^ 3");
+    fold("x = y ^ 3 ^ 1", "x = y ^ 2");
+    fold("x = 3 ^ y ^ 1", "x = y ^ 2");
+    fold("x = y ^ 3 ^ 3", "x = y ^ 0");
+    fold("x = 3 ^ y ^ 3", "x = y ^ 0");
+
+    fold("x = Infinity | NaN", "x=0");
+    fold("x = 12 | NaN", "x=12");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldingMixTypes
+  public void testFoldingMixTypes() {
+    fold("x = x + '2'", "x+='2'");
+    fold("x = +x + +'2'", "x = +x + 2");
+    fold("x = x - '2'", "x-=2");
+    fold("x = x ^ '2'", "x^=2");
+    fold("x = '2' ^ x", "x^=2");
+    fold("x = '2' & x", "x&=2");
+    fold("x = '2' | x", "x|=2");
+
+    fold("x = '2' | y", "x=2|y");
+    fold("x = y | '2'", "x=y|2");
+    fold("x = y | (a && '2')", "x=y|(a&&2)");
+    fold("x = y | (a,'2')", "x=y|(a,2)");
+    fold("x = y | (a?'1':'2')", "x=y|(a?1:2)");
+    fold("x = y | ('x'?'1':'2')", "x=y|('x'?1:2)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldingAdd
+  public void testFoldingAdd() {
+    fold("x = null + true", "x=1");
+    foldSame("x = a + true");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitwiseOpStringCompare
+  public void testFoldBitwiseOpStringCompare() {
+    assertResultString("x = -1 | 0", "x=-1");
+    
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitShifts
+  public void testFoldBitShifts() {
+    fold("x = 1 << 0", "x = 1");
+    fold("x = -1 << 0", "x = -1");
+    fold("x = 1 << 1", "x = 2");
+    fold("x = 3 << 1", "x = 6");
+    fold("x = 1 << 8", "x = 256");
+
+    fold("x = 1 >> 0", "x = 1");
+    fold("x = -1 >> 0", "x = -1");
+    fold("x = 1 >> 1", "x = 0");
+    fold("x = 2 >> 1", "x = 1");
+    fold("x = 5 >> 1", "x = 2");
+    fold("x = 127 >> 3", "x = 15");
+    fold("x = 3 >> 1", "x = 1");
+    fold("x = 3 >> 2", "x = 0");
+    fold("x = 10 >> 1", "x = 5");
+    fold("x = 10 >> 2", "x = 2");
+    fold("x = 10 >> 5", "x = 0");
+
+    fold("x = 10 >>> 1", "x = 5");
+    fold("x = 10 >>> 2", "x = 2");
+    fold("x = 10 >>> 5", "x = 0");
+    fold("x = -1 >>> 1", "x = 2147483647"); 
+    fold("x = -1 >>> 0", "x = 4294967295"); 
+    fold("x = -2 >>> 0", "x = 4294967294"); 
+
+    fold("3000000000 << 1", "3000000000<<1",
+         PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("1 << 32", "1<<32",
+        PeepholeFoldConstants.SHIFT_AMOUNT_OUT_OF_BOUNDS);
+    fold("1 << -1", "1<<32",
+        PeepholeFoldConstants.SHIFT_AMOUNT_OUT_OF_BOUNDS);
+    fold("3000000000 >> 1", "3000000000>>1",
+        PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("1 >> 32", "1>>32",
+        PeepholeFoldConstants.SHIFT_AMOUNT_OUT_OF_BOUNDS);
+    fold("1.5 << 0",  "1.5<<0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1 << .5",   "1.5<<0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1.5 >>> 0", "1.5>>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1 >>> .5",  "1.5>>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1.5 >> 0",  "1.5>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1 >> .5",   "1.5>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitShiftsStringCompare
+  public void testFoldBitShiftsStringCompare() {
+    
+    assertResultString("x = -1 << 1", "x=-2");
+    assertResultString("x = -1 << 8", "x=-256");
+    assertResultString("x = -1 >> 1", "x=-1");
+    assertResultString("x = -2 >> 1", "x=-1");
+    assertResultString("x = -1 >> 0", "x=-1");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testStringAdd
+  public void testStringAdd() {
+    fold("x = 'a' + \"bc\"", "x = \"abc\"");
+    fold("x = 'a' + 5", "x = \"a5\"");
+    fold("x = 5 + 'a'", "x = \"5a\"");
+    fold("x = 'a' + ''", "x = \"a\"");
+    fold("x = \"a\" + foo()", "x = \"a\"+foo()");
+    fold("x = foo() + 'a' + 'b'", "x = foo()+\"ab\"");
+    fold("x = (foo() + 'a') + 'b'", "x = foo()+\"ab\"");  
+    fold("x = foo() + 'a' + 'b' + 'cd' + bar()", "x = foo()+\"abcd\"+bar()");
+    fold("x = foo() + 2 + 'b'", "x = foo()+2+\"b\"");  
+    fold("x = foo() + 'a' + 2", "x = foo()+\"a2\"");
+    fold("x = '' + null", "x = \"null\"");
+    fold("x = true + '' + false", "x = \"truefalse\"");
+    fold("x = '' + []", "x = ''");      
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldConstructor
+  public void testFoldConstructor() {
+    fold("x = this[new String('a')]", "x = this['a']");
+    fold("x = ob[new String(12)]", "x = ob['12']");
+    fold("x = ob[new String(false)]", "x = ob['false']");
+    fold("x = ob[new String(null)]", "x = ob['null']");
+    foldSame("x = ob[new String(a)]");
+    foldSame("x = new String('a')");
+    foldSame("x = (new String('a'))[3]");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testStringIndexOf
+  public void testStringIndexOf() {
+    fold("x = 'abcdef'.indexOf('b')", "x = 1");
+    fold("x = 'abcdefbe'.indexOf('b', 2)", "x = 6");
+    fold("x = 'abcdef'.indexOf('bcd')", "x = 1");
+    fold("x = 'abcdefsdfasdfbcdassd'.indexOf('bcd', 4)", "x = 13");
+
+    fold("x = 'abcdef'.lastIndexOf('b')", "x = 1");
+    fold("x = 'abcdefbe'.lastIndexOf('b')", "x = 6");
+    fold("x = 'abcdefbe'.lastIndexOf('b', 5)", "x = 1");
+
+    
+    
+    fold("x = 'abc1def'.indexOf(1)", "x = 3");
+    fold("x = 'abcNaNdef'.indexOf(NaN)", "x = 3");
+    fold("x = 'abcundefineddef'.indexOf(undefined)", "x = 3");
+    fold("x = 'abcnulldef'.indexOf(null)", "x = 3");
+    fold("x = 'abctruedef'.indexOf(true)", "x = 3");
+
+    
+    
+    foldSame("x = NaN.indexOf('bcd')");
+    foldSame("x = undefined.indexOf('bcd')");
+    foldSame("x = null.indexOf('bcd')");
+    foldSame("x = true.indexOf('bcd')");
+    foldSame("x = false.indexOf('bcd')");
+
+    
+    foldSame("x = 'abcdef'.indexOf(/b./)");
+    foldSame("x = 'abcdef'.indexOf({a:2})");
+    foldSame("x = 'abcdef'.indexOf([1,2])");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testStringJoinAddSparse
+  public void testStringJoinAddSparse() {
+    fold("x = [,,'a'].join(',')", "x = ',,a'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testStringJoinAdd
+  public void testStringJoinAdd() {
+    fold("x = ['a', 'b', 'c'].join('')", "x = \"abc\"");
+    fold("x = [].join(',')", "x = \"\"");
+    fold("x = ['a'].join(',')", "x = \"a\"");
+    fold("x = ['a', 'b', 'c'].join(',')", "x = \"a,b,c\"");
+    fold("x = ['a', foo, 'b', 'c'].join(',')",
+        "x = [\"a\",foo,\"b,c\"].join(\",\")");
+    fold("x = [foo, 'a', 'b', 'c'].join(',')",
+        "x = [foo,\"a,b,c\"].join(\",\")");
+    fold("x = ['a', 'b', 'c', foo].join(',')",
+        "x = [\"a,b,c\",foo].join(\",\")");
+
+    
+    fold("x = ['a=', 5].join('')", "x = \"a=5\"");
+    fold("x = ['a', '5'].join(7)", "x = \"a75\"");
+
+    
+    fold("x = ['a=', false].join('')", "x = \"a=false\"");
+    fold("x = ['a', '5'].join(true)", "x = \"atrue5\"");
+    fold("x = ['a', '5'].join(false)", "x = \"afalse5\"");
+
+    
+    fold("x = ['a', '5', 'c'].join('a very very very long chain')",
+         "x = [\"a\",\"5\",\"c\"].join(\"a very very very long chain\")");
+
+    
+    foldSame("x = ['', foo].join(',')");
+    foldSame("x = ['', foo, ''].join(',')");
+
+    fold("x = ['', '', foo, ''].join(',')", "x = [',', foo, ''].join(',')");
+    fold("x = ['', '', foo, '', ''].join(',')",
+         "x = [',', foo, ','].join(',')");
+
+    fold("x = ['', '', foo, '', '', bar].join(',')",
+         "x = [',', foo, ',', bar].join(',')");
+
+    fold("x = [1,2,3].join('abcdef')",
+         "x = '1abcdef2abcdef3'");
+
+    fold("x = [1,2].join()", "x = '1,2'");
+    fold("x = [null,undefined,''].join(',')", "x = ',,'");
+    fold("x = [null,undefined,0].join(',')", "x = ',,0'");
+    
+    foldSame("x = [[1,2],[3,4]].join()"); 
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testStringJoinAdd_b1992789
+  public void testStringJoinAdd_b1992789() {
+    fold("x = ['a'].join('')", "x = \"a\"");
+    fold("x = [foo()].join('')", "x = '' + foo()");
+    fold("[foo()].join('')", "'' + foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldStringSubstr
+  public void testFoldStringSubstr() {
+    fold("x = 'abcde'.substr(0,2)", "x = 'ab'");
+    fold("x = 'abcde'.substr(1,2)", "x = 'bc'");
+    fold("x = 'abcde'['substr'](1,3)", "x = 'bcd'");
+    fold("x = 'abcde'.substr(2)", "x = 'cde'");
+
+    
+    foldSame("x = 'abcde'.substr(-1)");
+    foldSame("x = 'abcde'.substr(1, -2)");
+    foldSame("x = 'abcde'.substr(1, 2, 3)");
+    foldSame("x = 'a'.substr(0, 2)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldStringSubstring
+  public void testFoldStringSubstring() {
+    fold("x = 'abcde'.substring(0,2)", "x = 'ab'");
+    fold("x = 'abcde'.substring(1,2)", "x = 'b'");
+    fold("x = 'abcde'['substring'](1,3)", "x = 'bc'");
+    fold("x = 'abcde'.substring(2)", "x = 'cde'");
+
+    
+    foldSame("x = 'abcde'.substring(-1)");
+    foldSame("x = 'abcde'.substring(1, -2)");
+    foldSame("x = 'abcde'.substring(1, 2, 3)");
+    foldSame("x = 'a'.substring(0, 2)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmetic
+  public void testFoldArithmetic() {
+    fold("x = 10 + 20", "x = 30");
+    fold("x = 2 / 4", "x = 0.5");
+    fold("x = 2.25 * 3", "x = 6.75");
+    fold("z = x * y", "z = x * y");
+    fold("x = y * 5", "x = y * 5");
+    fold("x = 1 / 0", "x = 1 / 0");
+    fold("x = 3 % 2", "x = 1");
+    fold("x = 3 % -2", "x = 1");
+    fold("x = -1 % 3", "x = -1");
+    fold("x = 1 % 0", "x = 1 % 0");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmetic2
+  public void testFoldArithmetic2() {
+    foldSame("x = y + 10 + 20");
+    foldSame("x = y / 2 / 4");
+    fold("x = y * 2.25 * 3", "x = y * 6.75");
+    fold("z = x * y", "z = x * y");
+    fold("x = y * 5", "x = y * 5");
+    fold("x = y + (z * 24 * 60 * 60 * 1000)", "x = y + z * 864E5");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmetic3
+  public void testFoldArithmetic3() {
+    fold("x = null * undefined", "x = NaN");
+    fold("x = null * 1", "x = 0");
+    fold("x = (null - 1) * 2", "x = -2");
+    fold("x = (null + 1) * 2", "x = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmeticInfinity
+  public void testFoldArithmeticInfinity() {
+    fold("x=-Infinity-2", "x=-Infinity");
+    fold("x=Infinity-2", "x=Infinity");
+    fold("x=Infinity*5", "x=Infinity");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmeticStringComp
+  public void testFoldArithmeticStringComp() {
+    
+    assertResultString("x = 10 - 20", "x=-10");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComparison
+  public void testFoldComparison() {
+    fold("x = 0 == 0", "x = true");
+    fold("x = 1 == 2", "x = false");
+    fold("x = 'abc' == 'def'", "x = false");
+    fold("x = 'abc' == 'abc'", "x = true");
+    fold("x = \"\" == ''", "x = true");
+    fold("x = foo() == bar()", "x = foo()==bar()");
+
+    fold("x = 1 != 0", "x = true");
+    fold("x = 'abc' != 'def'", "x = true");
+    fold("x = 'a' != 'a'", "x = false");
+
+    fold("x = 1 < 20", "x = true");
+    fold("x = 3 < 3", "x = false");
+    fold("x = 10 > 1.0", "x = true");
+    fold("x = 10 > 10.25", "x = false");
+    fold("x = y == y", "x = y==y");
+    fold("x = y < y", "x = false");
+    fold("x = y > y", "x = false");
+    fold("x = 1 <= 1", "x = true");
+    fold("x = 1 <= 0", "x = false");
+    fold("x = 0 >= 0", "x = true");
+    fold("x = -1 >= 9", "x = false");
+
+    fold("x = true == true", "x = true");
+    fold("x = true == true", "x = true");
+    fold("x = false == null", "x = false");
+    fold("x = false == true", "x = false");
+    fold("x = true == null", "x = false");
+
+    fold("0 == 0", "true");
+    fold("1 == 2", "false");
+    fold("'abc' == 'def'", "false");
+    fold("'abc' == 'abc'", "true");
+    fold("\"\" == ''", "true");
+    foldSame("foo() == bar()");
+
+    fold("1 != 0", "true");
+    fold("'abc' != 'def'", "true");
+    fold("'a' != 'a'", "false");
+
+    fold("1 < 20", "true");
+    fold("3 < 3", "false");
+    fold("10 > 1.0", "true");
+    fold("10 > 10.25", "false");
+    foldSame("x == x");
+    fold("x < x", "false");
+    fold("x > x", "false");
+    fold("1 <= 1", "true");
+    fold("1 <= 0", "false");
+    fold("0 >= 0", "true");
+    fold("-1 >= 9", "false");
+
+    fold("true == true", "true");
+    fold("false == null", "false");
+    fold("false == true", "false");
+    fold("true == null", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComparison2
+  public void testFoldComparison2() {
+    fold("x = 0 === 0", "x = true");
+    fold("x = 1 === 2", "x = false");
+    fold("x = 'abc' === 'def'", "x = false");
+    fold("x = 'abc' === 'abc'", "x = true");
+    fold("x = \"\" === ''", "x = true");
+    fold("x = foo() === bar()", "x = foo()===bar()");
+
+    fold("x = 1 !== 0", "x = true");
+    fold("x = 'abc' !== 'def'", "x = true");
+    fold("x = 'a' !== 'a'", "x = false");
+
+    fold("x = y === y", "x = y===y");
+
+    fold("x = true === true", "x = true");
+    fold("x = true === true", "x = true");
+    fold("x = false === null", "x = false");
+    fold("x = false === true", "x = false");
+    fold("x = true === null", "x = false");
+
+    fold("0 === 0", "true");
+    fold("1 === 2", "false");
+    fold("'abc' === 'def'", "false");
+    fold("'abc' === 'abc'", "true");
+    fold("\"\" === ''", "true");
+    foldSame("foo() === bar()");
+
+    
+    foldSame("1 === '1'");
+    foldSame("1 === true");
+    foldSame("1 !== '1'");
+    foldSame("1 !== true");
+
+    fold("1 !== 0", "true");
+    fold("'abc' !== 'def'", "true");
+    fold("'a' !== 'a'", "false");
+
+    foldSame("x === x");
+
+    fold("true === true", "true");
+    fold("false === null", "false");
+    fold("false === true", "false");
+    fold("true === null", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldGetElem
+  public void testFoldGetElem() {
+    fold("x = [,10][0]", "x = void 0");
+    fold("x = [10, 20][0]", "x = 10");
+    fold("x = [10, 20][1]", "x = 20");
+    fold("x = [10, 20][0.5]", "",
+        PeepholeFoldConstants.INVALID_GETELEM_INDEX_ERROR);
+    fold("x = [10, 20][-1]",    "",
+        PeepholeFoldConstants.INDEX_OUT_OF_BOUNDS_ERROR);
+    fold("x = [10, 20][2]",     "",
+        PeepholeFoldConstants.INDEX_OUT_OF_BOUNDS_ERROR);
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComplex
+  public void testFoldComplex() {
+    fold("x = (3 / 1.0) + (1 * 2)", "x = 5");
+    fold("x = (1 == 1.0) && foo() && true", "x = foo()&&true");
+    fold("x = 'abc' + 5 + 10", "x = \"abc510\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLeft
+  public void testFoldLeft() {
+    foldSame("(+x - 1) + 2"); 
+    fold("(+x + 1) + 2", "+x + 3");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArrayLength
+  public void testFoldArrayLength() {
+    
+    fold("x = [].length", "x = 0");
+    fold("x = [1,2,3].length", "x = 3");
+    fold("x = [a,b].length", "x = 2");
+
+    
+    fold("x = [,,1].length", "x = 3");
+
+    
+    fold("x = [foo(), 0].length", "x = [foo(),0].length");
+    fold("x = y.length", "x = y.length");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldStringLength
+  public void testFoldStringLength() {
+    
+    fold("x = ''.length", "x = 0");
+    fold("x = '123'.length", "x = 3");
+
+    
+    fold("x = '123\u01dc'.length", "x = 4");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldTypeof
+  public void testFoldTypeof() {
+    fold("x = typeof 1", "x = \"number\"");
+    fold("x = typeof 'foo'", "x = \"string\"");
+    fold("x = typeof true", "x = \"boolean\"");
+    fold("x = typeof false", "x = \"boolean\"");
+    fold("x = typeof null", "x = \"object\"");
+    fold("x = typeof undefined", "x = \"undefined\"");
+    fold("x = typeof void 0", "x = \"undefined\"");
+    fold("x = typeof []", "x = \"object\"");
+    fold("x = typeof [1]", "x = \"object\"");
+    fold("x = typeof [1,[]]", "x = \"object\"");
+    fold("x = typeof {}", "x = \"object\"");
+    fold("x = typeof function() {}", "x = 'function'");
+
+    foldSame("x = typeof[1,[foo()]]");
+    foldSame("x = typeof{bathwater:baby()}");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldInstanceOf
+  public void testFoldInstanceOf() {
+    
+    fold("64 instanceof Object", "false");
+    fold("64 instanceof Number", "false");
+    fold("'' instanceof Object", "false");
+    fold("'' instanceof String", "false");
+    fold("true instanceof Object", "false");
+    fold("true instanceof Boolean", "false");
+    fold("!0 instanceof Object", "false");
+    fold("!0 instanceof Boolean", "false");
+    fold("false instanceof Object", "false");
+    fold("null instanceof Object", "false");
+    fold("undefined instanceof Object", "false");
+    fold("NaN instanceof Object", "false");
+    fold("Infinity instanceof Object", "false");
+
+    
+    fold("[] instanceof Object", "true");
+    fold("({}) instanceof Object", "true");
+
+    
+    foldSame("new Foo() instanceof Object");
+    
+    foldSame("[] instanceof Foo");
+    foldSame("({}) instanceof Foo");
+
+    fold("(function() {}) instanceof Object", "true");
+
+    
+    foldSame("x instanceof Foo");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testDivision
+  public void testDivision() {
+    
+    fold("print(1/3)", "print(1/3)");
+
+    
+    
+    fold("print(1/2)", "print(0.5)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testAssignOps
+  public void testAssignOps() {
+    fold("x=x+y", "x+=y");
+    foldSame("x=y+x");
+    fold("x=x*y", "x*=y");
+    fold("x=y*x", "x*=y");
+    fold("x.y=x.y+z", "x.y+=z");
+    foldSame("next().x = next().x + 1");
+
+    fold("x=x-y", "x-=y");
+    foldSame("x=y-x");
+    fold("x=x|y", "x|=y");
+    fold("x=y|x", "x|=y");
+    fold("x=x*y", "x*=y");
+    fold("x=y*x", "x*=y");
+    fold("x.y=x.y+z", "x.y+=z");
+    foldSame("next().x = next().x + 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldAdd1
+  public void testFoldAdd1() {
+    fold("x=false+1","x=1");
+    fold("x=true+1","x=2");
+    fold("x=1+false","x=1");
+    fold("x=1+true","x=2");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLiteralNames
+  public void testFoldLiteralNames() {
+    foldSame("NaN == NaN");
+    foldSame("Infinity == Infinity");
+    foldSame("Infinity == NaN");
+    fold("undefined == NaN", "false");
+    fold("undefined == Infinity", "false");
+
+    foldSame("Infinity >= Infinity");
+    foldSame("NaN >= NaN");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLiteralsTypeMismatches
+  public void testFoldLiteralsTypeMismatches() {
+    fold("true == true", "true");
+    fold("true == false", "false");
+    fold("true == null", "false");
+    fold("false == null", "false");
+
+    
+    fold("null <= null", "true"); 
+    fold("null >= null", "true");
+    fold("null > null", "false");
+    fold("null < null", "false");
+
+    fold("false >= null", "true"); 
+    fold("false <= null", "true");
+    fold("false > null", "false");
+    fold("false < null", "false");
+
+    fold("true >= null", "true");  
+    fold("true <= null", "false");
+    fold("true > null", "true");
+    fold("true < null", "false");
+
+    fold("true >= false", "true");  
+    fold("true <= false", "false");
+    fold("true > false", "true");
+    fold("true < false", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLeftChildConcat
+  public void testFoldLeftChildConcat() {
+    foldSame("x +5 + \"1\"");
+    fold("x+\"5\" + \"1\"", "x + \"51\"");
+    
+    fold("\"a\"+(\"b\"+c)","\"ab\"+c");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLeftChildOp
+  public void testFoldLeftChildOp() {
+    fold("x * Infinity * 2", "x * Infinity");
+    foldSame("x - Infinity - 2"); 
+    foldSame("x - 1 + Infinity");
+    foldSame("x - 2 + 1");
+    foldSame("x - 2 + 3");
+    foldSame("1 + x - 2 + 1");
+    foldSame("1 + x - 2 + 3");
+    foldSame("1 + x - 2 + 3 - 1");
+    foldSame("f(x)-0");
+    foldSame("x-0-0");
+    foldSame("x+2-2+2");
+    foldSame("x+2-2+2-2");
+    foldSame("x-2+2");
+    foldSame("x-2+2-2");
+    foldSame("x-2+2-2+2");
+
+    foldSame("1+x-0-NaN");
+    foldSame("1+f(x)-0-NaN");
+    foldSame("1+x-0+NaN");
+    foldSame("1+f(x)-0+NaN");
+
+    foldSame("1+x+NaN"); 
+    foldSame("x+2-2");   
+    foldSame("x+2");  
+    foldSame("x-2");  
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldSimpleArithmeticOp
+  public void testFoldSimpleArithmeticOp() {
+    foldSame("x*NaN");
+    foldSame("NaN/y");
+    foldSame("f(x)-0");
+    foldSame("f(x)*1");
+    foldSame("1*f(x)");
+    foldSame("0+a+b");
+    foldSame("0-a-b");
+    foldSame("a+b-0");
+    foldSame("(1+x)*NaN");
+
+    foldSame("(1+f(x))*NaN"); 
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLiteralsAsNumbers
+  public void testFoldLiteralsAsNumbers() {
+    fold("x/'12'","x/12");
+    fold("x/('12'+'6')", "x/126");
+    fold("true*x", "1*x");
+    fold("x/false", "x/0");  
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testNotFoldBackToTrueFalse
+  public void testNotFoldBackToTrueFalse() {
+    foldSame("!0");
+    foldSame("!1");
+    fold("!3", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBangConstants
+  public void testFoldBangConstants() {
+    fold("1 + !0", "2");
+    fold("1 + !1", "1");
+    fold("'a ' + !1", "'a false'");
+    fold("'a ' + !0", "'a true'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldMixed
+  public void testFoldMixed() {
+    fold("''+[1]", "'1'");
+    foldSame("false+[]"); 
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldVoid
+  public void testFoldVoid() {
+    foldSame("void 0");
+    fold("void 1", "void 0");
+    fold("void x", "void 0");
+    fold("void x()", "void x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testJoinBug
+  public void testJoinBug() {
+    fold("var x = [].join();", "var x = '';");
+    fold("var x = [x].join();", "var x = '' + x;");
+    foldSame("var x = [x,y].join();");
+    foldSame("var x = [x,y,z].join();");
+
+    foldSame("shape['matrix'] = [\n" +
+            "    Number(headingCos2).toFixed(4),\n" +
+            "    Number(-headingSin2).toFixed(4),\n" +
+            "    Number(headingSin2 * yScale).toFixed(4),\n" +
+            "    Number(headingCos2 * yScale).toFixed(4),\n" +
+            "    0,\n" +
+            "    0\n" +
+            "  ].join()");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testToUpper
+  public void testToUpper() {
+    fold("'a'.toUpperCase()", "'A'");
+    fold("'A'.toUpperCase()", "'A'");
+    fold("'aBcDe'.toUpperCase()", "'ABCDE'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testToLower
+  public void testToLower() {
+    fold("'A'.toLowerCase()", "'a'");
+    fold("'a'.toLowerCase()", "'a'");
+    fold("'aBcDe'.toLowerCase()", "'abcde'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testObjectLiteral
+  public void testObjectLiteral() {
+    test("(!{})", "false");
+    test("(!{a:1})", "false");
+    testSame("(!{a:foo()})");
+    testSame("(!{'a':foo()})");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testArrayLiteral
+  public void testArrayLiteral() {
+    test("(![])", "false");
+    test("(![1])", "false");
+    test("(![a])", "false");
+    testSame("(![foo()])");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testIEString
+  public void testIEString() {
+    testSame("!+'\\v1'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testInvertibleOperators
+  public void testInvertibleOperators() {
+    Map<String, String> inverses = ImmutableMap.<String, String>builder()
+        .put("==", "!=")
+        .put("===", "!==")
+        .put("<=", ">")
+        .put("<", ">=")
+        .put(">=", "<")
+        .put(">", "<=")
+        .put("!=", "==")
+        .put("!==", "===")
+        .build();
+    Set<String> comparators = ImmutableSet.of("<=", "<", ">=", ">");
+    Set<String> equalitors = ImmutableSet.of("==", "===");
+    Set<String> uncomparables = ImmutableSet.of("undefined", "void 0");
+    List<String> operators = ImmutableList.copyOf(inverses.values());
+    for (int iOperandA = 0; iOperandA < LITERAL_OPERANDS.size(); iOperandA++) {
+      for (int iOperandB = 0;
+           iOperandB < LITERAL_OPERANDS.size();
+           iOperandB++) {
+        for (int iOp = 0; iOp < operators.size(); iOp++) {
+          String a = LITERAL_OPERANDS.get(iOperandA);
+          String b = LITERAL_OPERANDS.get(iOperandB);
+          String op = operators.get(iOp);
+          String inverse = inverses.get(op);
+
+          
+          if (comparators.contains(op) &&
+              (uncomparables.contains(a) || uncomparables.contains(b))) {
+            assertSameResults(join(a, op, b), "false");
+            assertSameResults(join(a, inverse, b), "false");
+          } else if (a.equals(b) && equalitors.contains(op)) {
+            if (a.equals("NaN") || a.equals("Infinity")) {
+              foldSame(join(a, op, b));
+              foldSame(join(a, inverse, b));
+            } else {
+              assertSameResults(join(a, op, b), "true");
+              assertSameResults(join(a, inverse, b), "false");
+            }
+          } else {
+            assertNotSameResults(join(a, op, b), join(a, inverse, b));
+          }
+        }
+      }
+    }
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testCommutativeOperators
+  public void testCommutativeOperators() {
+    List<String> operators =
+        ImmutableList.of(
+            "==",
+            "!=",
+            "===",
+            "!==",
+            "*",
+            "|",
+            "&",
+            "^");
+    for (int iOperandA = 0; iOperandA < LITERAL_OPERANDS.size(); iOperandA++) {
+      for (int iOperandB = iOperandA;
+           iOperandB < LITERAL_OPERANDS.size();
+           iOperandB++) {
+        for (int iOp = 0; iOp < operators.size(); iOp++) {
+          String a = LITERAL_OPERANDS.get(iOperandA);
+          String b = LITERAL_OPERANDS.get(iOperandB);
+          String op = operators.get(iOp);
+
+          
+          
+          assertSameResultsOrUncollapsed(join(a, op, b), join(b, op, a));
+        }
+      }
+    }
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofObject
+  public void testFoldTypeofObject() {
+    test("var x = {};typeof x",
+         "var x = {};\"object\"");
+
+    test("var x = [];typeof x",
+         "var x = [];\"object\"");
+
+    
+    test("var x = null;typeof x",
+         "var x = null;\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofString
+  public void testFoldTypeofString() {
+    test("var x = \"foo\";typeof x",
+         "var x = \"foo\";\"string\"");
+
+    test("var x = new String(\"foo\");typeof x",
+         "var x = new String(\"foo\");\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofNumber
+  public void testFoldTypeofNumber() {
+    test("var x = 10;typeof x",
+         "var x = 10;\"number\"");
+
+    test("var x = new Number(6);typeof x",
+         "var x = new Number(6);\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofBoolean
+  public void testFoldTypeofBoolean() {
+    test("var x = false;typeof x",
+         "var x = false;\"boolean\"");
+
+    test("var x = new Boolean(true);typeof x",
+         "var x = new Boolean(true);\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofUndefined
+  public void testFoldTypeofUndefined() {
+    test("var x = undefined;typeof x",
+         "var x = undefined;\"undefined\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testDontFoldTypeofUnionTypes
+  public void testDontFoldTypeofUnionTypes() {
+    
+    testSame("var x = (unknown ? {} : null);typeof x");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testDontFoldTypeofSideEffects
+  public void testDontFoldTypeofSideEffects() {
+    
+    testSame("var x = 6 ;typeof (x++)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testDontFoldTypeofWithTypeCheckDisabled
+  public void testDontFoldTypeofWithTypeCheckDisabled() {
+    disableTypeCheck();
+    testSame("var x = {};typeof x");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldOneChildBlocksIntegration
+  public void testFoldOneChildBlocksIntegration() {
+     fold("function f(){switch(foo()){default:{break}}}",
+          "function f(){foo()}");
+
+     fold("function f(){switch(x){default:{break}}}",
+          "function f(){}");
+
+     fold("function f(){switch(x){default:x;case 1:return 2}}",
+          "function f(){switch(x){default:case 1:return 2}}");
+
+     
+     fold("if(x){if(true){foo();foo()}else{bar();bar()}}",
+          "if(x){foo();foo()}");
+
+     fold("if(x){if(false){foo();foo()}else{bar();bar()}}",
+          "if(x){bar();bar()}");
+
+     
+     fold("if(x()){}", "x()");
+
+     fold("if(x()){} else {x()}", "x()||x()");
+     fold("if(x){}", ""); 
+     fold("if(a()){A()} else if (b()) {} else {C()}", "a()?A():b()||C()");
+
+     fold("if(a()){} else if (b()) {} else {C()}",
+          "a()||b()||C()");
+     fold("if(a()){A()} else if (b()) {} else if (c()) {} else{D()}",
+          "a()?A():b()||c()||D()");
+     fold("if(a()){} else if (b()) {} else if (c()) {} else{D()}",
+          "a()||b()||c()||D()");
+     fold("if(a()){A()} else if (b()) {} else if (c()) {} else{}",
+          "a()?A():b()||c()");
+
+     
+     fold("function foo(){if(x()){}}", "function foo(){x()}");
+
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldOneChildBlocksStringCompare
+  public void testFoldOneChildBlocksStringCompare() {
+    
+    assertResultString("if(x){if(y){var x;}}else{var z;}",
+        "if(x){if(y)var x}else var z");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testNecessaryDanglingElse
+  public void testNecessaryDanglingElse() {
+    
+    
+    
+    assertResultString(
+        "if(x)if(y){y();z()}else;else x()", "if(x){if(y){y();z()}}else x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldReturnsIntegration
+  public void testFoldReturnsIntegration() {
+    
+    fold("function f(){if(x)return;else return}",
+         "function f(){}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBug1059649
+  public void testBug1059649() {
+    
+    fold("if(x){var y=3;}var z=5", "if(x)var y=3;var z=5");
+
+    
+    foldSame("if(x){var y=3;}else{var y=4;}var z=5");
+    fold("while(x){var y=3;}var z=5", "while(x)var y=3;var z=5");
+    fold("for(var i=0;i<10;i++){var y=3;}var z=5",
+         "for(var i=0;i<10;i++)var y=3;var z=5");
+    fold("for(var i in x){var y=3;}var z=5",
+         "for(var i in x)var y=3;var z=5");
+    fold("do{var y=3;}while(x);var z=5", "do var y=3;while(x);var z=5");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testHookIfIntegration
+  public void testHookIfIntegration() {
+    fold("if (false){ x = 1; } else if (cond) { x = 2; } else { x = 3; }",
+         "x=cond?2:3");
+
+    fold("x?void 0:y()", "x||y()");
+    fold("!x?void 0:y()", "(!x)||y()");
+    fold("x?y():void 0", "x&&y()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testRemoveDuplicateStatementsIntegration
+  public void testRemoveDuplicateStatementsIntegration() {
+    fold("function z() {if (a) { return true }" +
+         "else if (b) { return true }" +
+         "else { return true }}",
+         "function z() {return !0;}");
+
+    fold("function z() {if (a()) { return true }" +
+         "else if (b()) { return true }" +
+         "else { return true }}",
+         "function z() {a()||b();return !0;}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldLogicalOpIntegration
+  public void testFoldLogicalOpIntegration() {
+    test("if(x && true) z()", "x&&z()");
+    test("if(x && false) z()", "");
+    fold("if(x || 3) z()", "z()");
+    fold("if(x || false) z()", "x&&z()");
+    test("if(x==y && false) z()", "");
+    
+    fold("if(y() || x || 3) z()", "(y()||1)&&z()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldBitwiseOpStringCompareIntegration
+  public void testFoldBitwiseOpStringCompareIntegration() {
+    assertResultString("while(-1 | 0){}", "while(1);");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testVarLiftingIntegration
+  public void testVarLiftingIntegration() {
+    fold("if(true);else var a;", "var a");
+    fold("if(false) foo();else var a;", "var a");
+    fold("if(true)var a;else;", "var a");
+    fold("if(false)var a;else;", "var a");
+    fold("if(false)var a,b;", "var b; var a");
+    fold("if(false){var a;var a;}", "var a");
+    fold("if(false)var a=function(){var b};", "var a");
+    fold("if(a)if(false)var a;else var b;", "var a;if(a)var b");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBug1438784
+  public void testBug1438784() throws Exception {
+    fold("for(var i=0;i<10;i++)if(x)x.y;", "for(var i=0;i<10;i++);");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldUselessWhileIntegration
+  public void testFoldUselessWhileIntegration() {
+    fold("while(!true) { foo() }", "");
+    fold("while(!false) foo() ", "while(1) foo()");
+    fold("while(!void 0) foo()", "while(1) foo()");
+
+    
+    fold("if(foo())while(false){foo()}else bar()", "foo()||bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldUselessForIntegration
+  public void testFoldUselessForIntegration() {
+    fold("for(;!true;) { foo() }", "");
+    fold("for(;void 0;) { foo() }", "");
+    fold("for(;undefined;) { foo() }", "");
+    fold("for(;1;) foo()", "for(;;) foo()");
+    fold("for(;!void 0;) foo()", "for(;;) foo()");
+
+    
+    fold("if(foo())for(;false;){foo()}else bar()", "foo()||bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldUselessDoIntegration
+  public void testFoldUselessDoIntegration() {
+    test("do { foo() } while(!true);", "foo()");
+    fold("do { foo() } while(void 0);", "foo()");
+    fold("do { foo() } while(undefined);", "foo()");
+    fold("do { foo() } while(!void 0);", "do { foo() } while(1);");
+
+    
+    test("if(foo())do {foo()} while(false) else bar()", "foo()?foo():bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testMinimizeWhileConstantConditionIntegration
+  public void testMinimizeWhileConstantConditionIntegration() {
+    fold("while(!false) foo()", "while(1) foo()");
+    fold("while(202) foo()", "while(1) foo()");
+    fold("while(Infinity) foo()", "while(1) foo()");
+    fold("while('text') foo()", "while(1) foo()");
+    fold("while([]) foo()", "while(1) foo()");
+    fold("while({}) foo()", "while(1) foo()");
+    fold("while(/./) foo()", "while(1) foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testMinimizeExpr
+  public void testMinimizeExpr() {
+    test("!!true", "");
+
+    fold("!!x()", "x()");
+    test("!(!x()&&!y())", "x()||y()");
+    fold("x()||!!y()", "x()||y()");
+
+    
+    fold("!!x()&&y()", "x()&&y()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBug1509085
+  public void testBug1509085() {
+    PeepholeIntegrationTest oneRepetitiontest = new PeepholeIntegrationTest() {
+      @Override
+      protected int getNumRepetitions() {
+        return 1;
+      }
+    };
+
+    oneRepetitiontest.test("x ? x() : void 0", "x&&x();");
+    oneRepetitiontest.foldSame("y = x ? x() : void 0");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBugIssue3
+  public void testBugIssue3() {
+    foldSame("function foo() {" +
+             "  if(sections.length != 1) children[i] = 0;" +
+             "  else var selectedid = children[i]" +
+             "}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBugIssue43
+  public void testBugIssue43() {
+    foldSame("function foo() {" +
+             "  if (a) { var b = 1; } else { a.b = 1; }" +
+             "}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldNegativeBug
+  public void testFoldNegativeBug() {
+    fold("while(-3){};", "while(1);");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testNoNormalizeLabeledExpr
+  public void testNoNormalizeLabeledExpr() {
+    enableNormalize(true);
+    foldSame("var x; foo:{x = 3;}");
+    foldSame("var x; foo:x = 3;");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit1
+  public void testShortCircuit1() {
+    test("1 && a()", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit2
+  public void testShortCircuit2() {
+    test("1 && a() && 2", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit3
+  public void testShortCircuit3() {
+    test("a() && 1 && 2", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit4
+  public void testShortCircuit4() {
+    test("a() && (1 && b())", "a() && b()");
+    test("a() && 1 && b()", "a() && b()");
+    test("(a() && 1) && b()", "a() && b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testMinimizeExprCondition
+  public void testMinimizeExprCondition() {
+    fold("(x || true) && y()", "y()");
+    fold("(x || false) && y()", "x&&y()");
+    fold("(x && true) && y()", "x && y()");
+    fold("(x && false) && y()", "");
+    fold("a = x || false ? b : c", "a=x?b:c");
+    fold("do {x()} while((x && false) && y())", "x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testTrueFalseFolding
+  public void testTrueFalseFolding() {
+    fold("x = true", "x = !0");
+    fold("x = false", "x = !1");
+    fold("x = !3", "x = !1");
+    fold("x = true && !0", "x = !0");
+    fold("x = !!!!!!!!!!!!3", "x = !0");
+    fold("if(!3){x()}", "");
+    fold("if(!!3){x()}", "x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testCommaSplitingConstantCondition
+  public void testCommaSplitingConstantCondition() {
+    fold("(b=0,b=1);if(b)x=b;", "b=0;b=1;x=b;");
+    fold("(b=0,b=1);if(b)x=b;", "b=0;b=1;x=b;");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testAvoidCommaSplitting
+  public void testAvoidCommaSplitting() {
+    fold("x(),y(),z()", "x();y();z()");
+    doCommaSplitting = false;
+    foldSame("x(),y(),z()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testObjectLiteral
+  public void testObjectLiteral() {
+    test("({})", "");
+    test("({a:1})", "");
+    test("({a:foo()})", "foo()");
+    test("({'a':foo()})", "foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testArrayLiteral
+  public void testArrayLiteral() {
+    test("([])", "");
+    test("([1])", "");
+    test("([a])", "");
+    test("([foo()])", "foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testEmptyPass
+  public void testEmptyPass() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of();
+
+    testSame("var x; var y;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationOrder
+  public void testOptimizationOrder() {
+    
+
+    final List<String> visitationLog = Lists.newArrayList();
+
+    AbstractPeepholeOptimization note1Applied =
+        new AbstractPeepholeOptimization() {
+      @Override
+      public Node optimizeSubtree(Node node) {
+        if (node.getType() == Token.NAME) {
+          visitationLog.add(node.getString() + "1");
+        }
+
+        return node;
+      }
+    };
+
+    AbstractPeepholeOptimization note2Applied =
+        new AbstractPeepholeOptimization() {
+      @Override
+      public Node optimizeSubtree(Node node) {
+        if (node.getType() == Token.NAME) {
+          visitationLog.add(node.getString() + "2");
+        }
+
+        return node;
+      }
+    };
+
+    currentPeepholePasses =
+      ImmutableList.<
+       AbstractPeepholeOptimization>of(note1Applied, note2Applied);
+
+    test("var x; var y", "var x; var y");
+
+    
+
+    assertEquals(4, visitationLog.size());
+    assertEquals("x1", visitationLog.get(0));
+    assertEquals("x2", visitationLog.get(1));
+    assertEquals("y1", visitationLog.get(2));
+    assertEquals("y2", visitationLog.get(3));
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationRemovingSubtreeChild
+  public void testOptimizationRemovingSubtreeChild() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(new
+          RemoveNodesNamedXUnderVarOptimization());
+
+    test("var x,y;", "var y;");
+    test("var y,x;", "var y;");
+    test("var x,y,x;", "var y;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationRemovingSubtree
+  public void testOptimizationRemovingSubtree() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(new
+          RemoveNodesNamedXOptimization());
+
+    test("var x,y;", "var y;");
+    test("var y,x;", "var y;");
+    test("var x,y,x;", "var y;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationRemovingSubtreeParent
+  public void testOptimizationRemovingSubtreeParent() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(new
+          RemoveParentVarsForNodesNamedX());
+
+    test("var x; var y", "var y");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationsRemoveParentAfterRemoveChild
+  public void testOptimizationsRemoveParentAfterRemoveChild() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(
+          new RemoveNodesNamedXOptimization(),
+          new RemoveParentVarsForNodesNamedX());
+
+    test("var x,y; var z;", "var y; var z;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationReplacingNode
+  public void testOptimizationReplacingNode() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(
+          new RenameYToX(),
+          new RemoveParentVarsForNodesNamedX());
+
+    test("var y; var z;", "var z;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldBlock
+  public void testFoldBlock() {
+    fold("{{foo()}}", "foo()");
+    fold("{foo();{}}", "foo()");
+    fold("{{foo()}{}}", "foo()");
+    fold("{{foo()}{bar()}}", "foo();bar()");
+    fold("{if(false)foo(); {bar()}}", "bar()");
+    fold("{if(false)if(false)if(false)foo(); {bar()}}", "bar()");
+
+    fold("{'hi'}", "");
+    fold("{x==3}", "");
+    fold("{ (function(){x++}) }", "");
+    fold("function f(){return;}", "function f(){return;}");
+    fold("function f(){return 3;}", "function f(){return 3}");
+    fold("function f(){if(x)return; x=3; return; }",
+         "function f(){if(x)return; x=3; return; }");
+    fold("{x=3;;;y=2;;;}", "x=3;y=2");
+
+    
+    fold("while(x()){x}", "while(x());");
+    fold("while(x()){x()}", "while(x())x()");
+    fold("for(x=0;x<100;x++){x}", "for(x=0;x<100;x++);");
+    fold("for(x in y){x}", "for(x in y);");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldBlocksWithManyChildren
+  public void testFoldBlocksWithManyChildren() {
+    fold("function f() { if (false) {} }", "function f(){}");
+    fold("function f() { { if (false) {} if (true) {} {} } }",
+         "function f(){}");
+    fold("{var x; var y; var z; function f() { { var a; { var b; } } } }",
+         "var x;var y;var z;function f(){var a;var b}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testIf
+  public void testIf() {
+    fold("if (1){ x=1; } else { x = 2;}", "x=1");
+    fold("if (false){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (undefined){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (null){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (void 0){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (void foo()){ x = 1; } else { x = 2; }",
+         "foo();x=2");
+    fold("if (false){ x = 1; } else if (true) { x = 3; } else { x = 2; }",
+         "x=3");
+    fold("if (x){ x = 1; } else if (false) { x = 3; }",
+         "if(x)x=1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook
+  public void testHook() {
+    fold("true ? a() : b()", "a()");
+    fold("false ? a() : b()", "b()");
+
+    fold("a() ? b() : true", "a() && b()");
+    fold("a() ? true : b()", "a() || b()");
+
+    fold("(a = true) ? b() : c()", "a = true, b()");
+    fold("(a = false) ? b() : c()", "a = false, c()");
+    fold("do {f()} while((a = true) ? b() : c())",
+         "do {f()} while((a = true) , b())");
+    fold("do {f()} while((a = false) ? b() : c())",
+         "do {f()} while((a = false) , c())");
+
+    fold("var x = (true) ? 1 : 0", "var x=1");
+    fold("var y = (true) ? ((false) ? 12 : (cond ? 1 : 2)) : 13",
+         "var y=cond?1:2");
+
+    foldSame("var z=x?void 0:y()");
+    foldSame("z=x?void 0:y()");
+    foldSame("z*=x?void 0:y()");
+
+    foldSame("var z=x?y():void 0");
+    foldSame("(w?x:void 0).y=z");
+    foldSame("(w?x:void 0).y+=z");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testConstantConditionWithSideEffect1
+  public void testConstantConditionWithSideEffect1() {
+    fold("if (b=true) x=1;", "b=true;x=1");
+    fold("if (b=/ab/) x=1;", "b=/ab/;x=1");
+    fold("if (b=/ab/){ x=1; } else { x=2; }", "b=/ab/;x=1");
+    fold("var b;b=/ab/;if(b)x=1;", "var b;b=/ab/;x=1");
+    foldSame("var b;b=f();if(b)x=1;");
+    fold("var b=/ab/;if(b)x=1;", "var b=/ab/;x=1");
+    foldSame("var b=f();if(b)x=1;");
+    foldSame("b=b++;if(b)x=b;");
+    fold("(b=0,b=1);if(b)x=b;", "b=0,b=1;if(b)x=b;");
+    fold("b=1;if(foo,b)x=b;","b=1;x=b;");
+    foldSame("b=1;if(foo=1,b)x=b;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testConstantConditionWithSideEffect2
+  public void testConstantConditionWithSideEffect2() {
+    fold("(b=true)?x=1:x=2;", "b=true,x=1");
+    fold("(b=false)?x=1:x=2;", "b=false,x=2");
+    fold("if (b=/ab/) x=1;", "b=/ab/;x=1");
+    fold("var b;b=/ab/;(b)?x=1:x=2;", "var b;b=/ab/;x=1");
+    foldSame("var b;b=f();(b)?x=1:x=2;");
+    fold("var b=/ab/;(b)?x=1:x=2;", "var b=/ab/;x=1");
+    foldSame("var b=f();(b)?x=1:x=2;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testVarLifting
+  public void testVarLifting() {
+    fold("if(true)var a", "var a");
+    fold("if(false)var a", "var a");
+
+    
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldUselessWhile
+  public void testFoldUselessWhile() {
+    fold("while(false) { foo() }", "");
+
+    fold("while(void 0) { foo() }", "");
+    fold("while(undefined) { foo() }", "");
+
+    foldSame("while(true) foo()");
+
+    fold("while(false) { var a = 0; }", "var a");
+
+    
+    fold("while(false) { foo(); continue }", "");
+
+    fold("while(0) { foo() }", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldUselessFor
+  public void testFoldUselessFor() {
+    fold("for(;false;) { foo() }", "");
+    fold("for(;void 0;) { foo() }", "");
+    fold("for(;undefined;) { foo() }", "");
+    fold("for(;true;) foo() ", "for(;;) foo() ");
+    foldSame("for(;;) foo()");
+    fold("for(;false;) { var a = 0; }", "var a");
+
+    
+    fold("for(;false;) { foo(); continue }", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldUselessDo
+  public void testFoldUselessDo() {
+    fold("do { foo() } while(false);", "foo()");
+    fold("do { foo() } while(void 0);", "foo()");
+    fold("do { foo() } while(undefined);", "foo()");
+    fold("do { foo() } while(true);", "do { foo() } while(true);");
+    fold("do { var a = 0; } while(false);", "var a=0");
+
+    fold("do { var a = 0; } while(!{a:foo()});", "var a=0;foo()");
+
+    
+    foldSame("do { foo(); continue; } while(0)");
+    foldSame("do { foo(); break; } while(0)");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testMinimizeWhileConstantCondition
+  public void testMinimizeWhileConstantCondition() {
+    fold("while(true) foo()", "while(true) foo()");
+    fold("while(0) foo()", "");
+    fold("while(0.0) foo()", "");
+    fold("while(NaN) foo()", "");
+    fold("while(null) foo()", "");
+    fold("while(undefined) foo()", "");
+    fold("while('') foo()", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldConstantCommaExpressions
+  public void testFoldConstantCommaExpressions() {
+    fold("if (true, false) {foo()}", "");
+    fold("if (false, true) {foo()}", "foo()");
+    fold("true, foo()", "foo()");
+    fold("(1 + 2 + ''), foo()", "foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveUselessOps
+  public void testRemoveUselessOps() {
+    
+    
+    
+    
+    
+
+    
+    fold("Math.random()", "");
+    fold("Math.random(f() + g())", "f(),g();");
+    fold("Math.random(f(),g(),h())", "f(),g(),h();");
+
+    
+    foldSame("f();");
+    foldSame("(function () {})();");
+
+    
+    fold("(function () {});", "");
+    fold("(function f() {});", "");
+    
+    fold("(function () {foo();});", "");
+
+    
+    fold("+f()", "f()");
+    fold("a=(+f(),g())", "a=(f(),g())");
+    fold("a=(true,g())", "a=g()");
+    fold("f(),true", "f()");
+    fold("f() + g()", "f(),g()");
+
+    fold("for(;;+f()){}", "for(;;f()){}");
+    fold("for(+f();;g()){}", "for(f();;g()){}");
+    fold("for(;;Math.random(f(),g(),h())){}", "for(;;f(),g(),h()){}");
+
+    
+    fold("g() && +f()", "g() && f()");
+    fold("g() || +f()", "g() || f()");
+    fold("x ? g() : +f()", "x ? g() : f()");
+
+    fold("+x()", "x()");
+    fold("+x() * 2", "x()");
+    fold("-(+x() * 2)", "x()");
+    fold("2 -(+x() * 2)", "x()");
+    fold("x().foo", "x()");
+    foldSame("x().foo()");
+
+    foldSame("x++");
+    foldSame("++x");
+    foldSame("x--");
+    foldSame("--x");
+    foldSame("x = 2");
+    foldSame("x *= 2");
+
+    
+    foldSame("function f() {}");
+    foldSame("var x;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testOptimizeSwitch
+  public void testOptimizeSwitch() {
+    fold("switch(a){}", "");
+    fold("switch(foo()){}", "foo()");
+    fold("switch(a){default:}", "");
+    fold("switch(a){default:break;}", "");
+    fold("switch(a){default:var b;break;}", "var b");
+    fold("switch(a){case 1: default:}", "");
+    fold("switch(a){default: case 1:}", "");
+    fold("switch(a){default: break; case 1:break;}", "");
+    fold("switch(a){default: var b; break; case 1: var c; break;}",
+        "var c; var b;");
+
+    
+    foldSame("function f() {switch(a){default: return; case 1: break;}}");
+    foldSame("function f() {switch(a){case 1: foo();}}");
+    foldSame("function f() {switch(a){case 3: case 2: case 1: foo();}}");
+
+    fold("function f() {switch(a){case 2: case 1: default: foo();}}",
+         "function f() {switch(a){default: foo();}}");
+    fold("switch(a){case 1: default:break; case 2: foo()}",
+         "switch(a){case 2: foo()}");
+    foldSame("switch(a){case 1: goo(); default:break; case 2: foo()}");
+
+    
+    foldSame("switch(a){case 1: goo(); case 2:break; case 3: foo()}");
+
+    
+    foldSame("switch(a){case 1: var c =2; break;}");
+    foldSame("function f() {switch(a){case 1: return;}}");
+    foldSame("x:switch(a){case 1: break x;}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveNumber
+  public void testRemoveNumber() {
+    test("3", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveVarGet1
+  public void testRemoveVarGet1() {
+    test("a", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveVarGet2
+  public void testRemoveVarGet2() {
+    test("var a = 1;a", "var a = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveNamespaceGet1
+  public void testRemoveNamespaceGet1() {
+    test("var a = {};a.b", "var a = {}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveNamespaceGet2
+  public void testRemoveNamespaceGet2() {
+    test("var a = {};a.b=1;a.b", "var a = {};a.b=1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemovePrototypeGet1
+  public void testRemovePrototypeGet1() {
+    test("var a = {};a.prototype.b", "var a = {}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemovePrototypeGet2
+  public void testRemovePrototypeGet2() {
+    test("var a = {};a.prototype.b = 1;a.prototype.b",
+         "var a = {};a.prototype.b = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveAdd1
+  public void testRemoveAdd1() {
+    test("1 + 2", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveVar1
+  public void testNoRemoveVar1() {
+    testSame("var a = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveVar2
+  public void testNoRemoveVar2() {
+    testSame("var a = 1, b = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveAssign1
+  public void testNoRemoveAssign1() {
+    testSame("a = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveAssign2
+  public void testNoRemoveAssign2() {
+    testSame("a = b = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveAssign3
+  public void testNoRemoveAssign3() {
+    test("1 + (a = 2)", "a = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveAssign4
+  public void testNoRemoveAssign4() {
+    testSame("x.a = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveAssign5
+  public void testNoRemoveAssign5() {
+    testSame("x.a = x.b = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveAssign6
+  public void testNoRemoveAssign6() {
+    test("1 + (x.a = 2)", "x.a = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveCall1
+  public void testNoRemoveCall1() {
+    testSame("a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveCall2
+  public void testNoRemoveCall2() {
+    test("a()+b()", "a(),b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveCall3
+  public void testNoRemoveCall3() {
+    testSame("a() && b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveCall4
+  public void testNoRemoveCall4() {
+    testSame("a() || b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveCall5
+  public void testNoRemoveCall5() {
+    test("a() || 1", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveCall6
+  public void testNoRemoveCall6() {
+    testSame("1 || a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveThrow1
+  public void testNoRemoveThrow1() {
+    testSame("function f(){throw a()}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveThrow2
+  public void testNoRemoveThrow2() {
+    testSame("function f(){throw a}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveThrow3
+  public void testNoRemoveThrow3() {
+    testSame("function f(){throw 10}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveInControlStructure1
+  public void testRemoveInControlStructure1() {
+    test("if(x()) 1", "x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveInControlStructure2
+  public void testRemoveInControlStructure2() {
+    test("while(2) 1", "while(2);");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveInControlStructure3
+  public void testRemoveInControlStructure3() {
+    test("for(1;2;3) 4", "for(;;);");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook1
+  public void testHook1() {
+    test("1 ? 2 : 3", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook2
+  public void testHook2() {
+    test("x ? a() : 3", "x && a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook3
+  public void testHook3() {
+    test("x ? 2 : a()", "x || a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook4
+  public void testHook4() {
+    testSame("x ? a() : b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook5
+  public void testHook5() {
+    test("a() ? 1 : 2", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook6
+  public void testHook6() {
+    test("a() ? b() : 2", "a() && b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook7
+  public void testHook7() {
+    test("a() ? 1 : b()", "a() || b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook8
+  public void testHook8() {
+    testSame("a() ? b() : c()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testShortCircuit1
+  public void testShortCircuit1() {
+    testSame("1 && a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testShortCircuit2
+  public void testShortCircuit2() {
+    test("1 && a() && 2", "1 && a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testShortCircuit3
+  public void testShortCircuit3() {
+    test("a() && 1 && 2", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testShortCircuit4
+  public void testShortCircuit4() {
+    testSame("a() && 1 && b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testComplex1
+  public void testComplex1() {
+    test("1 && a() + b() + c()", "1 && (a(), b(), c())");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testComplex2
+  public void testComplex2() {
+    test("1 && (a() ? b() : 1)", "1 && a() && b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testComplex3
+  public void testComplex3() {
+    test("1 && (a() ? b() : 1 + c())", "1 && (a() ? b() : c())");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testComplex4
+  public void testComplex4() {
+    test("1 && (a() ? 1 : 1 + c())", "1 && (a() || c())");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testComplex5
+  public void testComplex5() {
+    
+    testSame("(a() ? 1 : 1 + c()) && foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveFunctionDeclaration1
+  public void testNoRemoveFunctionDeclaration1() {
+    testSame("function foo(){}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveFunctionDeclaration2
+  public void testNoRemoveFunctionDeclaration2() {
+    testSame("var foo = function (){}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoSimplifyFunctionArgs1
+  public void testNoSimplifyFunctionArgs1() {
+    testSame("f(1 + 2, 3 + g())");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoSimplifyFunctionArgs2
+  public void testNoSimplifyFunctionArgs2() {
+    testSame("1 && f(1 + 2, 3 + g())");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoSimplifyFunctionArgs3
+  public void testNoSimplifyFunctionArgs3() {
+    testSame("1 && foo(a() ? b() : 1 + c())");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveInherits1
+  public void testNoRemoveInherits1() {
+    testSame("var a = {}; this.b = {}; var goog = {}; goog.inherits(b, a)");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveInherits2
+  public void testNoRemoveInherits2() {
+    test("var a = {}; this.b = {}; var goog = {}; goog.inherits(b, a) + 1",
+         "var a = {}; this.b = {}; var goog = {}; goog.inherits(b, a)");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveInherits3
+  public void testNoRemoveInherits3() {
+    testSame("this.a = {}; var b = {}; b.inherits(a);");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNoRemoveInherits4
+  public void testNoRemoveInherits4() {
+    test("this.a = {}; var b = {}; b.inherits(a) + 1;",
+         "this.a = {}; var b = {}; b.inherits(a)");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveFromLabel1
+  public void testRemoveFromLabel1() {
+    test("LBL: void 0", "LBL: {}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveFromLabel2
+  public void testRemoveFromLabel2() {
+    test("LBL: foo() + 1 + bar()", "LBL: foo(),bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testCall1
+  public void testCall1() {
+    test("Math.sin(0);", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testCall2
+  public void testCall2() {
+    test("1 + Math.sin(0);", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNew1
+  public void testNew1() {
+    test("new Date;", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testNew2
+  public void testNew2() {
+    test("1 + new Date;", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldAssign
+  public void testFoldAssign() {
+    test("x=x", "");
+    testSame("x=xy");
+    testSame("x=x + 1");
+    testSame("x.a=x.a");
+    test("var y=(x=x)", "var y=x");
+    test("y=1 + (x=x)", "y=1 + x");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testTryCatchFinally
+  public void testTryCatchFinally() {
+    testSame("try {foo()} catch (e) {bar()}");
+    testSame("try { try {foo()} catch (e) {bar()}} catch (x) {bar()}");
+    test("try {var x = 1} finally {}", "var x = 1;");
+    testSame("try {var x = 1} finally {x()}");
+    test("function f() { return; try{var x = 1}finally{} }",
+        "function f() { return; var x = 1; }");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testObjectLiteral
+  public void testObjectLiteral() {
+    test("({})", "");
+    test("({a:1})", "");
+    test("({a:foo()})", "foo()");
+    test("({'a':foo()})", "foo()");
+  }

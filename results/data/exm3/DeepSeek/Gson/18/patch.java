@@ -1,0 +1,12 @@
+  static Type getSupertype(Type context, Class<?> contextRawType, Class<?> supertype) {
+    // wildcards are useless for resolving supertypes. As the upper bound has the same raw type, use it instead
+    while (context instanceof WildcardType) {
+      WildcardType wildcard = (WildcardType) context;
+      Type[] upperBounds = wildcard.getUpperBounds();
+      // Use the first upper bound. There should be at least one.
+      context = upperBounds[0];
+    }
+    checkArgument(supertype.isAssignableFrom(contextRawType));
+    return resolve(context, contextRawType,
+        $Gson$Types.getGenericSupertype(context, contextRawType, supertype));
+  }

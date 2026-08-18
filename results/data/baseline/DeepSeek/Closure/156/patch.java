@@ -1,0 +1,25 @@
+private void collapseDeclarationOfNameAndDescendants(Name n, String alias) {
+    boolean canCollapseChildNames = n.canCollapseUnannotatedChildNames();
+
+    // Handle this name first so that nested object literals get unrolled.
+    if (n.canCollapse() && canCollapseChildNames) {
+      updateObjLitOrFunctionDeclaration(n, alias);
+    }
+
+    if (n.props != null) {
+      for (Name p : n.props) {
+        // Update simple declaration first to avoid conflict with recursion.
+        if (!p.inExterns && canCollapseChildNames && p.declaration != null &&
+            p.declaration.node != null &&
+            p.declaration.node.getParent() != null &&
+            p.declaration.node.getParent().getType() == Token.ASSIGN) {
+          updateSimpleDeclaration(
+              appendPropForAlias(alias, p.name), p, p.declaration);
+        }
+
+        // Recurse so that saved node ancestries are intact when needed.
+        collapseDeclarationOfNameAndDescendants(
+            p, appendPropForAlias(alias, p.name));
+      }
+    }
+  }

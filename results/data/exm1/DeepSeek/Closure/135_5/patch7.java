@@ -1,0 +1,1 @@
+    for (Node child : children) {

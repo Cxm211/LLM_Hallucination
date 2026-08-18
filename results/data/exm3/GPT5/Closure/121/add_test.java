@@ -1,0 +1,2 @@
+// com/google/javascript/jscomp/InlineVariablesTest.java::testAliasNotInlinedAcrossCall
+public void testAliasNotInlinedAcrossCall() {\n  testSame(\n      "var y; function g(){ y=1; var a=y; h(); return a===y;} function h(){ y=2; }");\n}

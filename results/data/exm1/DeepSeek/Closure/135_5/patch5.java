@@ -1,0 +1,1 @@
+    // Copy children to avoid ConcurrentModificationException

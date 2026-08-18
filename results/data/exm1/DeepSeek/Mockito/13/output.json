@@ -1,0 +1,186 @@
+We need to analyze the buggy function: `org.mockito.internal.MockHandler.handle(Invocation)`.
+
+The code snippet shows a method `handle(Invocation invocation)`. This is the core handler for mock invocations in Mockito. The bug likely occurs in the handling of verification mode when an exception occurs or when verification is pulled but not properly re-added or cleaned up.
+
+From the source, there is a logical issue: when `verificationMode != null` and it's not a `MockAwareVerificationMode` or the mock doesn't match, the code proceeds directly to further stubbing without re-adding the verification mode. This means that if verification was started on a different mock, the verification mode is lost (not re-added), leading to subsequent invocations on the correct mock not being verified.
+
+Specifically, look at the conditional:
+```java
+if (verificationMode instanceof MockAwareVerificationMode && ((MockAwareVerificationMode) verificationMode).getMock() == invocation.getMock()) {
+    // verify
+} // else: falls through
+```
+If verificationMode is set but the mock doesn't match, the verificationMode is consumed (pulled) and not put back. The method then continues as if it's a normal invocation for stubbing. This would cause the verification to be lost.
+
+But we need to consider which testcases trigger this bug. The test methods are from:
+
+- `org.concurrentmockito.VerificationInOrderFromMultipleThreadsTest.shouldVerifyInOrderWhenMultipleThreadsInteractWithMock` - uses InOrder verification across threads, could be affected if verification mode is lost.
+- `org.mockito.internal.InvalidStateDetectionTest.shouldDetectUnfinishedVerification` - tests detection of unfinished verification; this might be related but the bug is about lost verification mode.
+- `org.mockito.internal.MockHandlerTest.shouldRemoveVerificationModeEvenWhenInvalidMatchers` - specifically tests that verification mode is removed even when invalid matchers throw exception. This test expects that after an exception from matchers, the verification mode is pulled (null). But if verification mode is not re-added in the case of a different mock, could it affect this test? The test uses a custom MatchersBinder that throws InvalidUseOfMatchersException. The code: when exception occurs in bindMatchers, the verification mode may not be cleaned up? Actually, the code catches exception? No, the exception propagates. But the test expects that after exception, `mockingProgress.pullVerificationMode()` returns null. The bug may be that if an exception occurs, the verification mode might not be pulled? Actually the code pulls verification mode before binding matchers. If binding throws, the verification mode is already pulled and not put back. So after exception, pullVerificationMode returns null, which is correct. So that test should pass.
+
+- `org.mockito.internal.progress.ThreadSafeMockingProgressTest.shouldShareState` - tests that verification mode is shared across threads. Could be affected if a thread loses verification mode due to bug.
+
+But which testcase actually exposes the bug? We need to look at the failing tests. Perhaps some tests involve verifying on multiple mocks, like the "VerifyingWithAnExtraCallToADifferentMockTest" mentioned in comments. That test is present: `org.mockitousage.bugs.VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine`. In that test, when verifying `mockTwo.simpleMethod(mock.otherMethod())`, inside `mock.otherMethod()` it will call the handle method with verificationMode set from the ongoing verification of `mockTwo`. When `mock.otherMethod()` is invoked, the handle method checks if verificationMode is MockAwareVerificationMode and if the mock matches. Since the mock is different (mock vs mockTwo), the condition fails, and the verification mode is not re-added. So the verification mode is lost, causing the later `verify(mockTwo, never()).simpleMethod(...)` to possibly fail. The test expects the first verify to pass and the second to throw `NeverWantedButInvoked`. The bug could cause the first verify to also fail or the behavior to change.
+
+Also `MultipleInOrdersTest.inOrderTest` might be affected.
+
+But we need to determine the exact testcases that trigger the bug. Since we don't have the original failing test results, we must deduce based on the bug. The bug is clearly described in the comments: "this means there is an invocation on a different mock. Re-adding verification mode - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)". The comment indicates that when the mock doesn't match, the code should re-add the verification mode. Currently, it doesn't; it just falls through and the verification mode is lost. So any test that uses verify() and then an extra call to a different mock in the expression would be affected. That's exactly `VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine`.
+
+Also `VerificationInOrderFromMultipleThreadsTest.shouldVerifyInOrderWhenMultipleThreadsInteractWithMock` might be affected if there is a similar scenario.
+
+Also `MultipleInOrdersTest.inOrderTest` uses multiple inOrder objects on the same list, and verifies them separately; but each inOrder verify uses its own verification mode, and if there is a call to the mock during the verify (i.e., argument evaluation might call another mock?), but in that test the arguments are literals, so no extra mock calls.
+
+Also consider concurrency tests: if two threads simultaneously verify on different mocks, the thread-local verification mode might be overwritten or lost. But the `handle` method is called per invocation; if two threads have their own mockingProgress (ThreadSafeMockingProgress), then the bug might not appear because each thread has its own. However, the `shouldShareState` test uses a static mocking progress? Actually, ThreadSafeMockingProgress uses ThreadLocal, so each thread has its own. So concurrency tests might not trigger it.
+
+Thus, the most directly affected test is `VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine`. Additionally, the `shouldRemoveVerificationModeEvenWhenInvalidMatchers` test might actually expose a different aspect: if an exception is thrown during matcher binding, the verification mode is already pulled and not re-added, but the test expects that after exception, pullVerificationMode returns null. That might still pass if no re-add occurs. Actually the bug might cause the verification mode to be lost when it shouldn't be, but in that test it's expected to be lost. So that test might not be a failing one.
+
+But we must be careful: the test `shouldRemoveVerificationModeEvenWhenInvalidMatchers` sets up a handler with a custom matchersBinder that throws `InvalidUseOfMatchersException`. When `handle` is called, it pulls verification mode at the top (line: `VerificationMode verificationMode = mockingProgress.pullVerificationMode();`). Then it tries to bind matchers, which throws. The exception propagates, and the verification mode is already pulled and not put back. So after the try-catch in the test, the test asserts that `handler.mockingProgress.pullVerificationMode()` is null. That should still be the case because the exception prevented any further code that might re-add it. So that test probably passes even with the buggy code.
+
+Another test: `org.mockito.internal.progress.MockingProgressImplTest.shouldStartVerificationAndPullVerificationMode` - this is about the fundamental pull behavior and should be fine.
+
+The buggy function is the `handle` method in `MockHandler`. We need to fix it so that when verificationMode is not applicable (i.e., not a MockAwareVerificationMode or mock doesn't match), we re-add the verificationMode back to mockingProgress before continuing.
+
+The fix: After the if block that checks for MockAwareVerificationMode and mock match, if we have a verificationMode that we didn't use, we need to re-add it. The simplest is to capture the verificationMode before the if, and handle the case where it's not used.
+
+Currently:
+```java
+VerificationMode verificationMode = mockingProgress.pullVerificationMode();
+// ... bind matchers ...
+if (verificationMode != null) {
+    if (verificationMode instanceof MockAwareVerificationMode && ((MockAwareVerificationMode) verificationMode).getMock() == invocation.getMock()) {
+        // verify
+        return null;
+    }
+}
+// falls through
+```
+
+We need to re-add verificationMode if it was not used. But note: if verificationMode is pulled, it must be re-added only if we didn't consume it (i.e., if we didn't do the verification). So we can do:
+
+```java
+if (verificationMode != null) {
+    if (verificationMode instanceof MockAwareVerificationMode && ((MockAwareVerificationMode) verificationMode).getMock() == invocation.getMock()) {
+        VerificationDataImpl data = new VerificationDataImpl(invocationContainerImpl, invocationMatcher);
+        verificationMode.verify(data);
+        return null;
+    } else {
+        // Verification was started but not for this mock; re-add it
+        mockingProgress.verificationStarted(verificationMode);
+    }
+}
+```
+
+But wait, there is also the case where verificationMode is not MockAwareVerificationMode? Actually, all verification modes are wrappers? Possibly, but the code only re-adds if it's MockAwareVerificationMode? No, the fix should re-add for any verification mode that wasn't used. So we should re-add in the else branch.
+
+Also note: The comment says "Re-adding verification mode - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)". So yes, the else branch should re-add.
+
+Thus, the fix is to add an else that re-adds the verification mode.
+
+Additionally, there is another subtlety: In the `if (invocationContainerImpl.hasAnswersForStubbing())` block, it returns null early. That block is for stubbing voids. In that case, there is no verification mode involved, so it's fine.
+
+Now, we must output the fixed code as a JSON string. We need to reproduce the entire function with the fix.
+
+Also, we need to list which test methods actually trigger the bug. Based on analysis, it's likely the test `VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine`. Also possibly the multiple in order test if it causes an extra call? But that test uses literal arguments, so no extra invocations. The concurrency test might also be affected if threads interleave and cause invocation on different mock during verification. The `shouldAllowVerifyingInThreads` tests in concurrent packages (three of them) might also be affected if they perform verification across threads. However, those tests just loop performing `performTest()` which likely includes verification on a single mock. They might not trigger the bug.
+
+We should also consider `VerificationInOrderFromMultipleThreadsTest.shouldVerifyInOrderWhenMultipleThreadsInteractWithMock` - it starts two threads sequentially (join after each), so no concurrent interleaving. The second thread calls a different method on the same mock. During the InOrder verification, the arguments are literals, so no extra mock calls. So this might not trigger.
+
+But there is another test: `MultipleInOrdersTest.inOrderTest` uses two InOrder objects on the same list, but the verify calls have literal arguments, so no extra mock invocations.
+
+Thus, the most definitive test is `VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine`. Additionally, there might be other tests that indirectly cause this. Let's check the list: `ShouldAllowVerifyingInThreads` maybe? But the code of `performTest()` is not provided, so we can't be sure. However, since the bug is specifically about an extra call to a different mock during verification, it's highly likely that only the test directly referenced in the comment triggers it.
+
+Therefore, I'll set the triggering method as that one.
+
+Also, possible other tests: `org.mockito.internal.MockHandlerTest.shouldRemoveVerificationModeEvenWhenInvalidMatchers` – but that test expects verification mode to be removed (null after exception), which is the current behavior (since it's not re-added). With the fix, if we re-add verification mode only when not matched? But in that test, the exception occurs before the if clause, so the verification mode remains pulled and not re-added. So that test should still pass. However, if we re-add in the else branch only when verificationMode != null and not used, but in that test the verificationMode was pulled before the exception, so after exception, the verificationMode is not in progress. The test asserts that pullVerificationMode returns null. That might still hold because we didn't re-add it. So that test should still pass.
+
+But careful: In the test, the custom matchersBinder throws, but the verification mode is pulled before binding. So after exception, the verification mode is consumed. The test expects null. That's fine.
+
+Thus, I'll only include the triggering test.
+
+Now, produce the fixed code. The original function as given:
+
+```java
+public Object handle(Invocation invocation) throws Throwable {
+    if (invocationContainerImpl.hasAnswersForStubbing()) {
+        // stubbing voids with stubVoid() or doAnswer() style
+        InvocationMatcher invocationMatcher = matchersBinder.bindMatchers(mockingProgress
+                        .getArgumentMatcherStorage(), invocation);
+        invocationContainerImpl.setMethodForStubbing(invocationMatcher);
+        return null;
+    }
+    VerificationMode verificationMode = mockingProgress.pullVerificationMode();
+
+    InvocationMatcher invocationMatcher = matchersBinder.bindMatchers(mockingProgress.getArgumentMatcherStorage(),
+                    invocation);
+
+    mockingProgress.validateState();
+
+    //if verificationMode is not null then someone is doing verify()        
+    if (verificationMode != null) {
+        //We need to check if verification was started on the correct mock 
+        // - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)
+        if (verificationMode instanceof MockAwareVerificationMode && ((MockAwareVerificationMode) verificationMode).getMock() == invocation.getMock()) {                
+            VerificationDataImpl data = new VerificationDataImpl(invocationContainerImpl, invocationMatcher);            
+            verificationMode.verify(data);
+            return null;
+            // this means there is an invocation on a different mock. Re-adding verification mode 
+            // - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)
+        }
+    }
+    
+    invocationContainerImpl.setInvocationForPotentialStubbing(invocationMatcher);
+    OngoingStubbingImpl<T> ongoingStubbing = new OngoingStubbingImpl<T>(invocationContainerImpl);
+    mockingProgress.reportOngoingStubbing(ongoingStubbing);
+
+    StubbedInvocationMatcher stubbedInvocation = invocationContainerImpl.findAnswerFor(invocation);
+
+    if (stubbedInvocation != null) {
+        stubbedInvocation.captureArgumentsFrom(invocation);
+        return stubbedInvocation.answer(invocation);
+    } else {
+        Object ret = mockSettings.getDefaultAnswer().answer(invocation);
+
+        // redo setting invocation for potential stubbing in case of partial
+        // mocks / spies.
+        // Without it, the real method inside 'when' might have delegated
+        // to other self method and overwrite the intended stubbed method
+        // with a different one. The reset is required to avoid runtime exception that validates return type with stubbed method signature.
+        invocationContainerImpl.resetInvocationForPotentialStubbing(invocationMatcher);
+        return ret;
+    }
+}
+```
+
+We need to add the else clause to re-add verificationMode. Also, we must keep the comment. The fix:
+
+After the inner if block that does verification, add an else that re-adds the verification mode. So:
+
+```java
+if (verificationMode != null) {
+    if (verificationMode instanceof MockAwareVerificationMode && ((MockAwareVerificationMode) verificationMode).getMock() == invocation.getMock()) {
+        VerificationDataImpl data = new VerificationDataImpl(invocationContainerImpl, invocationMatcher);
+        verificationMode.verify(data);
+        return null;
+    } else {
+        // this means there is an invocation on a different mock. Re-adding verification mode 
+        // - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)
+        mockingProgress.verificationStarted(verificationMode);
+    }
+}
+```
+
+Additionally, note that there is a return null inside the if; after the else, it falls through to stubbing, which is correct.
+
+Now, we need to output the entire function as a JSON string. Also, we need to output the fixed_code array containing the full fixed function(s). Since only the handle method is provided, we output that one.
+
+Also, we need to include the trigger_method array with the full paths of test methods that trigger the bug. Only one: "org.mockitousage.bugs.VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine".
+
+Let's verify that none of the other tests are likely to trigger: The concurrent tests might, but without evidence, we stick to the most explicit.
+
+Thus, final answer.{
+  "trigger_method": [
+    "org.mockitousage.bugs.VerifyingWithAnExtraCallToADifferentMockTest.shouldAllowVerifyingWhenOtherMockCallIsInTheSameLine"
+  ],
+  "fixed_code": [
+    "public Object handle(Invocation invocation) throws Throwable {\n        if (invocationContainerImpl.hasAnswersForStubbing()) {\n            // stubbing voids with stubVoid() or doAnswer() style\n            InvocationMatcher invocationMatcher = matchersBinder.bindMatchers(mockingProgress\n                            .getArgumentMatcherStorage(), invocation);\n            invocationContainerImpl.setMethodForStubbing(invocationMatcher);\n            return null;\n        }\n        VerificationMode verificationMode = mockingProgress.pullVerificationMode();\n\n        InvocationMatcher invocationMatcher = matchersBinder.bindMatchers(mockingProgress.getArgumentMatcherStorage(),\n                        invocation);\n\n        mockingProgress.validateState();\n\n        //if verificationMode is not null then someone is doing verify()        \n        if (verificationMode != null) {\n            //We need to check if verification was started on the correct mock \n            // - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)\n            if (verificationMode instanceof MockAwareVerificationMode && ((MockAwareVerificationMode) verificationMode).getMock() == invocation.getMock()) {                \n                VerificationDataImpl data = new VerificationDataImpl(invocationContainerImpl, invocationMatcher);            \n                verificationMode.verify(data);\n                return null;\n            } else {\n                // this means there is an invocation on a different mock. Re-adding verification mode \n                // - see VerifyingWithAnExtraCallToADifferentMockTest (bug 138)\n                mockingProgress.verificationStarted(verificationMode);\n            }\n        }\n        \n        invocationContainerImpl.setInvocationForPotentialStubbing(invocationMatcher);\n        OngoingStubbingImpl<T> ongoingStubbing = new OngoingStubbingImpl<T>(invocationContainerImpl);\n        mockingProgress.reportOngoingStubbing(ongoingStubbing);\n\n        StubbedInvocationMatcher stubbedInvocation = invocationContainerImpl.findAnswerFor(invocation);\n\n        if (stubbedInvocation != null) {\n            stubbedInvocation.captureArgumentsFrom(invocation);\n            return stubbedInvocation.answer(invocation);\n        } else {\n            Object ret = mockSettings.getDefaultAnswer().answer(invocation);\n\n            // redo setting invocation for potential stubbing in case of partial\n            // mocks / spies.\n            // Without it, the real method inside 'when' might have delegated\n            // to other self method and overwrite the intended stubbed method\n            // with a different one. The reset is required to avoid runtime exception that validates return type with stubbed method signature.\n            invocationContainerImpl.resetInvocationForPotentialStubbing(invocationMatcher);\n            return ret;\n        }\n    }"
+  ]
+}

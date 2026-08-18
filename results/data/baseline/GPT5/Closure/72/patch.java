@@ -1,0 +1,15 @@
+  private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop) {
+    Supplier<String> idSupplier = compiler.getUniqueNameIdSupplier();
+    // Make variable and label names unique to this instance.
+    NodeTraversal.traverse(
+        compiler, fnNode, new MakeDeclaredNamesUnique(
+            new InlineRenamer(
+                idSupplier,
+                "inline_",
+                isCallInLoop),
+            new InlineRenamer(
+                idSupplier,
+                "inline_",
+                isCallInLoop)));
+    // Make label names unique to this instance.
+  }

@@ -1,0 +1,16 @@
+public boolean addAll(int index, Collection coll) {
+    // gets initial size
+    final int sizeBefore = size();
+
+    // adds all elements
+    for (final Iterator it = coll.iterator(); it.hasNext();) {
+        add(index, it.next());
+        // if it was inserted, then increase the target index
+        if (size() > sizeBefore + (index - sizeBefore)) {
+            index++;
+        }
+    }
+
+    // compares sizes to detect if collection changed
+    return sizeBefore != size();
+}

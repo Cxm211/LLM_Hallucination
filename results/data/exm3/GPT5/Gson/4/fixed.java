@@ -1,0 +1,258 @@
+// ===== FIXED com.google.gson.stream.JsonReader :: doPeek() [lines 465-599] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonReader.java =====
+  int doPeek() throws IOException {
+    int peekStack = stack[stackSize - 1];
+    if (peekStack == JsonScope.EMPTY_ARRAY) {
+      stack[stackSize - 1] = JsonScope.NONEMPTY_ARRAY;
+    } else if (peekStack == JsonScope.NONEMPTY_ARRAY) {
+      // Look for a comma before the next element.
+      int c = nextNonWhitespace(true);
+      switch (c) {
+      case ']':
+        return peeked = PEEKED_END_ARRAY;
+      case ';':
+        checkLenient(); // fall-through
+      case ',':
+        break;
+      default:
+        throw syntaxError("Unterminated array");
+      }
+    } else if (peekStack == JsonScope.EMPTY_OBJECT || peekStack == JsonScope.NONEMPTY_OBJECT) {
+      stack[stackSize - 1] = JsonScope.DANGLING_NAME;
+      // Look for a comma before the next element.
+      if (peekStack == JsonScope.NONEMPTY_OBJECT) {
+        int c = nextNonWhitespace(true);
+        switch (c) {
+        case '}':
+          return peeked = PEEKED_END_OBJECT;
+        case ';':
+          checkLenient(); // fall-through
+        case ',':
+          break;
+        default:
+          throw syntaxError("Unterminated object");
+        }
+      }
+      int c = nextNonWhitespace(true);
+      switch (c) {
+      case '"':
+        return peeked = PEEKED_DOUBLE_QUOTED_NAME;
+      case '\'':
+        checkLenient();
+        return peeked = PEEKED_SINGLE_QUOTED_NAME;
+      case '}':
+        if (peekStack != JsonScope.NONEMPTY_OBJECT) {
+          return peeked = PEEKED_END_OBJECT;
+        } else {
+          throw syntaxError("Expected name");
+        }
+      default:
+        checkLenient();
+        pos--; // Don't consume the first character in an unquoted string.
+        if (isLiteral((char) c)) {
+          return peeked = PEEKED_UNQUOTED_NAME;
+        } else {
+          throw syntaxError("Expected name");
+        }
+      }
+    } else if (peekStack == JsonScope.DANGLING_NAME) {
+      stack[stackSize - 1] = JsonScope.NONEMPTY_OBJECT;
+      // Look for a colon before the value.
+      int c = nextNonWhitespace(true);
+      switch (c) {
+      case ':':
+        break;
+      case '=':
+        checkLenient();
+        if ((pos < limit || fillBuffer(1)) && buffer[pos] == '>') {
+          pos++;
+        }
+        break;
+      default:
+        throw syntaxError("Expected ':'");
+      }
+    } else if (peekStack == JsonScope.EMPTY_DOCUMENT) {
+      if (lenient) {
+        consumeNonExecutePrefix();
+      }
+      stack[stackSize - 1] = JsonScope.NONEMPTY_DOCUMENT;
+    } else if (peekStack == JsonScope.NONEMPTY_DOCUMENT) {
+      int c = nextNonWhitespace(false);
+      if (c == -1) {
+        return peeked = PEEKED_EOF;
+      } else {
+        checkLenient();
+        pos--;
+      }
+    } else if (peekStack == JsonScope.CLOSED) {
+      throw new IllegalStateException("JsonReader is closed");
+    }
+
+    int c = nextNonWhitespace(true);
+    switch (c) {
+    case ']':
+      if (peekStack == JsonScope.EMPTY_ARRAY) {
+        return peeked = PEEKED_END_ARRAY;
+      }
+      // fall-through to handle ",]"
+    case ';':
+    case ',':
+      // In lenient mode, a 0-length literal in an array means 'null'.
+      if (peekStack == JsonScope.EMPTY_ARRAY || peekStack == JsonScope.NONEMPTY_ARRAY) {
+        checkLenient();
+        pos--;
+        return peeked = PEEKED_NULL;
+      } else {
+        throw syntaxError("Unexpected value");
+      }
+    case '\'':
+      checkLenient();
+      return peeked = PEEKED_SINGLE_QUOTED;
+    case '"':
+      return peeked = PEEKED_DOUBLE_QUOTED;
+    case '[':
+      return peeked = PEEKED_BEGIN_ARRAY;
+    case '{':
+      return peeked = PEEKED_BEGIN_OBJECT;
+    default:
+      pos--; // Don't consume the first character in a literal value.
+    }
+
+    int result = peekKeyword();
+    if (result != PEEKED_NONE) {
+      return result;
+    }
+
+    result = peekNumber();
+    if (result != PEEKED_NONE) {
+      return result;
+    }
+
+    if (!isLiteral(buffer[pos])) {
+      throw syntaxError("Expected value");
+    }
+
+    checkLenient();
+    return peeked = PEEKED_UNQUOTED;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: beforeValue(boolean) [lines 613-643] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  private void beforeValue() throws IOException {
+    switch (peek()) {
+    case NONEMPTY_DOCUMENT:
+      if (!lenient) {
+        throw new IllegalStateException(
+            "JSON must have only one top-level value.");
+      }
+      // fall-through
+    case EMPTY_DOCUMENT: // first in document
+      replaceTop(NONEMPTY_DOCUMENT);
+      break;
+
+    case EMPTY_ARRAY: // first in array
+      replaceTop(NONEMPTY_ARRAY);
+      newline();
+      break;
+
+    case NONEMPTY_ARRAY: // another in array
+      out.append(',');
+      newline();
+      break;
+
+    case DANGLING_NAME: // value for name
+      out.append(separator);
+      replaceTop(NONEMPTY_OBJECT);
+      break;
+
+    default:
+      throw new IllegalStateException("Nesting problem.");
+    }
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: jsonValue(String) [lines 430-438] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter jsonValue(String value) throws IOException {
+    if (value == null) {
+      return nullValue();
+    }
+    writeDeferredName();
+    beforeValue();
+    out.append(value);
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: nullValue() [lines 445-457] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter nullValue() throws IOException {
+    if (deferredName != null) {
+      if (serializeNulls) {
+        writeDeferredName();
+      } else {
+        deferredName = null;
+        return this; // skip the name and the value
+      }
+    }
+    beforeValue();
+    out.write("null");
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: open(int, String) [lines 324-329] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  private JsonWriter open(int empty, String openBracket) throws IOException {
+    beforeValue();
+    push(empty);
+    out.write(openBracket);
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: value(Number) [lines 507-521] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter value(Number value) throws IOException {
+    if (value == null) {
+      return nullValue();
+    }
+
+    writeDeferredName();
+    String string = value.toString();
+    if (!lenient
+        && (string.equals("-Infinity") || string.equals("Infinity") || string.equals("NaN"))) {
+      throw new IllegalArgumentException("Numeric values must be finite, but was " + value);
+    }
+    beforeValue();
+    out.append(string);
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: value(String) [lines 413-421] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter value(String value) throws IOException {
+    if (value == null) {
+      return nullValue();
+    }
+    writeDeferredName();
+    beforeValue();
+    string(value);
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: value(boolean) [lines 464-469] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter value(boolean value) throws IOException {
+    writeDeferredName();
+    beforeValue();
+    out.write(value ? "true" : "false");
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: value(double) [lines 478-486] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter value(double value) throws IOException {
+    if (Double.isNaN(value) || Double.isInfinite(value)) {
+      throw new IllegalArgumentException("Numeric values must be finite, but was " + value);
+    }
+    writeDeferredName();
+    beforeValue();
+    out.append(Double.toString(value));
+    return this;
+  }
+
+// ===== FIXED com.google.gson.stream.JsonWriter :: value(long) [lines 493-498] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Gson/Gson-4-fixed/gson/src/main/java/com/google/gson/stream/JsonWriter.java =====
+  public JsonWriter value(long value) throws IOException {
+    writeDeferredName();
+    beforeValue();
+    out.write(Long.toString(value));
+    return this;
+  }

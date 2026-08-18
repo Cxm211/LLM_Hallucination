@@ -1,0 +1,707 @@
+We are given one buggy function `maybeDeclareQualifiedName` and a large list of test methods. We need to identify which test methods actually expose a bug in this function. Then we need to provide a minimal fix.
+
+First, let's analyze the buggy code:
+
+```java
+void maybeDeclareQualifiedName(NodeTraversal t, JSDocInfo info,
+    Node n, Node parent, Node rhsValue) {
+  Node ownerNode = n.getFirstChild();
+  String ownerName = ownerNode.getQualifiedName();
+  String qName = n.getQualifiedName();
+  String propName = n.getLastChild().getString();
+  Preconditions.checkArgument(qName != null && ownerName != null);
+
+  // ... several comments and logic ...
+
+  JSType valueType = getDeclaredType(t.getSourceName(), info, n, rhsValue);
+  if (valueType == null && rhsValue != null) {
+    valueType = rhsValue.getJSType();
+  }
+  // Function prototypes are special.
+  if ("prototype".equals(propName)) {
+    Var qVar = scope.getVar(qName);
+    if (qVar != null) {
+      ObjectType qVarType = ObjectType.cast(qVar.getType());
+      if (qVarType != null &&
+          rhsValue != null &&
+          rhsValue.isObjectLit()) {
+        typeRegistry.resetImplicitPrototype(
+            rhsValue.getJSType(), qVarType.getImplicitPrototype());
+      } else if (!qVar.isTypeInferred()) {
+        return;
+      }
+      if (qVar.getScope() == scope) {
+        scope.undeclare(qVar);
+      }
+    }
+  }
+
+  if (valueType == null) {
+    if (parent.isExprResult()) {
+      stubDeclarations.add(new StubDeclaration(
+          n,
+          t.getInput() != null && t.getInput().isExtern(),
+          ownerName));
+    }
+    return;
+  }
+
+  boolean inferred = true;
+  if (info != null) {
+    inferred = !(info.hasType()
+        || info.hasEnumParameterType()
+        || (info.isConstant() && valueType != null
+            && !valueType.isUnknownType())
+        || FunctionTypeBuilder.isFunctionTypeDeclaration(info));
+  }
+
+  if (inferred) {
+    inferred = !(rhsValue != null &&
+        rhsValue.isFunction() &&
+        (info != null || !scope.isDeclared(qName, false)));
+  }
+
+  if (!inferred) {
+    ObjectType ownerType = getObjectSlot(ownerName);
+    if (ownerType != null) {
+      boolean isExtern = t.getInput() != null && t.getInput().isExtern();
+      if ((!ownerType.hasOwnProperty(propName) ||
+           ownerType.isPropertyTypeInferred(propName)) &&
+          ((isExtern && !ownerType.isNativeObjectType()) ||
+           !ownerType.isInstanceType())) {
+        ownerType.defineDeclaredProperty(propName, valueType, n);
+      }
+    }
+    defineSlot(n, parent, valueType, inferred);
+  } else if (rhsValue != null && rhsValue.isTrue()) {
+    // Delegate proxy method properties
+    // ...
+  }
+}
+```
+
+Now, we need to determine which test cases trigger a bug. The bug likely involves incorrect handling of property declarations, especially regarding `prototype` assignments, inferred vs declared types, and conditions that trigger early returns or incorrect `scope.undeclare`.
+
+One known issue: In the prototype handling block, when `qVar` is not null and `!qVar.isTypeInferred()`, the code returns early. This means that if a prototype is assigned a non-object-literal (e.g., a function expression) and the variable is not inferred (i.e., declared with a type), it returns without processing further. This might cause the property not to be declared correctly. Also, after the early return, it does not execute the rest of the function, potentially missing the `defineSlot` call.
+
+Another issue: The `scope.undeclare(qVar)` is called even when the prototype assignment is a non-object-literal and early returns before reaching it (since the early return is inside the `else if` before the undeclare call). Actually, the structure is:
+
+```java
+if ("prototype".equals(propName)) {
+    Var qVar = scope.getVar(qName);
+    if (qVar != null) {
+      ObjectType qVarType = ObjectType.cast(qVar.getType());
+      if (qVarType != null &&
+          rhsValue != null &&
+          rhsValue.isObjectLit()) {
+        typeRegistry.resetImplicitPrototype(...);
+      } else if (!qVar.isTypeInferred()) {
+        return;  // early return
+      }
+      if (qVar.getScope() == scope) {
+        scope.undeclare(qVar); // this is after the else-if
+      }
+    }
+  }
+```
+
+So if `!qVar.isTypeInferred()` is true, it returns early and never reaches the `undeclare` call. That seems intentional but might cause issues if the prototype is assigned something else and we want to keep the variable undeclared? Actually the comment says: "If the programmer has declared that F inherits from Super, and they assign F.prototype to some arbitrary expression, there's not much we can do. We just ignore the expression, and hope they've annotated their code in a way to tell us what props are going to be on that prototype." So it returns to ignore the assignment. But then it also does not undeclare the variable. That might be okay.
+
+But the bug might be that this early return prevents the later code that handles property declaration (the `if (!inferred)` block) from executing. For example, if we have a prototype assignment with a function literal, and the variable is declared (not inferred) and the function literal is not an object literal, then it returns early, and no property is declared. However, the assignment itself should still be processed? Possibly the test cases involve such scenarios.
+
+Let's look at the test methods. There are many tests. We need to find which ones actually expose a bug. The bug may be that some test expects a type error or correct type inference that is not happening due to the bug.
+
+One common pattern: Test cases that involve prototype assignments, especially those that test the type of `this` or property declarations on prototypes. For example:
+
+- `testThis5` to `testThis10` test the `this` keyword in functions.
+- `testGlobalThis1` to `testGlobalThis6` test global `this`.
+- Many other tests test type inference, property declarations, etc.
+
+However, the bug is in `maybeDeclareQualifiedName`, so tests that involve qualified name assignments (like `A.prototype.foo = ...`) are relevant.
+
+Let's focus on tests that involve prototype assignments and possibly trigger the early return. The early return occurs when:
+- `propName.equals("prototype")` is true.
+- `qVar != null`
+- `qVarType` is null or `rhsValue` is null or not object literal, and `!qVar.isTypeInferred()`.
+
+So if a constructor `Foo` is declared with a type (i.e., via JSDoc or inferred from a function declaration), and we assign `Foo.prototype = someFunction` or `Foo.prototype = someNonObjectLiteral`, then the early return happens. This might cause the property `prototype` on `Foo` not to be properly declared/updated.
+
+But the test cases we have are from `LooseTypeCheckTest`. They use `testTypes` which runs type checking. Many of these tests expect errors. The bug might cause missing errors or incorrect errors.
+
+Given the huge list, we need to be systematic. However, as an AI, I need to reason about the likely bug. I recall a known bug in this function: when the prototype is assigned a non-object literal and the constructor variable is not inferred (i.e., it has a declared type), the function returns early and does not call `defineSlot`, which means the property `prototype` on the constructor is not declared as a property. This can lead to incorrect type checking for the prototype property.
+
+But let's see some test cases that might be affected:
+
+- `testThis5`: `"function h() { return this }"` with an expected error. This does not involve prototype assignment. So likely not triggered.
+
+- `testThis6`: `"var goog = {}; goog.A = function(){ return this };"` This assigns a function to `goog.A`, not a prototype assignment. So not directly.
+
+- `testThis7`: `"function A(){}; A.prototype.n = function() { return this };"` This assigns a function to `A.prototype.n`. That's a prototype property assignment, not `prototype` itself. The `propName` is `n`, not `prototype`. So the prototype block is not triggered.
+
+- `testThis8`: similar.
+
+- `testThis9` and `testThis10`: `"function A(){}; A.prototype.foo = 3; A.bar = function() { return this.foo; };"` Here, there is an assignment `A.prototype.foo = 3`. `propName` is `foo`, not `prototype`. So not directly.
+
+- `testGlobalThis...`: involve global `this`, not prototype assignments.
+
+- `testControlFlowRestrictsType...`: control flow, not directly.
+
+- `testSwitchCase...`: switch cases.
+
+- `testNoTypeCheck...`: not.
+
+- `testImplicitCast...`: not.
+
+- `testNumberNode...`: not.
+
+- `testNumberAutoboxing...`: not.
+
+- `testIssue86`: `"function I() {} I.prototype.get = function(){}; function F() {} F.prototype.get = function() { return true; };"` This involves prototype property assignments, not the `prototype` property itself.
+
+- `testBug592170`: no.
+
+- `testBug901455`: no.
+
+- `testBug908701`: no.
+
+- `testBug908625`: no.
+
+- `testBug911118`: no.
+
+- `testBug909000`: no.
+
+- `testBug930117`: no.
+
+- `testBug1484445`: `"function Foo() {} Foo.prototype.bar = null; Foo.prototype.baz = null;"` - This assigns `null` to prototype properties, not the prototype itself.
+
+- `testBug1859535`: `"var inherits = function(childCtor, parentCtor) { ... childCtor.prototype = new tempCtor(); ... }"` Here, `childCtor.prototype = new tempCtor()` - This is an assignment to `prototype` property. The right-hand side is a `new tempCtor()`, which is not an object literal. Also, `childCtor` is a parameter, its type is inferred. So `qVar` might be null (since it's a local variable, not in scope?), actually `qVar = scope.getVar(qName)` where `qName` is `childCtor.prototype`. `scope.getVar` returns a variable for `childCtor.prototype`? Typically, qualified names are not directly stored in scope as a single variable unless it's a global variable. In function scope, `childCtor` is a local variable. `scope.getVar` for `childCtor.prototype` will likely return null because that's not a variable name. So the prototype block is not triggered because `qVar` is null. So not the bug.
+
+- `testBug1940591`: `"var a = {}; a.name = 0; a.g = function(x) { x.name = 'a'; };"` No prototype.
+
+- `testBug1942972`: `"var google = { gears: { factory: {}, workerPool: {} } }; google.gears = {factory: {}};"` Assignment to `google.gears`, propName is `gears`, not prototype.
+
+- `testBug1943776`: no.
+
+- `testBug1987544`: no.
+
+- `testBug1940769`: `"function proto(obj) { return obj.prototype; } function Map() {} function Map2() { Map.call(this); }; Map2.prototype = proto(Map);"` Here `Map2.prototype = proto(Map)`. This is an assignment to `prototype` of `Map2`. `qName` is `Map2.prototype`. `scope.getVar("Map2.prototype")` likely returns null because it's a property, not a variable. So prototype block not triggered.
+
+- `testBug2335992`: no.
+
+- `testBug2341812`: no.
+
+- `testScopedConstructors`: no.
+
+- `testQualifiedNameInference1`: `"function Foo() {} Foo.prototype.bar = null; Foo.prototype.baz = null;"` Again, prototype properties, not prototype itself.
+
+- `testSheqRefinedScope`: no.
+
+- `testAssignToUntypedVariable`: no.
+
+- `testAssignToUntypedProperty`: no.
+
+- `testNew...`: many tests about `new`. Not directly.
+
+- `testName...`: no.
+
+- `testBitOperation...`: no.
+
+- `testCall...`: no.
+
+- `testFunctionCall...`: no.
+
+- `testCast...`: no.
+
+- `testNativeCast...`: no.
+
+- `testBadConstructorCall`: no.
+
+- `testTypeof`: no.
+
+- `testConstructorType...`: no.
+
+- `testAnonymousType...`: no.
+
+- `testBang...`: no.
+
+- `testDefinePropertyOnNullableObject...`: no.
+
+- `testUnknownConstructorInstanceType...`: no.
+
+- `testUnknownPrototypeChain`: `"function inst(co) { var c = function() {}; c.prototype = co.prototype; return new c; }"` Here, `c.prototype = co.prototype`. `qName` is `c.prototype`. `qVar = scope.getVar("c.prototype")` is null. So not triggered.
+
+- `testNamespacedConstructor`: no.
+
+- `testComplexNamespace`: no.
+
+- `testAddingMethodsUsingPrototypeIdiomSimpleNamespace`: `"function A() {} A.prototype.m1 = 5"` - propName `m1`, not prototype.
+
+- `testAddingMethodsUsingPrototypeIdiomComplexNamespace1/2`: similar.
+
+- `testAddingMethodsPrototypeIdiomAndObjectLiteralSimpleNamespace`: `"function A() {} A.prototype = {m1: 5, m2: true}"` - Here, `propName` is `prototype`! And `rhsValue` is an object literal. So the prototype block is triggered. The code does: `if (qVarType != null && rhsValue != null && rhsValue.isObjectLit()) { typeRegistry.resetImplicitPrototype(...); }` then `if (qVar.getScope() == scope) { scope.undeclare(qVar); }`. No early return because `isObjectLit()` is true. So this path works correctly.
+
+- `testDontAddMethodsIfNoConstructor`: similar to above.
+
+- `testFunctionAssignement`: no.
+
+- `testAddMethodsPrototypeTwoWays`: `"function A() {} A.prototype = {m1: 5, m2: true}; A.prototype.m3 = 'third property!';"` The first assignment is like above. The second assignment `A.prototype.m3` is `m3`, not prototype.
+
+- `testPrototypePropertyTypes`: No direct prototype assign.
+
+- `testValueTypeBuiltInPrototypePropertyType`: no.
+
+- `testDeclareBuiltInConstructor`: no.
+
+- `testExtendBuiltInType1/2`: no.
+
+- `testExtendFunction1/2`: no.
+
+- `testInheritanceCheck...`: Many tests about inheritance. Some involve `Sub.prototype = ...` possibly.
+
+- `testDirectPrototypeAssign`: `"function Foo() {} function Bar() {} Bar.prototype = new Foo()"` Here, `propName` is `prototype`, `rhsValue` is `new Foo()`, which is not an object literal. `qVar` for `Bar.prototype`? `qName` is `Bar.prototype`. `scope.getVar("Bar.prototype")` likely null because `Bar` is a function, `Bar.prototype` is not a variable. Actually, in global scope, `Bar` is a variable, but `Bar.prototype` is not a separately declared variable. So `qVar` will be null. Thus the prototype block will be skipped entirely because `if (qVar != null)` fails. So the prototype assignment is treated as a normal property assignment. So this test might still be affected.
+
+- `testResolutionViaRegistry...`: no.
+
+- `testInheritanceCheck1` etc.: `"function Super() {}; function Sub() {}; Sub.prototype.foo = function() {};"` This assigns to `Sub.prototype.foo`, not `prototype`.
+
+- `testInheritanceCheck7/8`: similar.
+
+- `testInheritanceCheck9_1/2/3`: similar.
+
+- `testInheritanceCheck10_1/2/3`: similar.
+
+- `testInterfaceInheritanceCheck...`: similar.
+
+- `testInterfacePropertyNotImplemented`: similar.
+
+- `testStubConstructorImplementingInterface`: no.
+
+- `testObjectLiteral`: no.
+
+- `testCallDateConstructorAsFunction`: no.
+
+- `testPropertyTypeOfUnionType`: no.
+
+- `testAnnotatedPropertyOnInterface...`: no.
+
+- `testWarnUnannotatedPropertyOnInterface...`: no.
+
+- `testWarnDataPropertyOnInterface...`: no.
+
+- `testErrorMismatchingPropertyOnInterface...`: no.
+
+- `testInterfaceNonEmptyFunction`: no.
+
+- `testDoubleNestedInterface`: no.
+
+- `testStaticDataPropertyOnNestedInterface`: no.
+
+- `testInterfaceInstantiation`: no.
+
+- `testPrototypeLoop`: `"var T = function() {}; alert((new T).foo);"` This involves prototype chain but not assignment.
+
+- `testDirectPrototypeAssign` and `testPrototypeLoop` might be relevant. But we need to see which test actually fails.
+
+- `testGatherProperyWithoutAnnotation...`: no.
+
+- `testFunctionMasksVariableBug`: no.
+
+- `testDfa...`: Data flow analysis tests, not directly.
+
+- `testTypeInferenceWithCast...`: no.
+
+- `testTypeInferenceWithClosure...`: no.
+
+- `testForwardPropertyReference`: no.
+
+- `testNoForwardTypeDeclaration`: no.
+
+- `testForwardTypeDeclaration1/2/3`: no.
+
+- `testDuplicateTypeDef`: no.
+
+- `testTypeDef1/2/3`: no.
+
+- `testCircularTypeDef`: no.
+
+- `testGetTypedPercent...`: no.
+
+- `testPrototypePropertyReference`: `"function Foo() {} Foo.prototype.bar = function(a){}; function baz(f) { Foo.prototype.bar.call(f, 3); }"` This assigns to `prototype.bar`, not prototype.
+
+- `testResolvingNamedTypes`: no.
+
+- `testMissingProperty...`: no.
+
+Given the limited time, I need to infer which test methods are likely to fail due to the bug. The bug is in `maybeDeclareQualifiedName`. The function is called when processing assignments to qualified names (like `A.prototype = ...` or `A.prototype.foo = ...`). The specific bug is in the handling of the `prototype` property. The early return when `!qVar.isTypeInferred()` and the right-hand side is not an object literal may cause incorrect behavior. But does that affect any test? Possibly tests that assign a non-object-literal to `prototype` and expect type errors or correct inheritance.
+
+Let's look at `testDirectPrototypeAssign`: it expects an error: "assignment to property prototype of Bar found : Foo required: (Array|null|undefined)". This test expects that assigning `Bar.prototype = new Foo()` is an error because the type of `Bar.prototype` is expected to be `Array|null|undefined` (since the default prototype is an Array? Actually, in Google's closure, the prototype property is declared as `Array|null|undefined`? That seems odd. Maybe it's because they have an extern definition where `prototype` is typed as `Array|null|undefined`? Possibly. Anyway, this test expects an error. If the bug causes the assignment to be ignored (due to early return), then the error might not be reported, and the test would fail. So `testDirectPrototypeAssign` might be a candidate.
+
+Similarly, `testAddingMethodsPrototypeIdiomAndObjectLiteralSimpleNamespace` assigns an object literal to `prototype`, which should work. That path is not early-returned. So it likely passes.
+
+`testPrototypeLoop` might also be affected because it involves prototype assignment? Actually, it doesn't assign to prototype; it uses `(new T).foo` and expects a cyclic inheritance warning. That warning is triggered elsewhere.
+
+Another possible test is `testBug1859535` which includes `childCtor.prototype = new tempCtor()`. But as argued, `qVar` is null, so early return not triggered. So it might still work.
+
+What about `testBug1940769`: `Map2.prototype = proto(Map);` - again, `qVar` likely null.
+
+Let's check `testNew11`: `"function f(c1) { var c2 = function(){}; c1.prototype = new c2; }"` This assigns to `c1.prototype`, but `c1` is a parameter. `qName` is `c1.prototype`. `scope.getVar` for `c1.prototype` is null. So not triggered.
+
+What about `testInheritanceCheck3`? No.
+
+I think the key test is `testDirectPrototypeAssign`. Also possibly tests that assign a non-object-literal to prototype and expect correct type inference of the prototype property. But many tests do that.
+
+Let's consider a scenario where the prototype is assigned a function, and the variable is not inferred. For example, if a constructor is declared with JSDoc, then `qVar.isTypeInferred()` is false (since it has a type). Then if we assign `Constructor.prototype = function() {}`, the early return will happen, and the prototype property will not be declared as a property of `Constructor`. But later, when we try to access `Constructor.prototype`, it might be unknown. However, that's not tested directly.
+
+Looking at the test list, `testScopedConstructors` might be relevant? Not sure.
+
+Given the difficulty, I think we need to run through the tests mentally. However, the instruction says "determine which testcase methods actually expose the bug". Since we cannot run code, we must rely on understanding of the code and common bug patterns.
+
+The bug might be that the condition `!qVar.isTypeInferred()` is too broad. It should only return early if the variable's type is not a function (i.e., it's not a constructor). But currently it returns whenever the variable is not inferred, which includes cases where the variable has a declared type but is not a constructor (e.g., a plain object). But that might be okay.
+
+Alternatively, the bug might be that the early return happens before `scope.undeclare(qVar)`, but `undeclare` should happen regardless to allow the prototype assignment to redefine the prototype? The comment says "If the programmer has declared that F inherits from Super, ... we just ignore the expression". So they want to ignore the assignment if the variable is not inferred. But then they also do not undeclare, which means the old variable remains. That is probably intended.
+
+Another angle: The `if (qVar.getScope() == scope)` undeclare call is outside the else-if. That means if the condition is met (qVarType != null && rhsValue is object literal), it will undeclare. But if not (i.e., else-if branch taken or the outer if condition false), the undeclare is still executed? Wait, check the code:
+
+```java
+if (qVarType != null && rhsValue != null && rhsValue.isObjectLit()) {
+    typeRegistry.resetImplicitPrototype(...);
+} else if (!qVar.isTypeInferred()) {
+    return;
+}
+if (qVar.getScope() == scope) {
+    scope.undeclare(qVar);
+}
+```
+
+So:
+- If the first condition is true: it resets implicit prototype and then proceeds to undeclare.
+- If the first condition is false and `!qVar.isTypeInferred()` is true: it returns, so undeclare is not reached.
+- If both conditions false: it goes to undeclare.
+
+So when `!qVar.isTypeInferred()` is true (variable is declared), and the RHS is not an object literal, it returns without undeclaring. That might be intentional: if the programmer has declared a constructor with an extends tag, and then assigns a non-object-literal to prototype, we ignore the assignment and keep the original prototype. But then the variable remains declared, which might cause duplication? Actually, `scope.undeclare` is called to remove the variable from scope? Wait, `scope.undeclare(qVar)` removes the variable from the scope. That might be to allow a new variable to be declared later? But if we have a constructor `Foo` and we do `Foo.prototype = something`, the variable `Foo` is not removed; it's the property `Foo.prototype` that is being defined. `qVar` is the variable for `Foo.prototype`? No, `qName` is `n.getQualifiedName()` which is the full qualified name, e.g., `Foo.prototype`. So `scope.getVar("Foo.prototype")` returns a variable if there is one. In typical scopes, properties are not stored as variables. So `qVar` is usually null. That's why most test cases don't trigger this path.
+
+Wait, that's a key insight. `scope.getVar` retrieves a variable by name. In JavaScript, properties like `Foo.prototype` are not directly stored as variables in the scope. Variables are like `Foo`, not `Foo.prototype`. So `qVar` will be null for most prototype assignments unless there is a variable explicitly named `Foo.prototype` (which is rare). So the prototype block is rarely triggered. That suggests the bug is in a different part of the function, perhaps in the handling of normal property assignments (not prototype) where `inferred` logic is wrong.
+
+Let's re-read the function. It handles both prototype and non-prototype properties. For non-prototype properties, it tries to determine if the assignment is a declaration or just inference. The logic for `inferred` might have a bug.
+
+Specifically, the condition:
+```java
+inferred = !(info != null && (info.hasType() || info.hasEnumParameterType() || (info.isConstant() && valueType != null && !valueType.isUnknownType()) || FunctionTypeBuilder.isFunctionTypeDeclaration(info)));
+```
+This is correct.
+
+Then:
+```java
+if (inferred) {
+    inferred = !(rhsValue != null && rhsValue.isFunction() && (info != null || !scope.isDeclared(qName, false)));
+}
+```
+This tries to catch case #2: ASSIGN to FUNCTION literal. It sets `inferred = false` if the RHS is a function and either there's info or the name is not already declared.
+
+But the condition might be inverted? Let's parse: `inferred = !(rhsValue != null && rhsValue.isFunction() && (info != null || !scope.isDeclared(qName, false)));` So `inferred` becomes false only if the inner condition is true. That inner condition is: RHS is function AND (info is not null OR the name is not declared). That seems correct: if we have a function literal and we have JSDoc info, or the name hasn't been declared yet, we treat it as a declaration. Otherwise, it's inferred.
+
+But there is a subtle bug: when `info` is null and the name is already declared, then `info != null` is false, and `!scope.isDeclared(qName, false)` is false, so the whole inner condition becomes false, so `inferred` remains true (the function assignment is considered inferred). That might be correct: if the name is already declared, then assigning a function should be inferred type for that property? Actually, the comment says #2 is a declaration if the function has jsdoc or has not been declared before. So if it's already declared and no jsdoc, it's inferred. Good.
+
+Now, what about the case where `inferred` is determined to be false (i.e., declaration) and then the code tries to declare the property. It does:
+
+```java
+if (!inferred) {
+    ObjectType ownerType = getObjectSlot(ownerName);
+    if (ownerType != null) {
+      boolean isExtern = t.getInput() != null && t.getInput().isExtern();
+      if ((!ownerType.hasOwnProperty(propName) ||
+           ownerType.isPropertyTypeInferred(propName)) &&
+          ((isExtern && !ownerType.isNativeObjectType()) ||
+           !ownerType.isInstanceType())) {
+        ownerType.defineDeclaredProperty(propName, valueType, n);
+      }
+    }
+    defineSlot(n, parent, valueType, inferred);
+  }
+```
+
+This declares the property on the owner type and then calls `defineSlot`. That seems okay.
+
+But the bug might be in the else-if branch:
+
+```java
+} else if (rhsValue != null && rhsValue.isTrue()) {
+    // delegate proxy method properties
+    ...
+}
+```
+
+This only handles `isTrue()`. But what if `inferred` is true and `rhsValue` is not true? Then nothing happens, and the assignment is not processed as a declaration. That might be correct.
+
+Now, what could cause a test to fail? Possibly the test expects a property to be declared, but the function returns early due to the prototype block? But as argued, prototype block is rarely triggered because `qVar` is null.
+
+Let's look at `testDirectPrototypeAssign` again. The error message is: "assignment to property prototype of Bar ... found : Foo required: (Array|null|undefined)". This suggests that the compiler thinks that `Bar.prototype` has a declared type of `Array|null|undefined` (maybe from an extern definition). When assigning `new Foo()`, it's an error because types don't match. This type checking is likely done in the property assignment logic. If the prototype block early returns, then the assignment might be completely ignored, and no error would be reported. So if the test expects an error but the bug causes no error, the test would fail. So `testDirectPrototypeAssign` might be a trigger.
+
+Similarly, other tests that assign to prototype and expect errors might be affected. For example, `testImplicitCastSubclassAccess`? No.
+
+Let's search for tests that assign to another object's prototype property with a non-object-literal.
+
+`testBug1859535` assigns `childCtor.prototype = new tempCtor()` and `childCtor.superClass_ = parentCtor.prototype`. No expected error.
+
+`testBug1940769` assigns `Map2.prototype = proto(Map)`; no error expected.
+
+`testNew11` assigns `c1.prototype = new c2` and expects an error "NOT_A_CONSTRUCTOR". This is an error about using `new` on `c2` which might not be a constructor. That error is generated elsewhere, not necessarily in property assignment.
+
+We also have `testPrototypeLoop` which expects a parse error, not related.
+
+Let's check `testAddingMethodsUsingPrototypeIdiomSimpleNamespace` and similar: they don't assign to `prototype`, they assign to `prototype.m1`.
+
+What about `testCast15`? No.
+
+I think the most likely candidate is `testDirectPrototypeAssign`. But we need to be sure. Let's also consider tests that involve namespace reassignment like `testBug1942972` which reassigns `google.gears`. That's a property assignment, but it's not a function or object literal? It's an object literal `{factory: {}}`. So not triggered.
+
+Another possibility: The early return may also happen when `qVar` is not null but the variable is not inferred, for example, if a variable is declared with a type but not a constructor. Then assigning a function to its `prototype` property might trigger the early return. Are there such tests? For instance, if we have `var goog = {}; goog.A = function() {}; goog.A.prototype = ...` Here, `goog.A` is a variable (because it's a property assignment? Actually, `goog.A` is a property of `goog`, and `scope.getVar("goog.A")` might return null because `goog.A` is not a variable name; it's a qualified name. So again, `qVar` is null.
+
+The only way `qVar` is non-null is if there is a variable directly with that name. That happens when we have a local variable like `var Foo.prototype`? Not allowed.
+
+Wait, `scope.getVar` looks up a variable in the scope. In the global scope, when we do `var Foo = function() {}`, the variable `Foo` is stored. But `Foo.prototype` is not a variable, it's a property access. So `qVar` for `Foo.prototype` is null unless there is a variable explicitly named `Foo.prototype`, which is impossible in JavaScript.
+
+Thus, the `if ("prototype".equals(propName))` block's `scope.getVar(qName)` will usually return null, so the whole block is skipped. That means the early return is rarely triggered. So the bug likely lies elsewhere.
+
+Maybe the bug is in the logic for determining `inferred`. There might be an incorrect condition that causes some assignments to be treated as inferred when they should be declared, or vice versa.
+
+Let's examine the `inferred` computation more carefully. The code is:
+
+```java
+boolean inferred = true;
+if (info != null) {
+    inferred = !(info.hasType()
+        || info.hasEnumParameterType()
+        || (info.isConstant() && valueType != null
+            && !valueType.isUnknownType())
+        || FunctionTypeBuilder.isFunctionTypeDeclaration(info));
+}
+
+if (inferred) {
+    inferred = !(rhsValue != null &&
+        rhsValue.isFunction() &&
+        (info != null || !scope.isDeclared(qName, false)));
+}
+```
+
+If `info != null` but does not satisfy any of the conditions (e.g., just a @param annotation?), then `inferred` becomes true because `!(false)` = true. Then the second if executes. That seems okay.
+
+But there is a bug: If `info != null` and `info` has a type (e.g., `@type {number}`), then `inferred` becomes false. Then the second `if (inferred)` is skipped. So `inferred` remains false. That's correct.
+
+Now, the condition for the second if: `inferred = !(rhsValue != null && rhsValue.isFunction() && (info != null || !scope.isDeclared(qName, false)));` If `inferred` is true initially (i.e., no info or info with no declaration flags), then this sets `inferred` false if the RHS is a function and either info is not null or the name is not declared. However, if `info` is null and the name is already declared, then `info != null` is false and `!scope.isDeclared(qName, false)` is false, so the inner condition is false, so `inferred` remains true. That's correct.
+
+But what about the case where `info` is not null, but it hasn't satisfied the first block? For example, if `info` has a `@param` annotation but no `@type`, then the first block may set `inferred = true` (because none of the conditions are true). Then the second block will see `info != null` is true, so if the RHS is a function, it will set `inferred = false`. That's correct according to the comment: #2 is a declaration if the function has jsdoc or not declared before. But wait, #2 only applies if there is no @type annotation (since #1 is for @type). So the order: #1 (type annotation) makes it declared. If not, then #2 (function literal with jsdoc) makes it declared. So indeed, if info is present but no @type, and RHS is a function, it should be a declaration. That's what the code does.
+
+So the logic seems correct.
+
+Maybe the bug is that `FunctionTypeBuilder.isFunctionTypeDeclaration(info)` is not correctly implemented? But we don't have that code.
+
+Let's think about the test cases that involve function assignments. For example, `testThis6` assigns `goog.A = function(){ return this }`. This is a function assignment. According to the logic, if there is no jsdoc info, then `info` is null, so `inferred` remains true. Then second if: `inferred = !(rhsValue != null && rhsValue.isFunction() && (info != null || !scope.isDeclared(qName, false)))`. Here, `info` is null, `scope.isDeclared("goog.A", false)`? At the time this assignment is processed, `goog.A` might not be declared yet (since it's the first assignment). So `!scope.isDeclared(...)` is true. So the inner condition is true, so `inferred` becomes false. That means the assignment is considered a declaration. The code then calls `defineSlot(n, parent, valueType, inferred)` with `inferred=false`. That might be correct.
+
+In `testThis6`, the expected error is "inconsistent return type found : goog.A required: Date". This error likely comes from type checking of the function body, not from property declaration. So the bug might not be here.
+
+Given the complexity, I need to narrow down. Perhaps there is a known bug: the `else if` clause for delegate proxy properties uses `rhsValue.isTrue()`. But what if `rhsValue` is a function? Then it goes to the else-if only if `!inferred` was false and `rhsValue.isTrue()` is false. Then nothing happens. That might be fine.
+
+Another possibility: The bug is in the condition for `if (!inferred)` block that decides whether to declare the property. The condition includes `!ownerType.isInstanceType()`. That might prevent declaring properties on instance types? Actually, the condition says: if the property is not yet declared or is inferred, and either (isExtern and not native) or not instance type, then declare. This means that for instance types, if isExtern is false, it will not declare the property. That might be intentional: instance types should not have properties declared via assignment? But it seems weird. However, that's not the bug.
+
+I think the most effective approach is to look at the test cases that are most likely to be affected by the `maybeDeclareQualifiedName` function. Since the function is part of type checking based on scope, any test that involves property declarations and type inference could be affected. But the test output should tell us which tests fail. Since we don't have that, we must deduce.
+
+Given the number of tests, I'll assume that the bug is subtle and perhaps the test that is commonly associated with this bug is `testDirectPrototypeAssign`. Also, maybe `testAddingMethodsPrototypeIdiomAndObjectLiteralSimpleNamespace` could be affected if the object literal path is broken.
+
+But the object literal path seems fine: it does `typeRegistry.resetImplicitPrototype(...)` and then undeclares.
+
+Another test: `testBug592170` involves function return type, not property assignment.
+
+Let's consider the `else if` block for delegate proxy. It only triggers when `rhsValue.isTrue()`. That's rare.
+
+Maybe the bug is in the early return inside prototype block: when `!qVar.isTypeInferred()` and not object literal, it returns without declaring the property. But as argued, `qVar` is usually null. However, what if there is a variable with the qualified name? For example, if there is a local variable `Foo.prototype`? Not possible.
+
+Wait, `scope.getVar(qName)` might return a variable for global properties if the scope's global scope has them? In Google's closure, they might store property names in scope? Actually, in `TypedScopeCreator`, they do create variables for property names? I think they do not; variables are only for simple names. So `qVar` is null.
+
+So the prototype block is essentially dead code in most cases. That suggests the bug is not there.
+
+Given the time, I'll consider the possibility that the bug is in `maybeDeclareQualifiedName` and the relevant test is the one that directly tests prototype assignment: `testDirectPrototypeAssign`. Also, perhaps `testBug1859535` and `testBug1940769` but they don't expect errors.
+
+I think the answer is likely `testDirectPrototypeAssign`. But let's see if there is any other test that specifically tests the prototype property assignment with non-object-literal.
+
+`testNew11` also assigns to `c1.prototype = new c2` and expects an error about constructor. That error is from type checking, not from property declaration. So it might still be triggered.
+
+But note: `testDirectPrototypeAssign` expects the error "assignment to property prototype of Bar found : Foo required: (Array|null|undefined)". That error comes from the property type mismatch check. That check is done elsewhere (in `checkPropertyAssignment` or similar). If `maybeDeclareQualifiedName` does not properly declare the property type on the owner, then the subsequent check might not occur. So it's plausible that the bug causes the error to be missed.
+
+I'll go with `testDirectPrototypeAssign`. Also, maybe `testAddingMethodsPrototypeIdiomAndObjectLiteralSimpleNamespace` might be affected if the object literal path is broken, but that seems less likely.
+
+Given the instruction to be minimal, I'll output `testDirectPrototypeAssign` as the trigger method. But I need to provide fixed code.
+
+Now, what is the fix? The bug is likely in the prototype handling block. The early return when `!qVar.isTypeInferred()` might be too restrictive. It should not return if the variable is not inferred? The comment says: "If the programmer has declared that F inherits from Super, and they assign F.prototype to some arbitrary expression, there's not much we can do. We just ignore the expression, and hope they've annotated their code in a way to tell us what props are going to be on that prototype." So that early return is intentional. But maybe the problem is that it returns before calling `defineSlot` for the prototype property. In the case where the variable is declared (not inferred) and the assignment is not an object literal, the code returns, so the property `prototype` on the owner is not declared as a property. But it should not declare it because it's ignoring? However, the owner type's prototype property might already be declared from the constructor declaration, so it's fine.
+
+But maybe the bug is the opposite: when `qVar` is null, which is the common case, the code proceeds normally. So the bug is elsewhere.
+
+Let's look at the code after the prototype block. It computes `valueType` and then determines `inferred`. Then if `!inferred`, it declares the property on ownerType and calls defineSlot. If `inferred`, it does nothing unless it's a delegate proxy. That seems correct.
+
+Wait, there is a potential bug: The `inferred` logic uses `scope.isDeclared(qName, false)`. But `qName` is a qualified name like `Foo.prototype.bar`. Is `scope.isDeclared(qName, false)` meaningful? Typically, `scope.isDeclared` expects a simple variable name, not a qualified name. So it might always return false for qualified names. That could affect the determination of whether the function assignment is a declaration. For example, if `Foo.prototype.bar` has been declared earlier, `scope.isDeclared` might return false, so the inner condition `!scope.isDeclared(qName, false)` is true, so `inferred` becomes false, treating it as a declaration. That might be correct because if the property hasn't been declared, it should be declared. But if it has been declared, `scope.isDeclared` would still be false because qualified names are not stored as variables. So it always thinks the property is not declared. That might cause it to always declare properties on the first assignment, which is correct? Actually, it should only declare if there is jsdoc or function literal with no prior declaration. But since `scope.isDeclared` always false, the condition `!scope.isDeclared(qName, false)` is always true, so any function literal assignment will be considered a declaration (even if the property was previously assigned a different type). That could be a bug: it should check if the property is already declared on the owner type, not in scope.
+
+Indeed, the comment says: "or a function literal with a name we haven't seen before". The "name" refers to the property name? Actually, #2 says: "ASSIGN to FUNCTION literal ... is a declaration iff the function has jsdoc or has not been declared before." The "declared before" likely means the variable/qualified name has been declared in the scope. But for properties, they are not declared in scope; they are declared on objects. So using `scope.isDeclared` is incorrect for properties. This is likely the bug: for qualified names that are properties, it should check if the property has been declared on the owner type, not if the qualified name is a variable in scope.
+
+Therefore, the fix should replace `scope.isDeclared(qName, false)` with a check whether the property is already declared on the owner type. We have `ownerType` available in the later block, but not here. We can compute `ownerType` earlier or check via `getObjectSlot(ownerName)`.
+
+Let's implement the fix: Change the condition to check if the property is declared on the owner type.
+
+But we also need to ensure that `ownerType` is available and not null. The code already computes `ownerType` later inside `if (!inferred)`. We can compute it earlier.
+
+Let's propose the minimal fix: In the second condition for `inferred`, use something like:
+
+```java
+if (inferred) {
+    // Check if the property is already declared on the owner type.
+    // If it's not, treat as declaration.
+    boolean isDeclared = false;
+    ObjectType ownerType = getObjectSlot(ownerName);
+    if (ownerType != null && ownerType.hasOwnProperty(propName) && !ownerType.isPropertyTypeInferred(propName)) {
+        isDeclared = true;
+    }
+    inferred = !(rhsValue != null &&
+        rhsValue.isFunction() &&
+        (info != null || !isDeclared));
+}
+```
+
+But this changes behavior: previously it used `scope.isDeclared` which is for simple names; now we use property declaration. This might fix cases where a property is assigned a function and it's already declared on the object, it should not overwrite as declaration.
+
+However, we need to be precise. The comment says "or a function literal with a name we haven't seen before". For properties, "seen before" might mean the property is already declared on the owner. So using property declaration check is correct.
+
+I'll implement this fix.
+
+Additionally, the prototype block early return might need to be fixed? Probably not, as it's intentional.
+
+So the fix is to change the condition for inferred when the RHS is a function. Let's write the corrected function.
+
+I'll output the full function with the fix.
+
+Now, for the JSON output, we need to list the trigger method. I'll include only the test that directly demonstrates the bug. Based on analysis, I think `testDirectPrototypeAssign` is a candidate. But we also need to consider `testAddingMethodsPrototypeIdiomAndObjectLiteralSimpleNamespace`? No.
+
+Let's also consider `testBug1859535` and `testBug1940769`. They might also be affected because they assign to prototype with non-object-literal and the constructor variable is declared. For `testBug1859535`, `childCtor` parameter, its type is inferred? It's a parameter, so its type is unknown? Actually, parameters get types from JSDoc or inference. In `testBug1859535`, there is no JSDoc, so `childCtor` type is unknown or any. So `qVar` is null. Not triggered.
+
+`testBug1940769` similar.
+
+Thus, `testDirectPrototypeAssign` is the strongest candidate.
+
+I'll output:
+
+```json
+{
+  "trigger_method": ["com.google.javascript.jscomp.LooseTypeCheckTest::testDirectPrototypeAssign"],
+  "fixed_code": ["..."]
+}
+```
+
+Now, write the fixed code as a JSON string. Need to include the entire `maybeDeclareQualifiedName` method.
+
+I'll produce the fixed version:
+
+```java
+void maybeDeclareQualifiedName(NodeTraversal t, JSDocInfo info,
+    Node n, Node parent, Node rhsValue) {
+  Node ownerNode = n.getFirstChild();
+  String ownerName = ownerNode.getQualifiedName();
+  String qName = n.getQualifiedName();
+  String propName = n.getLastChild().getString();
+  Preconditions.checkArgument(qName != null && ownerName != null);
+
+  // ... comments unchanged ...
+  JSType valueType = getDeclaredType(t.getSourceName(), info, n, rhsValue);
+  if (valueType == null && rhsValue != null) {
+    valueType = rhsValue.getJSType();
+  }
+  // Function prototypes are special.
+  if ("prototype".equals(propName)) {
+    Var qVar = scope.getVar(qName);
+    if (qVar != null) {
+      ObjectType qVarType = ObjectType.cast(qVar.getType());
+      if (qVarType != null &&
+          rhsValue != null &&
+          rhsValue.isObjectLit()) {
+        typeRegistry.resetImplicitPrototype(
+            rhsValue.getJSType(), qVarType.getImplicitPrototype());
+      } else if (!qVar.isTypeInferred()) {
+        return;
+      }
+      if (qVar.getScope() == scope) {
+        scope.undeclare(qVar);
+      }
+    }
+  }
+
+  if (valueType == null) {
+    if (parent.isExprResult()) {
+      stubDeclarations.add(new StubDeclaration(
+          n,
+          t.getInput() != null && t.getInput().isExtern(),
+          ownerName));
+    }
+    return;
+  }
+
+  boolean inferred = true;
+  if (info != null) {
+    inferred = !(info.hasType()
+        || info.hasEnumParameterType()
+        || (info.isConstant() && valueType != null
+            && !valueType.isUnknownType())
+        || FunctionTypeBuilder.isFunctionTypeDeclaration(info));
+  }
+
+  if (inferred) {
+    // Check if the property is already declared on the owner type.
+    boolean isDeclared = false;
+    ObjectType ownerType = getObjectSlot(ownerName);
+    if (ownerType != null && ownerType.hasOwnProperty(propName)
+        && !ownerType.isPropertyTypeInferred(propName)) {
+      isDeclared = true;
+    }
+    inferred = !(rhsValue != null &&
+        rhsValue.isFunction() &&
+        (info != null || !isDeclared));
+  }
+
+  if (!inferred) {
+    ObjectType ownerType = getObjectSlot(ownerName);
+    if (ownerType != null) {
+      boolean isExtern = t.getInput() != null && t.getInput().isExtern();
+      if ((!ownerType.hasOwnProperty(propName) ||
+           ownerType.isPropertyTypeInferred(propName)) &&
+          ((isExtern && !ownerType.isNativeObjectType()) ||
+           !ownerType.isInstanceType())) {
+        ownerType.defineDeclaredProperty(propName, valueType, n);
+      }
+    }
+    defineSlot(n, parent, valueType, inferred);
+  } else if (rhsValue != null && rhsValue.isTrue()) {
+    // Delegate proxy method properties.
+    FunctionType ownerType =
+        JSType.toMaybeFunctionType(getObjectSlot(ownerName));
+    if (ownerType != null) {
+      JSType ownerTypeOfThis = ownerType.getTypeOfThis();
+      String delegateName = codingConvention.getDelegateSuperclassName();
+      JSType delegateType = delegateName == null ?
+          null : typeRegistry.getType(delegateName);
+      if (delegateType != null &&
+          ownerTypeOfThis.isSubtype(delegateType)) {
+        defineSlot(n, parent, getNativeType(BOOLEAN_TYPE), true);
+      }
+    }
+  }
+}
+```
+
+That is the minimal fix: only changed the condition inside `if (inferred)` to check property declaration on owner type instead of `scope.isDeclared(qName, false)`.
+
+Now, output this as a JSON string. Ensure no trailing commas.
+
+I'll output.{
+  "trigger_method": [
+    "com.google.javascript.jscomp.LooseTypeCheckTest::testDirectPrototypeAssign"
+  ],
+  "fixed_code": [
+    "void maybeDeclareQualifiedName(NodeTraversal t, JSDocInfo info,\n    Node n, Node parent, Node rhsValue) {\n  Node ownerNode = n.getFirstChild();\n  String ownerName = ownerNode.getQualifiedName();\n  String qName = n.getQualifiedName();\n  String propName = n.getLastChild().getString();\n  Preconditions.checkArgument(qName != null && ownerName != null);\n\n  // Precedence of type information on GETPROPs:\n  // 1) @type annnotation / @enum annotation\n  // 2) ASSIGN to FUNCTION literal\n  // 3) @param/@return annotation (with no function literal)\n  // 4) ASSIGN to something marked @const\n  // 5) ASSIGN to anything else\n  //\n  // 1, 3, and 4 are declarations, 5 is inferred, and 2 is a declaration iff\n  // the function has jsdoc or has not been declared before.\n  //\n  // FUNCTION literals are special because TypedScopeCreator is very smart\n  // about getting as much type information as possible for them.\n\n  // Determining type for #1 + #2 + #3 + #4\n  JSType valueType = getDeclaredType(t.getSourceName(), info, n, rhsValue);\n  if (valueType == null && rhsValue != null) {\n    // Determining type for #5\n    valueType = rhsValue.getJSType();\n  }\n  // Function prototypes are special.\n  // It's a common JS idiom to do:\n  // F.prototype = { ... };\n  // So if F does not have an explicitly declared super type,\n  // allow F.prototype to be redefined arbitrarily.\n  if (\"prototype\".equals(propName)) {\n    Var qVar = scope.getVar(qName);\n    if (qVar != null) {\n      // If the programmer has declared that F inherits from Super,\n      // and they assign F.prototype to an object literal,\n      // then they are responsible for making sure that the object literal's\n      // implicit prototype is set up appropriately. We just obey\n      // the @extends tag.\n      ObjectType qVarType = ObjectType.cast(qVar.getType());\n      if (qVarType != null &&\n          rhsValue != null &&\n          rhsValue.isObjectLit()) {\n        typeRegistry.resetImplicitPrototype(\n            rhsValue.getJSType(), qVarType.getImplicitPrototype());\n      } else if (!qVar.isTypeInferred()) {\n        // If the programmer has declared that F inherits from Super,\n        // and they assign F.prototype to some arbitrary expression,\n        // there's not much we can do. We just ignore the expression,\n        // and hope they've annotated their code in a way to tell us\n        // what props are going to be on that prototype.\n        return;\n      }\n      if (qVar.getScope() == scope) {\n        scope.undeclare(qVar);\n      }\n    }\n  }\n\n  if (valueType == null) {\n    if (parent.isExprResult()) {\n      stubDeclarations.add(new StubDeclaration(\n          n,\n          t.getInput() != null && t.getInput().isExtern(),\n          ownerName));\n    }\n\n    return;\n  }\n\n  // NOTE(nicksantos): Determining whether a property is declared or not\n  // is really really obnoxious.\n  //\n  // The problem is that there are two (equally valid) coding styles:\n  //\n  // (function() {\n  //   /* The authoritative definition of goog.bar. */\n  //   goog.bar = function() {};\n  // })();\n  //\n  // function f() {\n  //   goog.bar();\n  //   /* Reset goog.bar to a no-op. */\n  //   goog.bar = function() {};\n  // }\n  //\n  // In a dynamic language with first-class functions, it's very difficult\n  // to know which one the user intended without looking at lots of\n  // contextual information (the second example demonstrates a small case\n  // of this, but there are some really pathological cases as well).\n  //\n  // The current algorithm checks if either the declaration has\n  // jsdoc type information, or @const with a known type,\n  // or a function literal with a name we haven't seen before.\n  boolean inferred = true;\n  if (info != null) {\n    // Determining declaration for #1 + #3 + #4\n    inferred = !(info.hasType()\n        || info.hasEnumParameterType()\n        || (info.isConstant() && valueType != null\n            && !valueType.isUnknownType())\n        || FunctionTypeBuilder.isFunctionTypeDeclaration(info));\n  }\n\n  if (inferred) {\n    // Determining declaration for #2\n    boolean isDeclared = false;\n    ObjectType ownerType = getObjectSlot(ownerName);\n    if (ownerType != null && ownerType.hasOwnProperty(propName) &&\n        !ownerType.isPropertyTypeInferred(propName)) {\n      isDeclared = true;\n    }\n    inferred = !(rhsValue != null &&\n        rhsValue.isFunction() &&\n        (info != null || !isDeclared));\n  }\n\n  if (!inferred) {\n    ObjectType ownerType = getObjectSlot(ownerName);\n    if (ownerType != null) {\n      // Only declare this as an official property if it has not been\n      // declared yet.\n      boolean isExtern = t.getInput() != null && t.getInput().isExtern();\n      if ((!ownerType.hasOwnProperty(propName) ||\n           ownerType.isPropertyTypeInferred(propName)) &&\n          ((isExtern && !ownerType.isNativeObjectType()) ||\n           !ownerType.isInstanceType())) {\n        // If the property is undeclared or inferred, declare it now.\n        ownerType.defineDeclaredProperty(propName, valueType, n);\n      }\n    }\n\n    // If the property is already declared, the error will be\n    // caught when we try to declare it in the current scope.\n    defineSlot(n, parent, valueType, inferred);\n  } else if (rhsValue != null && rhsValue.isTrue()) {\n    // We declare these for delegate proxy method properties.\n    FunctionType ownerType =\n        JSType.toMaybeFunctionType(getObjectSlot(ownerName));\n    if (ownerType != null) {\n      JSType ownerTypeOfThis = ownerType.getTypeOfThis();\n      String delegateName = codingConvention.getDelegateSuperclassName();\n      JSType delegateType = delegateName == null ?\n          null : typeRegistry.getType(delegateName);\n      if (delegateType != null &&\n          ownerTypeOfThis.isSubtype(delegateType)) {\n        defineSlot(n, parent, getNativeType(BOOLEAN_TYPE), true);\n      }\n    }\n  }\n}"
+  ]
+}

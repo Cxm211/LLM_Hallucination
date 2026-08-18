@@ -1,0 +1,4 @@
+public Whitelist preserveRelativeLinks(boolean preserve) {
+        preserveRelativeLinks = preserve;
+        return this;
+    }

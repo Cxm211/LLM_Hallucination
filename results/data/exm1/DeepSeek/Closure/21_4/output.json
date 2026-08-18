@@ -1,0 +1,348 @@
+We are given a single buggy function: `visit` from some compiler pass. The test methods are many, but only some may actually trigger the bug. The buggy code is in a method that checks for useless code (side-effect free statements). We need to analyze which testcases cause this `visit` method to produce an error (or wrong behavior) and then fix the code.
+
+First, understand the buggy function: It is part of a compiler pass that reports warnings/errors for useless code. The logic:
+
+1. Skip empty nodes, comma expressions.
+2. Skip null parent.
+3. Skip expression results (n.isExprResult()).
+4. Skip qualified names with JSDoc.
+5. Check if result is used and if operator is simple.
+6. If parent is comma, some logic.
+7. Else if parent is not EXPR_RESULT or BLOCK, check for FOR loop conditions.
+8. Then, if (isSimpleOp || !mayHaveSideEffects), report an error.
+
+Potential bug: The logic for comma parent and ancestors seems incorrect. In particular, the loop over ancestors: it continues for COMMA ancestors, but if ancestorType is not EXPR_RESULT and not BLOCK, it returns (i.e., does not report). However, the logic might incorrectly skip reporting for some cases or incorrectly report for others.
+
+Also, the condition `if (parent.getType() == Token.COMMA)` block: if `isResultUsed` is true, return. If `n == parent.getLastChild()`, then iterate ancestors. But what if `n` is not the last child? Then it falls through to the reporting logic? Actually after that block, there is no else, so it goes to the reporting section. But perhaps it should return for non-last child? Let's read carefully.
+
+Original:
+```
+    if (parent.getType() == Token.COMMA) {
+      if (isResultUsed) {
+        return;
+      }
+      if (n == parent.getLastChild()) {
+        for (Node an : parent.getAncestors()) {
+          int ancestorType = an.getType();
+          if (ancestorType == Token.COMMA) continue;
+          if (ancestorType != Token.EXPR_RESULT && ancestorType != Token.BLOCK) return;
+          else break;
+        }
+      }
+    } else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+      // ... FOR check
+    }
+```
+
+If parent is COMMA and n is not last child, it does not enter the if, so it falls through to the reporting section. That means for a comma expression where the node is not the last child and the result is not used, it will report an error. But that might be incorrect because the result of a non-last child in a comma expression is indeed unused, so it should still be checked for side effects and reported unless there's a reason not to. However, the current code may be too permissive or too strict.
+
+Another issue: In the loop over ancestors, after finding a non-COMMA ancestor, if it's not EXPR_RESULT and not BLOCK, it returns (meaning no error). But if it is EXPR_RESULT or BLOCK, it breaks out of the loop and then proceeds to the reporting section. That seems odd: it should only report if the result is unused and no side effects. But the loop is supposed to check if the comma expression is in a context where the result is used? Actually, the comment is missing. But the logic is: if the node is the last child of a comma expression, then we look at ancestors to see if the entire comma expression's result is used. If the ancestor is a comma, skip; if it's an EXPR_RESULT or BLOCK, then we stop and let the reporting logic decide; otherwise (e.g., assignment, call, condition) return because the result is used.
+
+But there might be a bug: when ancestorType is EXPR_RESULT or BLOCK, it breaks and then reports. But what if there is a deeper ancestor that is also EXPR_RESULT? That's fine.
+
+However, the main issue reported in the bug (from the compiler tests) might be that the pass incorrectly reports useless code for certain patterns, like `for (var a in b) foo()` or `for (a in b) foo()`? Actually, looking at the test methods, there are many tests from different classes. The buggy function is from a specific pass. Which pass? From the function signature `public void visit(NodeTraversal t, Node n, Node parent)` and the use of `NodeUtil.isExpressionResultUsed`, `NodeUtil.isSimpleOperatorType`, `NodeUtil.mayHaveSideEffects`, `Token.COMMA`, `Token.EXPR_RESULT`, `Token.BLOCK`, `Token.FOR`. This looks like `CheckSideEffects` or `UselessCodeCheck`? Actually, it's the `CheckSideEffects` pass (often called `UselessCode`). The class might be `CheckSideEffects` or `RemoveUselessCode`? But the function is `visit`. It reports `USELESS_CODE_ERROR`. So this is the check for useless code.
+
+Now, which testcases would trigger this visit? Many testcases involve compiling code and expecting specific output or errors. For example, `DenormalizeTest::testForIn` tests transformation of for-in loops. That might involve the useless code check? Possibly the pass runs and might incorrectly report an error for some code. Similarly, `ExploitAssignsTest` tests expression exploitation, which might also involve side-effect checks. Also `FlowSensitiveInlineVariablesTest` etc.
+
+But we need to identify which testcases actually expose the bug. The buggy function is provided; we need to see which testcases would fail because of this bug. Since we don't have the actual test execution, we must reason about the logic.
+
+Let's examine the buggy code more concretely. The condition for reporting is:
+
+```
+if (
+    (isSimpleOp || !NodeUtil.mayHaveSideEffects(n, t.getCompiler()))) {
+  // report
+}
+```
+
+So if the node is a simple operator (like +, -, etc.) OR it has no side effects, then report. This is correct: if the expression result is unused and it's a simple op or has no side effects, it's useless.
+
+But the issue is in the earlier conditions that may incorrectly return before reaching this check, or incorrectly allow reporting when it should not.
+
+One known bug: In the comma handling, if the node is not the last child, it falls through to the reporting section. But for a comma expression like `(a, b)`, `a` is not the last child, so it would be reported if `a` has no side effects. That is correct: `a` without side effects is useless. So that might not be a bug.
+
+Another known bug: The ancestor loop for last child of comma: if the ancestor is EXPR_RESULT or BLOCK, it breaks and then reports. But what if the ancestor is EXPR_RESULT inside a BLOCK? It will break and report. That seems okay.
+
+But there is a subtle issue: The loop continues for COMMA ancestors and then checks the first non-COMMA ancestor. If that ancestor is something like `IF` or `WHILE`, it returns (no error). That means for comma expression like `if (a, b)`, the last child `b` would be checked: ancestors: EXPR_RESULT? Actually, the parent is comma. The ancestors: the comma is in the condition of IF. So first ancestor is IF. Since it's not COMMA, and it's not EXPR_RESULT nor BLOCK, it returns. So no error for `if (a, b)` where `b` has no side effects? But `b` is used as the condition, so it's correct not to report. So that logic is fine.
+
+However, there is a known bug in this code: The loop for ancestors may not correctly handle the case where the comma expression is inside another comma expression. For example, `(a, (b, c))`. For `c` as last child of the inner comma, ancestor is inner comma (continue), next ancestor is outer comma (continue), next ancestor might be EXPR_RESULT, etc. That seems fine.
+
+Another issue: The condition `if (parent.getType() == Token.COMMA)` only checks if the direct parent is comma. But what if the node is in a nested comma? The loop handles ancestors, but the initial check for `isResultUsed` is done on the node itself. For a non-last child, it will not enter the ancestor loop and will go to reporting. That might be too aggressive: consider `(a, b, c)`. For `a` and `b`, they are not last child, so they will be reported if they have no side effects. That's correct: they are useless. So no bug.
+
+Perhaps the bug is in the else-if for non-EXPR_RESULT and non-BLOCK parents. That section has a condition for FOR loops: it checks if parent is FOR with 4 children and if the node is the first child or the third child (init or increment). That is to allow for-in initializer and increment part? Actually, for `for (init; cond; inc)`, the init and inc are expression statements but they are inside the FOR node. The condition allows them to pass through without reporting. But there is a bug: what about `for (var a in b)`? That is a FOR-IN loop which has only 2 children: the variable and the object. In that case, parent type is FOR, and childCount is 2, so the condition `parent.getChildCount() == 4` is false, so it does not return. Therefore, the non-EXPR_RESULT/BLOCK check will not return, and it falls through to reporting. That means in a for-in loop, the variable declaration part (e.g., `var a in b`) might be flagged as useless code? But that is actually a statement inside the FOR, which is not useless. However, the condition after that is: if (isSimpleOp || !mayHaveSideEffects) then report. For a variable declaration like `var a`, it has no side effects, so it would report an error. That would be incorrect for for-in loops.
+
+Let's examine the DenormalizeTest::testForIn method. It tests transformations like `for (var a in b) foo()` to `var a; for(a in b) foo()`. The useless code check might be run after denormalization? Or maybe the useless code check is run before. In any case, the buggy function would report an error for `var a` inside `for (var a in b)` because the variable declaration is a statement that has no side effects. But that is expected to be valid code. The test expects `testSame` for some cases, meaning no warning/error. So if the buggy code reports an error, the test would fail.
+
+Thus, the bug is likely that the code fails to exclude the variable declaration in for-in loops from the useless code check. So the fix should add a condition to handle for-in loops.
+
+Specifically, the else-if block:
+```
+else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+  if (! (parent.getType() == Token.FOR && parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext()))) {
+    return;
+  }
+}
+```
+
+This only handles for loops with 4 children (i.e., for(init;cond;inc)). For for-in loops (2 children), the condition is false, so it does not return, and then it proceeds to report. But it should also skip for-in loops. So we need to add a condition for for-in: when parent is FOR and childCount is not 4? Actually, for-in has 2 children: the iteration variable and the object. The variable is an expression or var declaration. The visit will be called on that variable node. Its parent is the FOR node. So we should not report an error if the node is the variable of a for-in loop.
+
+Therefore, the fix should extend the condition to cover for-in loops. How to detect? For for-in, parent is FOR, childCount is 2 (or maybe 3 including the body? Actually, AST structure: FOR node has two children: the iteration variable (either a VAR node or an expression) and the object (the collection). The body is a separate child? In Rhino parser, FOR-IN node has 3 children: variable, object, body. But in closure compiler, it might be similar. However, the check uses `parent.getChildCount() == 4` for standard for loops. For for-in, childCount is 3? Let's check: In Closure compiler, the FOR node for for-in has 3 children: the variable declaration/expression, the object, and the body. But sometimes the variable is a VAR node, and the object is the expression. So childCount = 3. But the current code only checks for 4 children. So we need to handle for-in as well.
+
+The correct condition should be: if parent is FOR and it is a for-in loop, then we should allow the variable part to pass without reporting. Alternatively, we can check if n is the first child of a FOR node that is a for-in. But we need to know if it's for-in. The token type for for-in is still Token.FOR, but there is a flag? Actually, in Closure, there is Token.FOR and also a separate token for FOR-IN? Typically, it's the same token, but we can check if the node has a child that is an IN token? Not sure. Simpler: We can check if childCount != 4, but that would also include other cases like `for (;;)` which has 3 children (cond is empty maybe). But for `for(;;)`, the init and increment are empty, so the node visited might be the condition? But we need to be careful.
+
+Alternatively, we can look at the original code before the bug. A known fix might be to add a check for the `for-in` case: if parent is FOR and the node is the first child and there is an IN token somewhere. But perhaps a simpler fix: In the condition, we should also allow when parent is FOR and the node is the first child (the iteration variable) regardless of childCount, as long as it's a for-in? But that would also allow standard for init. However, standard for init is already covered by the 4-child check. For for-in, the first child is the iteration variable, and it should not be reported. So we can change the condition to:
+
+```
+if (parent.getType() == Token.FOR) {
+  // if it's a for-in loop (childCount == 3?) then return for first child
+  // else if childCount == 4 and node is init or inc, then return
+  // else fall through
+}
+```
+
+But we need to know if it's for-in. One way: Check if the second child is an IN token? Actually, in the AST, the FOR node for for-in has the structure: [VAR or NAME, OBJECT, BODY]. There is no IN token as a separate child; the fact that it's a for-in is inferred from the context. But there is a flag: `n.isForIn()`? In Closure, Node has a method `isForIn()`. Yes, `Node` has `isForIn()` method. So we can use `parent.isForIn()`. That would be the cleanest.
+
+Thus, the fix: In the else-if block, add a condition to return for for-in loops when the node is the first child. The current condition checks for FOR and childCount==4 and specific children. We can add a new condition:
+
+```
+if (parent.getType() == Token.FOR) {
+  if (parent.isForIn() && n == parent.getFirstChild()) {
+    // variable of for-in, don't report
+  } else if (parent.getChildCount() == 4 && 
+             (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext())) {
+    // standard for init or inc, don't report
+  } else {
+    return; // for other FOR children (like condition), don't report? Actually, condition should be checked normally? But the original code returns only if not matching the condition. So we need to restructure.
+  }
+}
+```
+
+But we must keep the logic the same: currently, the code returns if the condition is not satisfied. So we need to modify the condition to include the for-in case.
+
+Original:
+```
+if (! (parent.getType() == Token.FOR && parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext()))) {
+  return;
+}
+```
+
+We can change to:
+```
+if (parent.getType() == Token.FOR && (parent.isForIn() && n == parent.getFirstChild() || (parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext())))) {
+  // allow
+} else {
+  return;
+}
+```
+
+But we need to be careful with parentheses. Actually, we want to not return in those cases. So we can negate the condition: if not (for-in or standard for allowed), then return. The original condition returns if the condition is false. So we can replace the condition inside the if with a new condition that also covers for-in.
+
+Thus, the fix for the else-if block:
+
+```
+} else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+  boolean isForInitOrInc = false;
+  if (parent.getType() == Token.FOR) {
+    if (parent.isForIn() && n == parent.getFirstChild()) {
+      isForInitOrInc = true;
+    } else if (parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext())) {
+      isForInitOrInc = true;
+    }
+  }
+  if (!isForInitOrInc) {
+    return;
+  }
+}
+```
+
+That should correctly skip reporting for for-in variable.
+
+Now, which testcases expose this bug? The testcases that involve for-in loops and expect no useless code warning. From the list, we have:
+
+- DenormalizeTest::testForIn: This test contains for-in loops and expects certain transformations. If the useless code check reports an error for `var a` in `for(var a in b)`, then the test would fail because it expects no warning. So this test will trigger the bug.
+
+But also other tests might trigger if they use for-in loops. For example, FlowSensitiveInlineVariablesTest::testForIn: It tests that variables in for-in are not inlined. It might also involve the useless code check. It contains `noInline` calls which expect that the pass does not inline. If the useless code check removes the variable declaration, it might affect inlining. But the test is about inlining, not about useless code warnings. Actually, `noInline` means the pass should not inline; it doesn't care about warnings. So it might not fail because of the useless code check. However, the useless code check might report an error, which would cause the compile to fail? In the test framework, `testSame` and `test` methods often expect no errors. So any reported error would cause test failure.
+
+Thus, any test that compiles code with for-in and expects success (no errors) might fail if the useless code check incorrectly reports an error. Looking at the test list, many tests involve for-in loops. For instance, DenormalizeTest::testInOperatorNotInsideFor: it includes `for(; a < 2 ; a++)` but not for-in. So not that.
+
+DevirtualizePrototypeMethodsTest tests involve global function rewriting, but they may not involve for-in loops. Most of them don't.
+
+DisambiguatePropertiesTest also has many tests, but some might use for-in? Possibly not; they mostly use prototype assignments and method calls.
+
+ExploitAssignsTest: It tests expression exploitation, but not for-in directly? It includes some loops like `for(;;)` but not for-in.
+
+ExportTestFunctionsTest: Might include for-in? Unlikely.
+
+ExpressionDecomposerTest: Might involve for-in? Not clearly.
+
+FlowSensitiveInlineVariablesTest::testForIn explicitly tests for-in and expects no inline. So this test will likely trigger the bug because the useless code check will report an error on the variable declaration in the for-in, causing the compile to fail.
+
+FunctionArgumentInjectorTest: doesn't seem to use for-in.
+
+ExtractPrototypeMemberDeclarationsTest: doesn't use for-in.
+
+Thus, the most obvious triggering testcases are those that use for-in loops. From the list, we have:
+
+1. DenormalizeTest::testForIn (full path: com.google.javascript.jscomp.DenormalizeTest::testForIn)
+2. FlowSensitiveInlineVariablesTest::testForIn (full path: com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testForIn)
+
+But are there others? Let's scan the list again. DisambiguatePropertiesTest has many tests but none seem to explicitly use for-in. However, some might have `for (var i in ...)` in the test strings? For example, `testStringFunction` has `for (var a = 'str'...` no. I don't see any.
+
+Also, `ExtractPrototypeMemberDeclarationsTest` has for-in? Not.
+
+Thus, only those two testcases likely expose the bug.
+
+But wait: DenormalizeTest::testInOperatorNotInsideFor tests `for (var i=("length" in b);a<2; a++)`. That's not a for-in loop; it's a standard for with an in operator in the init. So that should not trigger.
+
+Thus, we have two triggering testcases.
+
+Now, we need to produce the fixed code. The buggy function is `visit`. We need to output the entire fixed function. Also, we must include all functions from the source? Actually, the source only contains the one `visit` function. So fixed_code will have one string: the corrected `visit` method.
+
+But the instruction says: "Provide the full corrected implementation of all input functions. fixed_code must include every function from the input, in the same order, regardless of whether it was modified by you." Since only one function is provided, we output that one.
+
+Thus, we need to output a JSON object with `trigger_method` array containing the paths of the two test methods, and `fixed_code` array containing the fixed `visit` method as a single string.
+
+Let's write the fixed code. We'll modify the else-if block as described. Also, we might need to import Node? But we just output the code as a string.
+
+We must ensure the formatting is correct: the string should be the exact Java source code of the fixed method, with proper indentation, etc.
+
+Let's produce the fixed method.
+
+Original:
+```
+  public void visit(NodeTraversal t, Node n, Node parent) {
+    // VOID nodes appear when there are extra semicolons at the BLOCK level.
+    // I've been unable to think of any cases where this indicates a bug,
+    // and apparently some people like keeping these semicolons around,
+    // so we'll allow it.
+    if (n.isEmpty() ||
+        n.isComma()) {
+      return;
+    }
+
+    if (parent == null) {
+      return;
+    }
+
+    // Do not try to remove a block or an expr result. We already handle
+    // these cases when we visit the child, and the peephole passes will
+    // fix up the tree in more clever ways when these are removed.
+    if (n.isExprResult()) {
+      return;
+    }
+
+    // This no-op statement was there so that JSDoc information could
+    // be attached to the name. This check should not complain about it.
+    if (n.isQualifiedName() && n.getJSDocInfo() != null) {
+      return;
+    }
+
+    boolean isResultUsed = NodeUtil.isExpressionResultUsed(n);
+    boolean isSimpleOp = NodeUtil.isSimpleOperatorType(n.getType());
+    if (parent.getType() == Token.COMMA) {
+      if (isResultUsed) {
+        return;
+      }
+      if (n == parent.getLastChild()) {
+        for (Node an : parent.getAncestors()) {
+          int ancestorType = an.getType();
+          if (ancestorType == Token.COMMA) continue;
+          if (ancestorType != Token.EXPR_RESULT && ancestorType != Token.BLOCK) return;
+          else break;
+        }
+      }
+    } else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+      if (! (parent.getType() == Token.FOR && parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext()))) {
+        return;
+      }
+    }
+    if (
+        (isSimpleOp || !NodeUtil.mayHaveSideEffects(n, t.getCompiler()))) {
+      String msg = "This code lacks side-effects. Is there a bug?";
+      if (n.isString()) {
+        msg = "Is there a missing '+' on the previous line?";
+      } else if (isSimpleOp) {
+        msg = "The result of the '" + Token.name(n.getType()).toLowerCase() +
+            "' operator is not being used.";
+      }
+
+      t.getCompiler().report(
+          t.makeError(n, level, USELESS_CODE_ERROR, msg));
+      // TODO(johnlenz): determine if it is necessary to
+      // try to protect side-effect free statements as well.
+      if (!NodeUtil.isStatement(n)) {
+        problemNodes.add(n);
+      }
+    }
+  }
+```
+
+We need to fix the else-if part. Replace:
+
+```
+    } else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+      if (! (parent.getType() == Token.FOR && parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext()))) {
+        return;
+      }
+    }
+```
+
+With:
+
+```
+    } else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+      if (parent.getType() == Token.FOR) {
+        boolean isForAllowed = false;
+        if (parent.isForIn() && n == parent.getFirstChild()) {
+          isForAllowed = true;
+        } else if (parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext())) {
+          isForAllowed = true;
+        }
+        if (!isForAllowed) {
+          return;
+        }
+      } else {
+        return;
+      }
+    }
+```
+
+But we must be careful: the original condition returns if the condition is false. In the new code, we need to return when it's not a for case that we allow. So for non-FOR parents, we still return. For FOR parents, we check the allowed cases and return if not allowed.
+
+Alternatively, we can keep the same structure but extend the condition:
+
+```
+    } else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {
+      if (! ((parent.getType() == Token.FOR) && (
+          (parent.isForIn() && n == parent.getFirstChild()) ||
+          (parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext()))
+      ))) {
+        return;
+      }
+    }
+```
+
+That is more concise. We'll use that.
+
+Thus, the fixed `visit` method with that change.
+
+Now, we must output the JSON. The trigger methods should be the full paths as given in the test list: 
+
+- "com.google.javascript.jscomp.DenormalizeTest::testForIn"
+- "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testForIn"
+
+Note: The test methods are listed with the class name and method name separated by "::". We need to use that exact format.
+
+Now, we write the fixed_code as a single string. We must include the entire method, with correct indentation. We'll output it as a JSON string.
+
+We need to ensure no trailing commas and proper escaping.
+
+Let's produce the final JSON.{
+  "trigger_method": [
+    "com.google.javascript.jscomp.DenormalizeTest::testForIn",
+    "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest::testForIn"
+  ],
+  "fixed_code": [
+    "  public void visit(NodeTraversal t, Node n, Node parent) {\n    // VOID nodes appear when there are extra semicolons at the BLOCK level.\n    // I've been unable to think of any cases where this indicates a bug,\n    // and apparently some people like keeping these semicolons around,\n    // so we'll allow it.\n    if (n.isEmpty() ||\n        n.isComma()) {\n      return;\n    }\n\n    if (parent == null) {\n      return;\n    }\n\n    // Do not try to remove a block or an expr result. We already handle\n    // these cases when we visit the child, and the peephole passes will\n    // fix up the tree in more clever ways when these are removed.\n    if (n.isExprResult()) {\n      return;\n    }\n\n    // This no-op statement was there so that JSDoc information could\n    // be attached to the name. This check should not complain about it.\n    if (n.isQualifiedName() && n.getJSDocInfo() != null) {\n      return;\n    }\n\n    boolean isResultUsed = NodeUtil.isExpressionResultUsed(n);\n    boolean isSimpleOp = NodeUtil.isSimpleOperatorType(n.getType());\n    if (parent.getType() == Token.COMMA) {\n      if (isResultUsed) {\n        return;\n      }\n      if (n == parent.getLastChild()) {\n        for (Node an : parent.getAncestors()) {\n          int ancestorType = an.getType();\n          if (ancestorType == Token.COMMA) continue;\n          if (ancestorType != Token.EXPR_RESULT && ancestorType != Token.BLOCK) return;\n          else break;\n        }\n      }\n    } else if (parent.getType() != Token.EXPR_RESULT && parent.getType() != Token.BLOCK) {\n      if (! ((parent.getType() == Token.FOR) && (\n          (parent.isForIn() && n == parent.getFirstChild()) ||\n          (parent.getChildCount() == 4 && (n == parent.getFirstChild() || n == parent.getFirstChild().getNext().getNext()))\n      ))) {\n        return;\n      }\n    }\n    if (\n        (isSimpleOp || !NodeUtil.mayHaveSideEffects(n, t.getCompiler()))) {\n      String msg = \"This code lacks side-effects. Is there a bug?\";\n      if (n.isString()) {\n        msg = \"Is there a missing '+' on the previous line?\";\n      } else if (isSimpleOp) {\n        msg = \"The result of the '\" + Token.name(n.getType()).toLowerCase() +\n            \"' operator is not being used.\";\n      }\n\n      t.getCompiler().report(\n          t.makeError(n, level, USELESS_CODE_ERROR, msg));\n      // TODO(johnlenz): determine if it is necessary to\n      // try to protect side-effect free statements as well.\n      if (!NodeUtil.isStatement(n)) {\n        problemNodes.add(n);\n      }\n    }\n  }"
+  ]
+}

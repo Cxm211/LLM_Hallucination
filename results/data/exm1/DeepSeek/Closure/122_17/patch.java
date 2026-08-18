@@ -1,0 +1,10 @@
+  private void handleBlockComment(Comment comment) {
+    String value = comment.getValue();
+    if (value.startsWith("/*") && !value.startsWith("/**") && 
+        (value.indexOf("/* @") != -1 || value.indexOf("\n * @") != -1)) {
+      errorReporter.warning(
+          SUSPICIOUS_COMMENT_WARNING,
+          sourceName,
+          comment.getLineno(), "", 0);
+    }
+  }

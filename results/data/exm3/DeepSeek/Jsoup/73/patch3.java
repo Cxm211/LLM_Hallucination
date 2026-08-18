@@ -1,0 +1,17 @@
+private String updateNamespaces(org.jsoup.nodes.Element el) {
+    Attributes attributes = el.attributes();
+    for (Attribute attr : attributes) {
+        String key = attr.getKey();
+        String prefix;
+        if (key.equals(xmlnsKey)) {
+            prefix = "";
+        } else if (key.startsWith(xmlnsPrefix)) {
+            prefix = key.substring(xmlnsPrefix.length());
+        } else {
+            continue;
+        }
+        namespaces.put(prefix, attr.getValue());
+    }
+    int pos = el.tagName().indexOf(":");
+    return pos > 0 ? el.tagName().substring(0, pos) : "";
+}

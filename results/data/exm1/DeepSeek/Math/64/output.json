@@ -1,0 +1,281 @@
+We are given a buggy function `doOptimize()` from `LevenbergMarquardtOptimizer` (likely in `org.apache.commons.math.optimization.general` package). The problem is that the algorithm may not converge properly or has a bug.
+
+We need to analyze the buggy function and determine which test cases expose the bug. Then produce a minimal fix.
+
+First, let's understand the buggy code. The `doOptimize` method is long, but known bugs in the Levenberg-Marquardt optimizer in Apache Commons Math have been reported. Common issues include:
+- Incorrect handling of the Jacobian permutation during QR decomposition.
+- The loop for "check orthogonality" uses `jacobian[i][pj]` but after QR decomposition, the Jacobian contains the R matrix with diagonal elements set. The Q matrix is not stored; instead `qTy` is called to transform residuals. The code after QR decomposition does:
+
+```
+for (int k = 0; k < solvedCols; ++k) {
+    int pk = permutation[k];
+    jacobian[k][pk] = diagR[pk];
+}
+```
+
+This sets the diagonal elements of the R matrix (stored in jacobian) to the original diagonal values. But note that the Jacobian matrix is stored as `jacobian[i][j]` where `i` is row index (equation) and `j` is column index (parameter). After QR, the R matrix is stored in the upper triangle of jacobian (with rows as columns? Actually typical implementation: `jacobian[i][j]` is used for both J and after QR as R. The code uses `jacobian[i][pj]` to access R elements. That seems okay.
+
+Potential bug: In the "check orthogonality" section, it uses `jacobian[i][pj] * residuals[i]` but after QR and qTy, residuals are Q^T * (original residuals). The orthogonality check should be on the original Jacobian columns and function vector, but after Q transformation, it should be equivalent because the Jacobian columns are replaced by R columns. Wait, the check is: `maxCosine = Math.max(maxCosine, Math.abs(sum) / (s * cost));` with `sum = sum_{i=0}^{j} jacobian[i][pj] * residuals[i];` This is the dot product of the j-th column of R (with zeros below diagonal) with the transformed residuals. Since R is upper triangular, the dot product only involves first j+1 rows. This is actually correct for checking orthogonality of the original Jacobian columns? Let's think: In the Levenberg-Marquardt algorithm, after QR decomposition, we have J = Q * R, and we compute Q^T * residuals. The condition for convergence is that the gradient g = J^T * residuals should be small. But J^T * residuals = (Q*R)^T * residuals = R^T * Q^T * residuals. Since Q^T * residuals is stored in `residuals[0..rows-1]`. The gradient component j is sum_{i=0}^{j} R[i][j] * (Q^T*res)[i] (because R is upper triangular, only rows 0..j contribute). That's exactly what is computed: `sum = sum_{i=0}^{j} jacobian[i][pj] * residuals[i]` where `jacobian[i][pj]` is the R element (since after qTy, jacobian holds R). So the check is correct: it computes the actual gradient components scaled by column norm and cost.
+
+But there's a subtle bug: In the loop, `for (int i = 0; i <= j; ++i)`, but `jacobian` is a 2D array: `jacobian[i][pj]`. However, `i` is the row index into the Jacobian matrix (which after QR holds R). The R matrix is stored in the first `rows` rows and first `solvedCols` columns? Actually `jacobian` is dimensioned `[rows][cols]`. After QR, the upper triangular R is stored in the first `solvedCols` rows (since rows >= cols? Not necessarily). The code later uses `jacobian[i][pj]` for `i` up to `j`, which is fine.
+
+But the known bug in Math 3.x is that the orthogonality check and the convergence test may be incorrect due to the handling of the `residuals` array after `qTy`. Another known bug: The `residuals` array is swapped with `oldRes` in the inner loop, but `oldRes` was previously set to the residuals before the new iteration. That seems okay for saving state.
+
+Wait, there is a specific bug related to the "check orthogonality" loop: the sum uses `residuals[i]` for `i` from 0 to j. But after QR and qTy, the residuals array contains Q^T * (original residuals). The gradient should be R^T * (Q^T * res). That's what is computed. So it's correct.
+
+Maybe the bug is in the step bound update? Or in the computation of the actual reduction? Or the convergence criteria?
+
+Let's look at the inner loop. In the inner loop, after computing `lmDir`, they do:
+
+```
+for (int j = 0; j < solvedCols; ++j) {
+    int pj = permutation[j];
+    lmDir[pj] = -lmDir[pj];
+    point[pj] = oldX[pj] + lmDir[pj];
+    double s = diag[pj] * lmDir[pj];
+    lmNorm  += s * s;
+}
+```
+
+They negate lmDir? That seems odd. The lmDir is computed as the step in the parameter space. In the dogleg/Levenberg-Marquardt, the step is p = - (J^T J + lambda diag)^-1 * J^T f. The `determineLMParameter` method computes `lmDir` as the step (positive direction). Then they negate it: `lmDir[pj] = -lmDir[pj];` and then `point[pj] = oldX[pj] + lmDir[pj];` which effectively adds the negative of the computed direction, i.e., they are moving in the opposite direction. That seems intentionally making the step negative? But typically we want to move in the direction that reduces the cost, so the step should be the negative of the gradient-like direction. Let's check Minpack's implementation: In the original MINPACK, the step is computed as `p = - (J^T J + lambda I)^-1 * J^T f`. So the direction is already negative. So they shouldn't negate again. However, looking at the original Levenberg-Marquardt code in Apache Commons Math (version 2.2 or 3.0?), I recall that there was a bug in the `determineLMParameter` that caused the step to be in the wrong direction, and they fixed it by negating. But I'm not sure.
+
+Let's examine the `determineLMParameter` method (not provided, but we can infer). The method likely computes `lmDir` such that `(J^T J + lambda D^T D) * lmDir = -J^T f`. So `lmDir` should be the step to add to the parameters. Then they do `point = oldX + lmDir`. But here they negate and then add, so effectively `point = oldX - lmDir`. That would be opposite to the intended step. That could cause divergence.
+
+Many bugs reported in JIRA: MATH-303, MATH-304, MATH-372, etc. The test methods are named `testMath303`, `testMath304`, etc. So likely these tests expose the bug.
+
+Let's see the test methods:
+
+- `testMath303`: fits a simple inverse function with 1 or 2 parameters. It just checks that the fit returns some length. Not very strict.
+- `testMath304`: fits with initial guess 1.0 and checks the parameter value is approximately 1.6357. Also fits with initial guess 10.0 and checks same value.
+- `testMath372`: fits a 4-parameter logistic function with initial guess, checks the parameters and RMS.
+
+Other tests like HarmonicFitter, GaussianFitter, etc., also use LevenbergMarquardtOptimizer.
+
+Given the buggy code, many of these tests might fail. But the instruction says to identify which testcase methods actually expose the bug. We need to determine which ones would fail due to the bug.
+
+I suspect the bug is in the direction of the step (negating lmDir). That would cause the algorithm to move uphill, likely causing convergence to wrong points or divergence. Many tests that check specific numerical results would fail.
+
+Let's simulate mentally:
+
+For `testMath304`, it expects a specific value 1.6357. If we add -lmDir (i.e., step in opposite direction), the algorithm might still converge to a local minimum? Actually, if the step is in the gradient ascent direction, the cost would increase, and then the algorithm might reduce the step size and eventually converge? Not necessarily; it could diverge or converge to a different minimum. But given the test has tight tolerances, it likely fails.
+
+For `testMath303`, it only checks the length of the result array, which is always 1 or 2, so it might pass even with buggy optimization? But it also does fit, and if the optimization fails to converge or throws exception, the test would fail. But the test does not check the value, so it might pass if the algorithm doesn't throw. However, the algorithm might run forever? The outer loop is while(true) and there is convergence check and termination conditions. With wrong direction, it might quickly hit a termination condition due to small step? Unclear.
+
+`testMath372` checks specific parameter values with tolerances, so it likely fails.
+
+Other tests also have precise assertions.
+
+But are there tests that would not be affected? For example, `testTrivial` from `LevenbergMarquardtOptimizerTest` solves a trivial linear problem. The step direction bug: starting from 0, the model: y = 2*x, target = 3. The Jacobian is [2], J^T f = 2*3=6, (J^T J + lambda) = 4+lambda, step = -6/(4+lambda). With negation, step becomes +6/(4+lambda), so point increases, cost decreases? Actually cost = (2*x -3)^2, derivative at 0 is -12? Wait, gradient = 2*(2*x-3)*2 = 4*(2*x-3). At x=0, gradient = -12. The Newton step is -gradient/Hessian = -(-12)/4 = 3. So correct step is 3. With lambda=0, step = 3. If we negate, step becomes -3, so x = -3, cost increases. So likely the algorithm would not converge to 1.5. So `testTrivial` would fail.
+
+Similarly, many tests would fail.
+
+But we need to identify which test methods actually expose the bug. Given the bug is in `doOptimize`, which is the core of the optimizer, and all test cases use this optimizer (directly or via CurveFitter, etc.), it's likely that most tests will fail. However, some tests might be lenient and not check exact values or might still pass if the bug doesn't affect their specific scenario. For example, test methods that only check that no exception is thrown and that a result is produced (like `testFit02` for GaussianFitter, which just calls `fitter.fit()` without assertions). That test might pass even with buggy behavior because it might converge to some point or throw an exception? If the algorithm diverges, it might throw an OptimizationException due to too many iterations? But the GaussianFitter typically has a maximum number of iterations set by default? Actually, the optimizer has a default max iterations (maybe 100). If it doesn't converge, it will throw an exception after max iterations, causing test failure. So even that test might fail.
+
+But the instruction says: "Determine which testcase methods actually expose the bug." So we need to list the full paths of the test methods that would fail.
+
+Given that the bug is likely the direction sign, I should check the actual fix. The known fix for this bug (MATH-303, MATH-304, MATH-372) was to remove the negation of lmDir. In the original code, there is a negation `lmDir[pj] = -lmDir[pj];`. The fix is to remove that line. Let's check the code: In the inner loop, after determining lmDir, they do:
+
+```
+for (int j = 0; j < solvedCols; ++j) {
+    int pj = permutation[j];
+    lmDir[pj] = -lmDir[pj];
+    point[pj] = oldX[pj] + lmDir[pj];
+    ...
+}
+```
+
+If we remove the negation, then `point[pj] = oldX[pj] + lmDir[pj];` will use the positive direction as computed. That would be the correct step.
+
+There might be other bugs: In the "check orthogonality" loop, they use `residuals[i]` which after qTy is Q^T*residuals. But note that after qTy, the residuals array is overwritten. In the convergence check later, they use `cost` which is computed from original residuals. That's fine.
+
+Also, in the convergence check at the end of the inner loop:
+
+```
+if (((Math.abs(actRed) <= costRelativeTolerance) &&
+    (preRed <= costRelativeTolerance) &&
+    (ratio <= 2.0)) ||
+   (delta <= parRelativeTolerance * xNorm)) {
+   return current;
+}
+```
+
+This seems fine.
+
+So the minimal fix is to remove the line `lmDir[pj] = -lmDir[pj];`. But we must also ensure that the `determineLMParameter` method returns the correct direction. Without seeing that method, we assume it returns the step as computed for the model `(J^T J + lambda D^T D) * p = -J^T f`. In the MINPACK implementation, the step is computed as the solution to that system, which is p, and then the new point is x + p. So no negation needed. The bug likely comes from an older version where the sign was inverted.
+
+Thus, the fixed code should remove that negation.
+
+Now, which test methods will trigger the bug? Since the bug is fundamental, any test that relies on correct optimization will fail. However, some tests might not exercise the numerical optimization deeply. For instance, `testFit02` for GaussianFitter just calls fit without assertions; if the optimizer runs without exception, it passes. Could the optimizer converge with the wrong step? Possibly if the step size is reduced enough, it might still converge ("trust region" might save it). But given the step is in the wrong direction, the cost will initially increase, then the algorithm will reduce delta, and eventually might converge to a local minimum? Actually, if the direction is reversed, the algorithm is essentially moving uphill. The trust region will try to limit the step, but the direction is consistently opposite. It might still converge to the same point if the function is convex and the step is small enough? But it's unlikely to converge exactly.
+
+Nevertheless, the problem says: "For each triggering testcase, it must fail on the buggy version but pass on your fixed version." So we need to determine which tests would fail on the buggy version. Since we don't have an actual runtime, we have to reason.
+
+I recall that in the Apache Commons Math source, the bug was reported for tests `testMath303`, `testMath304`, `testMath372`, and also `testCircleFittingBadInit`. There might be other tests.
+
+Given the large number of test cases, it's likely that many will fail. However, the instruction says "output every testcase method that actually triggers the bug." So we need to list all that do.
+
+But to be precise, let's reason about each test group:
+
+- Tests in `CurveFitterTest`: `testMath303`, `testMath304`, `testMath372`. These are specifically for the bug, so they likely fail.
+- `GaussianFitterTest`: `testFit01` through `testFit07` all have assertions on fitted parameters. They will likely fail.
+- `HarmonicFitterTest`: `testNoError`, `test1PercentError`, `testInitialGuess`, `testUnsorted` all have assertions with tight tolerances. They will fail.
+- `ParametricGaussianFunctionTest`: `testFit01`, `testFit02` have assertions; fail.
+- `PolynomialFitterTest`: `testNoError`, `testSmallError` have assertions; fail. `testRedundantSolvable`, `testRedundantUnsolvable` might not directly test optimization but use it; they might fail or pass depending.
+- `LevenbergMarquardtOptimizerTest`: Many tests with assertions; likely all fail.
+- `MinpackTest`: Many tests with internal assertions; they will fail.
+
+Thus, almost all tests trigger the bug. But we should list the full paths as given.
+
+The test method names are provided in the input. We need to output the full path, e.g., "org.apache.commons.math.optimization.fitting.CurveFitterTest::testMath303" etc.
+
+But note: Some test methods might not invoke `doOptimize` directly? For example, `testRedundantSolvable` and `testRedundantUnsolvable` are in `PolynomialFitterTest` but they call `checkUnsolvableProblem` which might use a different optimizer? Actually `testRedundantUnsolvable` uses `GaussNewtonOptimizer`, not LevenbergMarquardt. So that test does not use the buggy code. `testRedundantSolvable` uses LevenbergMarquardt (line: `new LevenbergMarquardtOptimizer()`). So it might be affected.
+
+Also, `ParametricGaussianFunctionTest::testValue01` and `testValue02` and `testValue03` do not involve optimization; they just test function evaluation. So they are not affected.
+
+Thus, we need to exclude tests that don't call the optimizer.
+
+Let's list all test methods and decide:
+
+- `CurveFitterTest.testMath303` -> uses optimizer -> triggers.
+- `CurveFitterTest.testMath304` -> triggers.
+- `CurveFitterTest.testMath372` -> triggers.
+- `GaussianFitterTest.testFit01` -> triggers.
+- `GaussianFitterTest.testFit02` -> calls fitter.fit() which uses optimizer; if optimizer throws exception or runs forever, it fails. But does it have assertions? No. However, if the optimizer runs without error, it may pass even with buggy code? But the optimizer likely reaches max iterations and throws an exception, causing failure. So it triggers.
+- `GaussianFitterTest.testFit03` -> similar, calls fitter.fit(); likely triggers.
+- `GaussianFitterTest.testFit04` -> triggers (has assertions).
+- `GaussianFitterTest.testFit05` -> triggers.
+- `GaussianFitterTest.testFit06` -> triggers.
+- `GaussianFitterTest.testFit07` -> triggers.
+- `HarmonicFitterTest.testNoError` -> triggers.
+- `HarmonicFitterTest.test1PercentError` -> triggers.
+- `HarmonicFitterTest.testInitialGuess` -> triggers.
+- `HarmonicFitterTest.testUnsorted` -> triggers.
+- `ParametricGaussianFunctionTest.testFit01` -> triggers.
+- `ParametricGaussianFunctionTest.testFit02` -> triggers.
+- `ParametricGaussianFunctionTest.testValue01` -> no optimizer, no trigger.
+- `ParametricGaussianFunctionTest.testValue02` -> no trigger.
+- `ParametricGaussianFunctionTest.testValue03` -> no trigger.
+- `PolynomialFitterTest.testNoError` -> triggers.
+- `PolynomialFitterTest.testSmallError` -> triggers.
+- `PolynomialFitterTest.testRedundantSolvable` -> uses optimizer, triggers.
+- `PolynomialFitterTest.testRedundantUnsolvable` -> uses GaussNewtonOptimizer, not LevenbergMarquardt, so does not trigger.
+- `LevenbergMarquardtOptimizerTest.testTrivial` -> triggers.
+- `LMOT.testQRColumnsPermutation` -> triggers.
+- `LMOT.testNoDependency` -> triggers.
+- `LMOT.testOneSet` -> triggers.
+- `LMOT.testTwoSets` -> triggers.
+- `LMOT.testNonInversible` -> triggers.
+- `LMOT.testIllConditioned` -> triggers.
+- `LMOT.testMoreEstimatedParametersSimple` -> triggers.
+- `LMOT.testMoreEstimatedParametersUnsorted` -> triggers.
+- `LMOT.testRedundantEquations` -> triggers.
+- `LMOT.testInconsistentEquations` -> triggers.
+- `LMOT.testInconsistentSizes` -> triggers.
+- `LMOT.testControlParameters` -> calls checkEstimate which uses optimizer, triggers.
+- `LMOT.testCircleFitting` -> triggers.
+- `LMOT.testCircleFittingBadInit` -> triggers.
+- `LMOT.testMath199` -> triggers, asserts exception.
+- `MinpackTest.testMinpackLinearFullRank` -> triggers (calls minpackTest with LevenbergMarquardtOptimizer).
+- `MinpackTest.testMinpackLinearRank1` -> triggers.
+- `MinpackTest.testMinpackLinearRank1ZeroColsAndRows` -> triggers.
+- `MinpackTest.testMinpackRosenbrok` -> triggers.
+- `MinpackTest.testMinpackHelicalValley` -> triggers.
+- `MinpackTest.testMinpackPowellSingular` -> triggers.
+- `MinpackTest.testMinpackFreudensteinRoth` -> triggers.
+- `MinpackTest.testMinpackBard` -> triggers.
+- `MinpackTest.testMinpackKowalikOsborne` -> triggers.
+- `MinpackTest.testMinpackMeyer` -> triggers.
+- `MinpackTest.testMinpackWatson` -> triggers.
+- `MinpackTest.testMinpackBox3Dimensional` -> triggers.
+- `MinpackTest.testMinpackJennrichSampson` -> triggers.
+- `MinpackTest.testMinpackBrownDennis` -> triggers.
+- `MinpackTest.testMinpackChebyquad` -> triggers.
+- `MinpackTest.testMinpackBrownAlmostLinear` -> triggers.
+- `MinpackTest.testMinpackOsborne1` -> triggers.
+- `MinpackTest.testMinpackOsborne2` -> triggers.
+
+So many tests trigger the bug.
+
+But the instruction likely expects all these as they are all the test methods that use the optimizer. However, the output format expects a list of strings. We must include the full method path as given in the input (with "::" separator). We'll list all that we identified as triggering.
+
+However, note that the input does not include the class names for all tests. It only shows the method names inside comments. We need to construct the full path. For example, the first test is in `CurveFitterTest` so full path is `org.apache.commons.math.optimization.fitting.CurveFitterTest::testMath303`. Similarly for others.
+
+We'll list them all.
+
+But we must also provide the fixed code. The fix is to remove the line `lmDir[pj] = -lmDir[pj];` from the `doOptimize` method. Also, we need to ensure that the method works correctly with that change. No other changes are needed.
+
+The output must include the full fixed function as a JSON string. So we need to output the entire `doOptimize` method with the fix.
+
+Now, we need to format the output as JSON. The `trigger_method` list should contain only those test methods that actually trigger the bug. According to the analysis, virtually all tests that use the optimizer trigger it. We'll include all except the ones we identified as not triggering (testValue01-03, testRedundantUnsolvable). Also, the MinpackTest tests all use the optimizer, so they all trigger.
+
+But we should also consider that some tests might still pass with the bug if they are robust? For example, `testMath303` only checks length, not value. If the optimization fails but returns a result of correct length (e.g., after max iterations, it returns the current point?), does it return? In the code, if max iterations not set, it could loop forever? Actually, there is a default max iteration count. If it reaches max, `incrementIterationsCounter` will throw an exception. So it won't proceed to return. So `testMath303` would fail because an exception is thrown. So it fails.
+
+Thus, all tests that call `optimize` and expect it to succeed (without exception) will fail. Some tests expect exceptions (like `testMath199`, `testTrivial` expects an exception later), but they also call optimize. `testTrivial` calls optimize first and expects success, then later expects exception. So it will fail on the optimize.
+
+Therefore, all test methods that invoke the optimizer (and are not just function evaluations) will trigger the bug.
+
+We'll list all such test methods from the input.
+
+Now, for the fixed_code, we need to output the entire `doOptimize` method as a string with the fix. We'll just modify the line.
+
+Let's write the fixed code. We'll keep everything the same except remove the line `lmDir[pj] = -lmDir[pj];` (or comment it out). Also, we need to fix the indentation? Not needed.
+
+Let's produce the output JSON.{
+  "trigger_method": [
+    "org.apache.commons.math.optimization.fitting.CurveFitterTest::testMath303",
+    "org.apache.commons.math.optimization.fitting.CurveFitterTest::testMath304",
+    "org.apache.commons.math.optimization.fitting.CurveFitterTest::testMath372",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit01",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit02",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit03",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit04",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit05",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit06",
+    "org.apache.commons.math.optimization.fitting.GaussianFitterTest::testFit07",
+    "org.apache.commons.math.optimization.fitting.HarmonicFitterTest::testNoError",
+    "org.apache.commons.math.optimization.fitting.HarmonicFitterTest::test1PercentError",
+    "org.apache.commons.math.optimization.fitting.HarmonicFitterTest::testInitialGuess",
+    "org.apache.commons.math.optimization.fitting.HarmonicFitterTest::testUnsorted",
+    "org.apache.commons.math.optimization.fitting.ParametricGaussianFunctionTest::testFit01",
+    "org.apache.commons.math.optimization.fitting.ParametricGaussianFunctionTest::testFit02",
+    "org.apache.commons.math.optimization.fitting.PolynomialFitterTest::testNoError",
+    "org.apache.commons.math.optimization.fitting.PolynomialFitterTest::testSmallError",
+    "org.apache.commons.math.optimization.fitting.PolynomialFitterTest::testRedundantSolvable",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testTrivial",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testQRColumnsPermutation",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testNoDependency",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testOneSet",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testTwoSets",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testNonInversible",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testIllConditioned",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testMoreEstimatedParametersSimple",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testMoreEstimatedParametersUnsorted",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testRedundantEquations",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testInconsistentEquations",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testInconsistentSizes",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testControlParameters",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testCircleFitting",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testCircleFittingBadInit",
+    "org.apache.commons.math.optimization.general.LevenbergMarquardtOptimizerTest::testMath199",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackLinearFullRank",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackLinearRank1",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackLinearRank1ZeroColsAndRows",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackRosenbrok",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackHelicalValley",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackPowellSingular",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackFreudensteinRoth",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackBard",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackKowalikOsborne",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackMeyer",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackWatson",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackBox3Dimensional",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackJennrichSampson",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackBrownDennis",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackChebyquad",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackBrownAlmostLinear",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackOsborne1",
+    "org.apache.commons.math.optimization.general.MinpackTest::testMinpackOsborne2"
+  ],
+  "fixed_code": [
+    "    protected VectorialPointValuePair doOptimize()\n        throws FunctionEvaluationException, OptimizationException, IllegalArgumentException {\n\n        // arrays shared with the other private methods\n        solvedCols  = Math.min(rows, cols);\n        diagR       = new double[cols];\n        jacNorm     = new double[cols];\n        beta        = new double[cols];\n        permutation = new int[cols];\n        lmDir       = new double[cols];\n\n        // local point\n        double   delta   = 0;\n        double   xNorm   = 0;\n        double[] diag    = new double[cols];\n        double[] oldX    = new double[cols];\n        double[] oldRes  = new double[rows];\n        double[] work1   = new double[cols];\n        double[] work2   = new double[cols];\n        double[] work3   = new double[cols];\n\n        // evaluate the function at the starting point and calculate its norm\n        updateResidualsAndCost();\n\n        // outer loop\n        lmPar = 0;\n        boolean firstIteration = true;\n        VectorialPointValuePair current = new VectorialPointValuePair(point, objective);\n        while (true) {\n            incrementIterationsCounter();\n\n            // compute the Q.R. decomposition of the jacobian matrix\n            VectorialPointValuePair previous = current;\n            updateJacobian();\n            qrDecomposition();\n\n            // compute Qt.res\n            qTy(residuals);\n            // now we don't need Q anymore,\n            // so let jacobian contain the R matrix with its diagonal elements\n            for (int k = 0; k < solvedCols; ++k) {\n                int pk = permutation[k];\n                jacobian[k][pk] = diagR[pk];\n            }\n\n            if (firstIteration) {\n\n                // scale the point according to the norms of the columns\n                // of the initial jacobian\n                xNorm = 0;\n                for (int k = 0; k < cols; ++k) {\n                    double dk = jacNorm[k];\n                    if (dk == 0) {\n                        dk = 1.0;\n                    }\n                    double xk = dk * point[k];\n                    xNorm  += xk * xk;\n                    diag[k] = dk;\n                }\n                xNorm = Math.sqrt(xNorm);\n\n                // initialize the step bound delta\n                delta = (xNorm == 0) ? initialStepBoundFactor : (initialStepBoundFactor * xNorm);\n\n            }\n\n            // check orthogonality between function vector and jacobian columns\n            double maxCosine = 0;\n            if (cost != 0) {\n                for (int j = 0; j < solvedCols; ++j) {\n                    int    pj = permutation[j];\n                    double s  = jacNorm[pj];\n                    if (s != 0) {\n                        double sum = 0;\n                        for (int i = 0; i <= j; ++i) {\n                            sum += jacobian[i][pj] * residuals[i];\n                        }\n                        maxCosine = Math.max(maxCosine, Math.abs(sum) / (s * cost));\n                    }\n                }\n            }\n            if (maxCosine <= orthoTolerance) {\n                // convergence has been reached\n                return current;\n            }\n\n            // rescale if necessary\n            for (int j = 0; j < cols; ++j) {\n                diag[j] = Math.max(diag[j], jacNorm[j]);\n            }\n\n            // inner loop\n            for (double ratio = 0; ratio < 1.0e-4;) {\n\n                // save the state\n                for (int j = 0; j < solvedCols; ++j) {\n                    int pj = permutation[j];\n                    oldX[pj] = point[pj];\n                }\n                double previousCost = cost;\n                double[] tmpVec = residuals;\n                residuals = oldRes;\n                oldRes    = tmpVec;\n\n                // determine the Levenberg-Marquardt parameter\n                determineLMParameter(oldRes, delta, diag, work1, work2, work3);\n\n                // compute the new point and the norm of the evolution direction\n                double lmNorm = 0;\n                for (int j = 0; j < solvedCols; ++j) {\n                    int pj = permutation[j];\n                    point[pj] = oldX[pj] + lmDir[pj];\n                    double s = diag[pj] * lmDir[pj];\n                    lmNorm  += s * s;\n                }\n                lmNorm = Math.sqrt(lmNorm);\n                // on the first iteration, adjust the initial step bound.\n                if (firstIteration) {\n                    delta = Math.min(delta, lmNorm);\n                }\n\n                // evaluate the function at x + p and calculate its norm\n                updateResidualsAndCost();\n                current = new VectorialPointValuePair(point, objective);\n\n                // compute the scaled actual reduction\n                double actRed = -1.0;\n                if (0.1 * cost < previousCost) {\n                    double r = cost / previousCost;\n                    actRed = 1.0 - r * r;\n                }\n\n                // compute the scaled predicted reduction\n                // and the scaled directional derivative\n                for (int j = 0; j < solvedCols; ++j) {\n                    int pj = permutation[j];\n                    double dirJ = lmDir[pj];\n                    work1[j] = 0;\n                    for (int i = 0; i <= j; ++i) {\n                        work1[i] += jacobian[i][pj] * dirJ;\n                    }\n                }\n                double coeff1 = 0;\n                for (int j = 0; j < solvedCols; ++j) {\n                    coeff1 += work1[j] * work1[j];\n                }\n                double pc2 = previousCost * previousCost;\n                coeff1 = coeff1 / pc2;\n                double coeff2 = lmPar * lmNorm * lmNorm / pc2;\n                double preRed = coeff1 + 2 * coeff2;\n                double dirDer = -(coeff1 + coeff2);\n\n                // ratio of the actual to the predicted reduction\n                ratio = (preRed == 0) ? 0 : (actRed / preRed);\n\n                // update the step bound\n                if (ratio <= 0.25) {\n                    double tmp =\n                        (actRed < 0) ? (0.5 * dirDer / (dirDer + 0.5 * actRed)) : 0.5;\n                        if ((0.1 * cost >= previousCost) || (tmp < 0.1)) {\n                            tmp = 0.1;\n                        }\n                        delta = tmp * Math.min(delta, 10.0 * lmNorm);\n                        lmPar /= tmp;\n                } else if ((lmPar == 0) || (ratio >= 0.75)) {\n                    delta = 2 * lmNorm;\n                    lmPar *= 0.5;\n                }\n\n                // test for successful iteration.\n                if (ratio >= 1.0e-4) {\n                    // successful iteration, update the norm\n                    firstIteration = false;\n                    xNorm = 0;\n                    for (int k = 0; k < cols; ++k) {\n                        double xK = diag[k] * point[k];\n                        xNorm    += xK * xK;\n                    }\n                    xNorm = Math.sqrt(xNorm);\n\n                    // tests for convergence.\n                    // we use the vectorial convergence checker\n                } else {\n                    // failed iteration, reset the previous values\n                    cost = previousCost;\n                    for (int j = 0; j < solvedCols; ++j) {\n                        int pj = permutation[j];\n                        point[pj] = oldX[pj];\n                    }\n                    tmpVec    = residuals;\n                    residuals = oldRes;\n                    oldRes    = tmpVec;\n                }\n                if (checker==null) {\n                \tif (((Math.abs(actRed) <= costRelativeTolerance) &&\n                        (preRed <= costRelativeTolerance) &&\n                        (ratio <= 2.0)) ||\n                       (delta <= parRelativeTolerance * xNorm)) {\n                       return current;\n                   }\n                } else {\n                    if (checker.converged(getIterations(), previous, current)) {\n                        return current;\n                    }\n                }\n                // tests for termination and stringent tolerances\n                // (2.2204e-16 is the machine epsilon for IEEE754)\n                if ((Math.abs(actRed) <= 2.2204e-16) && (preRed <= 2.2204e-16) && (ratio <= 2.0)) {\n                    throw new OptimizationException(LocalizedFormats.TOO_SMALL_COST_RELATIVE_TOLERANCE,\n                            costRelativeTolerance);\n                } else if (delta <= 2.2204e-16 * xNorm) {\n                    throw new OptimizationException(LocalizedFormats.TOO_SMALL_PARAMETERS_RELATIVE_TOLERANCE,\n                            parRelativeTolerance);\n                } else if (maxCosine <= 2.2204e-16)  {\n                    throw new OptimizationException(LocalizedFormats.TOO_SMALL_ORTHOGONALITY_TOLERANCE,\n                            orthoTolerance);\n                }\n\n            }\n\n        }\n\n    }"
+  ]
+}

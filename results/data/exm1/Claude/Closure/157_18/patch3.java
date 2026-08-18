@@ -1,0 +1,28 @@
+public void visit(NodeTraversal t, Node n, Node parent) {
+      switch (n.getType()) {
+        case Token.GETPROP:
+        case Token.GETELEM:
+          Node dest = n.getFirstChild().getNext();
+          if (dest.getType() == Token.STRING) {
+            String s = dest.getString();
+            if (s.equals("prototype")) {
+              processPrototypeParent(parent, t.getInput());
+            } else {
+              markPropertyAccessCandidate(dest, t.getInput());
+            }
+          }
+          break;
+        case Token.OBJECTLIT:
+          if (!prototypeObjLits.contains(n)) {
+            for (Node child = n.getFirstChild();
+                 child != null;
+                 child = child.getNext().getNext()) {
+
+              if (child.getType() != Token.NUMBER && child.getType() != Token.GET && child.getType() != Token.SET) {
+                markObjLitPropertyCandidate(child, t.getInput());
+              }
+            }
+          }
+          break;
+      }
+    }

@@ -1,0 +1,246 @@
+We need to analyze the buggy functions: writeLocalFileHeader, createLocalFileHeader, writeDataDescriptor, usesDataDescriptor. These are part of ZipArchiveOutputStream. The testcases that might exercise these functions are those that involve writing zip entries, especially with deflated method and non-seekable output (stream). The DataDescriptorTest methods are relevant: writesDataDescriptorForDeflatedEntryOnUnseekableOutput, doesntWriteDataDescriptorForDeflatedEntryOnSeekableOutput, doesntWriteDataDescriptorWhenAddingRawEntries. Also the ZipTestCase methods like testZipArchiveCreation, testZipArchiveCreationInMemory, etc., but they might not expose the bug.
+
+We need to identify the bug. Looking at the code:
+
+writeLocalFileHeader: It computes localHeaderStart, then calls createLocalFileHeader with the archiveOffset = localHeaderStart. Then it sets entry.localDataStart = localHeaderStart + LFH_CRC_OFFSET; That seems fine.
+
+createLocalFileHeader: There's a bug: In the padding calculation for alignment, it uses `int padding = (int) ((-archiveOffset - oldLength - ZipExtraField.EXTRAFIELD_HEADER_SIZE - ResourceAlignmentExtraField.BASE_SIZE) & (alignment - 1));` This is weird: it subtracts oldLength, then subtracts EXTRAFIELD_HEADER_SIZE and BASE_SIZE. But then later it adds the ResourceAlignmentExtraField with the padding. However, the extra field is later included in `extra` which is obtained via `ze.getLocalFileDataExtra()`. But note that before this, the oldAlignmentEx was removed and then after padding calculation, a new ResourceAlignmentExtraField is added. So the `extra` after adding includes this new extra field. But in the padding calculation, the oldLength includes the old extra fields (including the old alignment extra if present) but after removal and re-addition, the new extra length might be different. However, the bug might be that the padding calculation uses `oldLength` which is computed before adding the new alignment extra field, so it correctly accounts for the addition? Actually, the oldLength includes whatever extra fields were present before, but after removal of oldAlignmentEx, the extra length might be shorter, then we add the new alignment extra field which adds back similar length. But if oldAlignmentEx is null, we add a new one with the same size. So the effect is neutral. Might not be the main bug.
+
+Another issue: In writeDataDescriptor, it checks `if (ze.getMethod() != DEFLATED || channel != null) { return; }`. This means it writes data descriptor only if method is DEFLATED and channel is null (non-seekable). But then in createLocalFileHeader, for the case when not phased, it writes CRC and sizes based on conditions:
+- if (zipMethod == DEFLATED || channel != null) { put zeros }
+- else (stored) put actual values.
+
+But note: If channel != null (seekable), then even for deflated it writes zeros, expecting to later seek back and update. If channel == null (non-seekable), then for deflated it writes zeros, and later data descriptor is written. That's consistent.
+
+However, there is a condition in writeDataDescriptor: If method is DEFLATED and channel is null, it writes data descriptor. But what about the case where the entry is stored? For stored, no data descriptor, and CRC/size are written correctly in local header. So far so good.
+
+But there is a potential bug: In writeDataDescriptor, it writes the data descriptor only if method == DEFLATED and channel == null. But in createLocalFileHeader, for deflated with channel == null, it sets CRC and sizes to zero. That's correct because they will be provided in data descriptor. However, for stored entries (zipMethod == STORED), CRC and sizes are written directly. That's fine.
+
+Now, look at the test `writesDataDescriptorForDeflatedEntryOnUnseekableOutput`: It creates a ZipArchiveOutputStream with a ByteArrayOutputStream (non-seekable). It puts a deflated entry, writes "foo", closes archive entry. Then it checks that the data descriptor is present. This test likely passes? But we need to see if there is any bug that causes failure.
+
+Another test: `doesntWriteDataDescriptorForDeflatedEntryOnSeekableOutput`: Uses a file (seekable). Expects no data descriptor. That might also pass.
+
+Maybe the bug is in the use of `usesDataDescriptor` in `writeLocalFileHeader`: It calls `usesDataDescriptor(ze.getMethod())` which returns true for DEFLATED and channel == null. That's used to set the version needed and general purpose bits. But in createLocalFileHeader, the condition for setting CRC and sizes uses `zipMethod == DEFLATED || channel != null`. This is wrong: The intention is to write zeros if we will later write a data descriptor (i.e., for deflated when non-seekable) OR for seekable (where we will later seek back). But the condition `zipMethod == DEFLATED || channel != null` includes the case where method is DEFLATED and channel is null (non-seekable) -> writes zeros (good). Also includes method not DEFLATED but channel != null (seekable) -> writes zeros (good, because seekable will update later). But also includes method DEFLATED and channel != null -> writes zeros (good). So it covers all cases where we need zeros. However, for stored method and channel != null (seekable), it would incorrectly write zeros, but stored should have immediate values. Actually, for seekable, we might still want to write exact values because we can't seek back? Wait, seekable means we can seek back later to update the local header. For stored entries, we don't use data descriptor; we should write correct CRC and sizes in the local header. But if channel is not null, the condition `channel != null` triggers writing zeros even for stored entries, which is wrong. That would cause stored entries on seekable output to have zero local header CRC/sizes, and then the code later would need to seek back and update, but does it? The code in `ZipArchiveOutputStream` does seek back for deflated entries when channel is seekable, but for stored entries, it might not. Looking at the `putArchiveEntry` and `closeArchiveEntry` methods, we need to see the logic.
+
+Let's examine the relevant part: In `ZipArchiveOutputStream` (not fully provided), there is a method `closeArchiveEntry` that handles the finishing of an entry. It likely checks if the entry is stored and if channel is seekable, it should update the local header. But if the local header has zeros, it must be updated. However, the condition in createLocalFileHeader writes zeros for stored when channel != null, which is incorrect because stored entries always have known sizes at write time. The correct condition should be: writes zeros only if there will be a data descriptor (i.e., deflated and non-seekable) OR if channel is seekable and the method is deflated (because we will compress and later know sizes) - but for stored on seekable, sizes are known immediately, so we should not write zeros. Actually, the condition should be: If (zipMethod == DEFLATED || channel != null && zipMethod == DEFLATED?) Wait, the buggy code: `} else if (zipMethod == DEFLATED || channel != null) {` This is too broad. It should be: For deflated (regardless of seekable?) Actually, for deflated on seekable, we can write zeros and later update; for deflated on non-seekable, we write zeros and later use data descriptor. For stored on non-seekable, we write exact values (since no data descriptor). For stored on seekable, we also write exact values (no data descriptor and we can update later if needed? But we don't need to update because they are correct). So the condition should be: if (zipMethod == DEFLATED) { write zeros } else { write exact values }. But for seekable, maybe we also want to write zeros for deflated? Yes, because we will seek back. So the correct condition is: if (zipMethod == DEFLATED || (zipMethod != STORED && channel != null && ...))? Actually, looking at the else clause: `} else if (zipMethod == DEFLATED || channel != null) {` This is supposed to handle cases where we don't know sizes yet: when using DEFLATED (because size after compression is unknown) or when we have a channel (meaning we can write zeros and later update). But for stored, size is known, so we should not be in this branch. The bug is that when channel != null, even for stored entries, it goes into this branch and writes zeros, which is wrong.
+
+Let's verify with the test `doesntWriteDataDescriptorForDeflatedEntryOnSeekableOutput`: It creates a zip file using File, which is seekable. In that case, for deflated, it writes zeros and later seeks back to update. That should work because the code correctly updates later. The test checks that the local header has correct CRC and sizes after the entry is closed. That test likely passes because the seekable update works.
+
+But the bug might manifest when writing a stored entry on a seekable output? The test `writesDataDescriptorForDeflatedEntryOnUnseekableOutput` uses ByteArrayOutputStream (non-seekable, channel==null). For stored entries, the condition `zipMethod == DEFLATED` is false, `channel != null` is false, so it goes to the else branch and writes exact values. That's fine.
+
+Which test could trigger the bug? Look at `testZipArchiveCreation`: It writes two entries (test1.xml and test2.xml) using ZipArchiveOutputStream to a file (seekable). The entries are stored? Actually, by default, ZipArchiveEntry method is -1, which means the output stream chooses. In `ZipArchiveOutputStream`, the default method is DEFLATED for files. So testZipArchiveCreation creates entries with method -1, so they become deflated. So the condition `zipMethod == DEFLATED || channel != null` is true (since channel != null). That's fine for deflated. So no bug there.
+
+Now consider `testZipArchiveCreationInMemory`: It uses SeekableInMemoryByteChannel, which is also seekable. Again, deflated entries, so condition true, writes zeros, later updates. Works.
+
+The bug would be exposed if we write a stored entry on a seekable output, because then we incorrectly write zeros. Are there any tests that write stored entries? Look at `testReadingOfStoredEntry` in ZipFileTest: It creates a stored entry with known size and CRC. That test uses `ZipArchiveOutputStream` with a FileOutputStream (seekable). The entry is explicitly set to STORED. In that test, the local header should contain the correct CRC and sizes, but due to the bug, it will write zeros, and then the code will later try to update? Let's see if the code updates for stored entries. In `ZipArchiveOutputStream.closeArchiveEntry()`, it probably checks if method is DEFLATED or if there is a data descriptor, etc. For stored entries on seekable, it might still update because the local header has zeros? I'm not sure. We need to check the implementation of closeArchiveEntry in the original code. Since it's not provided, we must infer from the bug.
+
+Given the buggy code: condition in createLocalFileHeader writes zeros for both DEFLATED and when channel != null. This is wrong for stored when channel != null. The fix should be to change the condition to only write zeros if we are going to write a data descriptor (which is true only for DEFLATED and channel == null) OR if we have a seekable channel and the method is DEFLATED (because we will seek back). But for stored, we know sizes, so we should write them immediately.
+
+Actually, the code also has a `phased` parameter. In the else if branch, it says: `} else if (zipMethod == DEFLATED || channel != null) {` meaning if not phased, then if method is deflated or channel is not null, we write zeros. But for phased, it writes actual values. The `phased` flag is used when adding entries in a certain mode? Possibly for copying raw entries. So the bug may be specific to non-phased case.
+
+Now, which test exercises stored entry on seekable output? The test `testReadingOfStoredEntry` in ZipFileTest does exactly that: It creates a stored entry (method=STORED, size=4, CRC=0xb63cfbcdl) using ZipArchiveOutputStream with a file. If the bug is present, the local header will have zeros for CRC and sizes, and then when reading back, the CRC check might fail. But the test might still pass if the code updates the local header after closing the entry. Does the code update for stored entries? It might not, because the update logic is for deflated entries. Let's check: In ZipArchiveOutputStream, after writing data, for deflated entries, it seeks back to update the local header with actual sizes. For stored entries, the sizes are known before writing, so it should write them directly. If it writes zeros, it would be a bug. So testReadingOfStoredEntry might fail.
+
+But the test is in ZipFileTest, and it uses ZipFile to read back. If the local header has wrong CRC/sizes, reading might fail with CRC error. So that test might be a triggering test.
+
+Also, testEntryAlignment uses stored entries? It creates stored entries with alignment. That might also be affected.
+
+Let's compile a list of test methods that might trigger the bug. The bug is in createLocalFileHeader: the condition `zipMethod == DEFLATED || channel != null` is too broad. We need to change it to only when a data descriptor will be used (i.e., method == DEFLATED and channel == null) or when we are in seekable mode and method is DEFLATED (because we will seek back). But for seekable and stored, we should write values directly.
+
+Thus, the correct condition should be: if (zipMethod == DEFLATED) { // deflated always uses zeros in local header because size is unknown at write time } else if (channel != null) { // for seekable, we only need zeros if method is deflated? Actually, if method is stored and channel != null, we already have the sizes, so we should not write zeros. So the condition should be: if (zipMethod == DEFLATED) { write zeros } else if (channel != null && zipMethod == DEFLATED) is redundant. So simply: if (zipMethod == DEFLATED) { zeros } else { actual values }.
+
+But wait, for seekable and deflated, we write zeros and later seek back to update. That's fine. For seekable and stored, we write actual values. For non-seekable and deflated, we write zeros (data descriptor later). For non-seekable and stored, we write actual values. So the condition should be: if (zipMethod == DEFLATED) { zeros } else { actual values }. That simplifies and fixes the bug.
+
+However, there is also the case for channel != null and method is not DEFLATED? That's stored, so we want actual values. So the fix is to remove the `channel != null` from the condition.
+
+But need to also consider the CRC condition: The same pattern appears for CRC. In the CRC block: 
+```
+if (phased){
+    putLong(ze.getCrc(), buf, LFH_CRC_OFFSET);
+} else if (zipMethod == DEFLATED || channel != null) {
+    System.arraycopy(LZERO, 0, buf, LFH_CRC_OFFSET, WORD);
+} else {
+    putLong(ze.getCrc(), buf, LFH_CRC_OFFSET);
+}
+```
+Same bug: for stored on seekable, it sets CRC to zero. Should be: if phased, do actual; else if zipMethod == DEFLATED, set zero; else actual. So fix both CRC and sizes sections.
+
+Thus the fix is to change the conditions from `else if (zipMethod == DEFLATED || channel != null)` to `else if (zipMethod == DEFLATED)` for both CRC and sizes.
+
+Now, what test methods trigger this bug? Any test that writes a stored entry to a seekable output (or to a non-seekable? For non-seekable, the condition `channel != null` is false, so it would go to else and write correct values. So only seekable + stored triggers the bug. Let's scan the test methods:
+
+- testReadingOfStoredEntry (ZipFileTest) creates a stored entry on seekable (file). This would write zeros for CRC and sizes, then later read fails.
+- testEntryAlignment (ZipFileTest) creates stored entries with alignment, might also be affected.
+- testExplicitDirectoryEntry? Not stored.
+- testFileEntryFromFile? For zip, it creates entry with method default (deflated) or stored? The test sets size and maybe method? It uses new ZipArchiveEntry(tmp[1], "foo") which likely sets method to STORED? Actually, the constructor from File sets method to STORED? Not sure. Looking at ZipArchiveEntry: when created from File, it might set method to -1, so defaulting to DEFLATED. So not stored.
+- testExplicitFileEntry in ZipTest: It creates ZipArchiveEntry("foo") and sets size manually, but does not set method explicitly, so it will use the default (deflated) unless the output stream overrides. In ZipArchiveOutputStream, if method is -1, it sets to deflated. So not stored.
+- testCopyRawEntriesFromFile: uses raw entries, not directly affected.
+- testUnixModeInAddRaw: uses DEFLATED.
+- DataDescriptorTest::writesDataDescriptorForDeflatedEntryOnUnseekableOutput: uses deflated, non-seekable, no bug.
+- DataDescriptorTest::doesntWriteDataDescriptorForDeflatedEntryOnSeekableOutput: uses deflated, seekable, the condition for CRC/sizes is still true because zipMethod==DEFLATED, so zeros written, then later updated. That's fine.
+- DataDescriptorTest::doesntWriteDataDescriptorWhenAddingRawEntries: uses raw entries, not affected.
+
+But wait, there is also a test `testReadingOfStoredEntry` in ZipArchiveInputStreamTest? No, that's reading.
+
+Then `testExplicitFileEntry` in ZipTest? Let's check: In ZipTestCase, there is testExplicitFileEntry that creates a ZipArchiveEntry with explicit time and size, but method is not set; default is deflated. So not stored.
+
+However, `testEntryAlignment` in ZipFileTest creates stored entries explicitly: `storedEntry.setMethod(ZipEntry.STORED);`. So that test would be affected. Also `storedEntry2` and `storedEntry3` are stored. So `testEntryAlignment` likely triggers the bug.
+
+Also `testEntryAlignmentExceed` creates a stored entry but without writing it, so probably not triggered.
+
+`testInvalidAlignment` just creates entry, no write.
+
+Also `testReadingOfStoredEntry` in ZipFileTest creates a stored entry with setMethod STORED. That should trigger.
+
+Now, what about test methods that write stored entries on non-seekable? e.g., `testZipArchiveCreationInMemory` uses SeekableInMemoryByteChannel (seekable) but entries are deflated. So not.
+
+`testZipArchiveCreation` uses file (seekable) and deflated entries.
+
+So the likely triggering tests are those that explicitly write stored entries to seekable output.
+
+Let's list them from the provided tests:
+
+1. ZipFileTest::testReadingOfStoredEntry: creates a stored entry on file.
+2. ZipFileTest::testEntryAlignment: creates stored entries on SeekableInMemoryByteChannel (seekable).
+3. ZipFileTest::testEntryAlignmentExceed: only creates entry, doesn't write.
+4. ZipFileTest::testDelayedOffsetsAndSizes: It creates one deflated and one stored entry on ByteArrayOutputStream (non-seekable? Actually, ByteArrayOutputStream is not seekable, channel is null). For stored entry on non-seekable, no bug because condition `channel != null` is false, so else branch writes actual values. So not triggered.
+
+Also, there is IOMethodsTest::testWriteZip which uses ArchiveEntry entry = new ZipArchiveEntry("dummy"); but method is not set, so deflated.
+
+What about testWriteJar? Jar also uses ZipArchiveOutputStream internally, but similarly default deflated.
+
+So the bug is most clearly exposed by `testReadingOfStoredEntry` and `testEntryAlignment`. Also possibly by any test that writes a stored entry to a seekable stream.
+
+But we need to be careful: The test `testReadingOfStoredEntry` in ZipFileTest reads the entry after writing, and if CRC is wrong, it will throw an exception. So it should fail.
+
+Similarly, `testEntryAlignment` expects to read the stored entries correctly; with wrong CRC/sizes, it will fail.
+
+Now, are there any other tests that might trigger the bug indirectly? For example, `testZipArchiveCreation` might create stored entries if the file is small? Actually, default is deflated, so no.
+
+Thus, the triggering test methods are:
+- org.apache.commons.compress.archivers.zip.ZipFileTest::testReadingOfStoredEntry
+- org.apache.commons.compress.archivers.zip.ZipFileTest::testEntryAlignment
+
+Also, maybe `testExplicitFileEntry` and `testFileEntryFromFile` in ZipTestCase? They don't set method, so they are deflated. They would not trigger the bug.
+
+Now, we need to produce the fix for the three functions provided: writeLocalFileHeader, createLocalFileHeader, writeDataDescriptor, usesDataDescriptor. Only createLocalFileHeader needs fix. The other functions are correct.
+
+Fix createLocalFileHeader: Change the conditions in CRC and sizes blocks from `zipMethod == DEFLATED || channel != null` to `zipMethod == DEFLATED`. Also in sizes block, same change.
+
+Also ensure that for phased case, it's already correct.
+
+Thus the fixed code for createLocalFileHeader:
+
+```java
+    private byte[] createLocalFileHeader(final ZipArchiveEntry ze, final ByteBuffer name, final boolean encodable,
+                                         final boolean phased, long archiveOffset) throws IOException {
+        ResourceAlignmentExtraField oldAlignmentEx =
+            (ResourceAlignmentExtraField) ze.getExtraField(ResourceAlignmentExtraField.ID);
+        if (oldAlignmentEx != null) {
+            ze.removeExtraField(ResourceAlignmentExtraField.ID);
+        }
+
+        int alignment = ze.getAlignment();
+        if (alignment <= 0 && oldAlignmentEx != null) {
+            alignment = oldAlignmentEx.getAlignment();
+        }
+
+        if (alignment > 1 || (oldAlignmentEx != null && !oldAlignmentEx.allowMethodChange())) {
+            int oldLength = LFH_FILENAME_OFFSET +
+                            name.limit() - name.position() +
+                            ze.getLocalFileDataExtra().length;
+
+            int padding = (int) ((-archiveOffset - oldLength - ZipExtraField.EXTRAFIELD_HEADER_SIZE
+                            - ResourceAlignmentExtraField.BASE_SIZE) &
+                            (alignment - 1));
+            ze.addExtraField(new ResourceAlignmentExtraField(alignment,
+                            oldAlignmentEx != null && oldAlignmentEx.allowMethodChange(), padding));
+        }
+
+        final byte[] extra = ze.getLocalFileDataExtra();
+        final int nameLen = name.limit() - name.position();
+        final int len = LFH_FILENAME_OFFSET + nameLen + extra.length;
+        final byte[] buf = new byte[len];
+
+        System.arraycopy(LFH_SIG,  0, buf, LFH_SIG_OFFSET, WORD);
+
+        //store method in local variable to prevent multiple method calls
+        final int zipMethod = ze.getMethod();
+        final boolean dataDescriptor = usesDataDescriptor(zipMethod);
+
+        putShort(versionNeededToExtract(zipMethod, hasZip64Extra(ze), dataDescriptor), buf, LFH_VERSION_NEEDED_OFFSET);
+
+        final GeneralPurposeBit generalPurposeBit = getGeneralPurposeBits(!encodable && fallbackToUTF8, dataDescriptor);
+        generalPurposeBit.encode(buf, LFH_GPB_OFFSET);
+
+        // compression method
+        putShort(zipMethod, buf, LFH_METHOD_OFFSET);
+
+        ZipUtil.toDosTime(calendarInstance, ze.getTime(), buf, LFH_TIME_OFFSET);
+
+        // CRC
+        if (phased){
+            putLong(ze.getCrc(), buf, LFH_CRC_OFFSET);
+        } else if (zipMethod == DEFLATED) {
+            System.arraycopy(LZERO, 0, buf, LFH_CRC_OFFSET, WORD);
+        } else {
+            putLong(ze.getCrc(), buf, LFH_CRC_OFFSET);
+        }
+
+        // compressed length
+        // uncompressed length
+        if (hasZip64Extra(entry.entry)){
+            // point to ZIP64 extended information extra field for
+            // sizes, may get rewritten once sizes are known if
+            // stream is seekable
+            ZipLong.ZIP64_MAGIC.putLong(buf, LFH_COMPRESSED_SIZE_OFFSET);
+            ZipLong.ZIP64_MAGIC.putLong(buf, LFH_ORIGINAL_SIZE_OFFSET);
+        } else if (phased) {
+            putLong(ze.getCompressedSize(), buf, LFH_COMPRESSED_SIZE_OFFSET);
+            putLong(ze.getSize(), buf, LFH_ORIGINAL_SIZE_OFFSET);
+        } else if (zipMethod == DEFLATED) {
+            System.arraycopy(LZERO, 0, buf, LFH_COMPRESSED_SIZE_OFFSET, WORD);
+            System.arraycopy(LZERO, 0, buf, LFH_ORIGINAL_SIZE_OFFSET, WORD);
+        } else { // Stored
+            putLong(ze.getSize(), buf, LFH_COMPRESSED_SIZE_OFFSET);
+            putLong(ze.getSize(), buf, LFH_ORIGINAL_SIZE_OFFSET);
+        }
+        // file name length
+        putShort(nameLen, buf, LFH_FILENAME_LENGTH_OFFSET);
+
+        // extra field length
+        putShort(extra.length, buf, LFH_EXTRA_LENGTH_OFFSET);
+
+        // file name
+        System.arraycopy( name.array(), name.arrayOffset(), buf, LFH_FILENAME_OFFSET, nameLen);
+
+        // extra fields
+        System.arraycopy(extra, 0, buf, LFH_FILENAME_OFFSET + nameLen, extra.length);
+
+        return buf;
+    }
+```
+
+Now, we need to output the triggering test methods. Carefully consider: The bug is only triggered when writing a stored entry to a seekable output. From the list, testReadingOfStoredEntry and testEntryAlignment do that. Also, testEntryAlignmentExceed does not write (only creates entry), so not triggered. testDelayedOffsetsAndSizes uses ByteArrayOutputStream (non-seekable) for stored, so not triggered.
+
+Are there any other tests in the large list that write stored entries to seekable? Possibly no.
+
+Thus trigger_method: ["org.apache.commons.compress.archivers.zip.ZipFileTest::testReadingOfStoredEntry", "org.apache.commons.compress.archivers.zip.ZipFileTest::testEntryAlignment"]
+
+But note: testEntryAlignment is in ZipFileTest class. Also, testReadingOfStoredEntry is in ZipFileTest. Both are in the provided list.
+
+Now, fixed_code should include all four functions: writeLocalFileHeader, createLocalFileHeader, writeDataDescriptor, usesDataDescriptor. We need to output them as JSON strings (each function as a string). We must preserve the original code except for the fix. So we'll output the three unchanged functions and the fixed createLocalFileHeader.
+
+We also need to ensure that the function signatures and the rest of the code remain exactly the same, including indentation? The JSON string should be the exact source code as Java. We'll copy the original code for the unchanged functions.
+
+Let's prepare the output.{
+  "trigger_method": [
+    "org.apache.commons.compress.archivers.zip.ZipFileTest::testReadingOfStoredEntry",
+    "org.apache.commons.compress.archivers.zip.ZipFileTest::testEntryAlignment"
+  ],
+  "fixed_code": [
+    "private void writeLocalFileHeader(final ZipArchiveEntry ze, final boolean phased) throws IOException {\n        final boolean encodable = zipEncoding.canEncode(ze.getName());\n        final ByteBuffer name = getName(ze);\n\n        if (createUnicodeExtraFields != UnicodeExtraFieldPolicy.NEVER) {\n            addUnicodeExtraFields(ze, encodable, name);\n        }\n\n        final long localHeaderStart = streamCompressor.getTotalBytesWritten();\n        final byte[] localHeader = createLocalFileHeader(ze, name, encodable, phased, localHeaderStart);\n        metaData.put(ze, new EntryMetaData(localHeaderStart, usesDataDescriptor(ze.getMethod())));\n        entry.localDataStart = localHeaderStart + LFH_CRC_OFFSET; // At crc offset\n        writeCounted(localHeader);\n        entry.dataStart = streamCompressor.getTotalBytesWritten();\n    }",
+    "private byte[] createLocalFileHeader(final ZipArchiveEntry ze, final ByteBuffer name, final boolean encodable,\n                                         final boolean phased, long archiveOffset) throws IOException {\n        ResourceAlignmentExtraField oldAlignmentEx =\n            (ResourceAlignmentExtraField) ze.getExtraField(ResourceAlignmentExtraField.ID);\n        if (oldAlignmentEx != null) {\n            ze.removeExtraField(ResourceAlignmentExtraField.ID);\n        }\n\n        int alignment = ze.getAlignment();\n        if (alignment <= 0 && oldAlignmentEx != null) {\n            alignment = oldAlignmentEx.getAlignment();\n        }\n\n        if (alignment > 1 || (oldAlignmentEx != null && !oldAlignmentEx.allowMethodChange())) {\n            int oldLength = LFH_FILENAME_OFFSET +\n                            name.limit() - name.position() +\n                            ze.getLocalFileDataExtra().length;\n\n            int padding = (int) ((-archiveOffset - oldLength - ZipExtraField.EXTRAFIELD_HEADER_SIZE\n                            - ResourceAlignmentExtraField.BASE_SIZE) &\n                            (alignment - 1));\n            ze.addExtraField(new ResourceAlignmentExtraField(alignment,\n                            oldAlignmentEx != null && oldAlignmentEx.allowMethodChange(), padding));\n        }\n\n        final byte[] extra = ze.getLocalFileDataExtra();\n        final int nameLen = name.limit() - name.position();\n        final int len = LFH_FILENAME_OFFSET + nameLen + extra.length;\n        final byte[] buf = new byte[len];\n\n        System.arraycopy(LFH_SIG,  0, buf, LFH_SIG_OFFSET, WORD);\n\n        //store method in local variable to prevent multiple method calls\n        final int zipMethod = ze.getMethod();\n        final boolean dataDescriptor = usesDataDescriptor(zipMethod);\n\n        putShort(versionNeededToExtract(zipMethod, hasZip64Extra(ze), dataDescriptor), buf, LFH_VERSION_NEEDED_OFFSET);\n\n        final GeneralPurposeBit generalPurposeBit = getGeneralPurposeBits(!encodable && fallbackToUTF8, dataDescriptor);\n        generalPurposeBit.encode(buf, LFH_GPB_OFFSET);\n\n        // compression method\n        putShort(zipMethod, buf, LFH_METHOD_OFFSET);\n\n        ZipUtil.toDosTime(calendarInstance, ze.getTime(), buf, LFH_TIME_OFFSET);\n\n        // CRC\n        if (phased){\n            putLong(ze.getCrc(), buf, LFH_CRC_OFFSET);\n        } else if (zipMethod == DEFLATED) {\n            System.arraycopy(LZERO, 0, buf, LFH_CRC_OFFSET, WORD);\n        } else {\n            putLong(ze.getCrc(), buf, LFH_CRC_OFFSET);\n        }\n\n        // compressed length\n        // uncompressed length\n        if (hasZip64Extra(entry.entry)){\n            // point to ZIP64 extended information extra field for\n            // sizes, may get rewritten once sizes are known if\n            // stream is seekable\n            ZipLong.ZIP64_MAGIC.putLong(buf, LFH_COMPRESSED_SIZE_OFFSET);\n            ZipLong.ZIP64_MAGIC.putLong(buf, LFH_ORIGINAL_SIZE_OFFSET);\n        } else if (phased) {\n            putLong(ze.getCompressedSize(), buf, LFH_COMPRESSED_SIZE_OFFSET);\n            putLong(ze.getSize(), buf, LFH_ORIGINAL_SIZE_OFFSET);\n        } else if (zipMethod == DEFLATED) {\n            System.arraycopy(LZERO, 0, buf, LFH_COMPRESSED_SIZE_OFFSET, WORD);\n            System.arraycopy(LZERO, 0, buf, LFH_ORIGINAL_SIZE_OFFSET, WORD);\n        } else { // Stored\n            putLong(ze.getSize(), buf, LFH_COMPRESSED_SIZE_OFFSET);\n            putLong(ze.getSize(), buf, LFH_ORIGINAL_SIZE_OFFSET);\n        }\n        // file name length\n        putShort(nameLen, buf, LFH_FILENAME_LENGTH_OFFSET);\n\n        // extra field length\n        putShort(extra.length, buf, LFH_EXTRA_LENGTH_OFFSET);\n\n        // file name\n        System.arraycopy( name.array(), name.arrayOffset(), buf, LFH_FILENAME_OFFSET, nameLen);\n\n        // extra fields\n        System.arraycopy(extra, 0, buf, LFH_FILENAME_OFFSET + nameLen, extra.length);\n\n        return buf;\n    }",
+    "protected void writeDataDescriptor(final ZipArchiveEntry ze) throws IOException {\n        if (ze.getMethod() != DEFLATED || channel != null) {\n            return;\n        }\n        writeCounted(DD_SIG);\n        writeCounted(ZipLong.getBytes(ze.getCrc()));\n        if (!hasZip64Extra(ze)) {\n            writeCounted(ZipLong.getBytes(ze.getCompressedSize()));\n            writeCounted(ZipLong.getBytes(ze.getSize()));\n        } else {\n            writeCounted(ZipEightByteInteger.getBytes(ze.getCompressedSize()));\n            writeCounted(ZipEightByteInteger.getBytes(ze.getSize()));\n        }\n    }",
+    "private boolean usesDataDescriptor(final int zipMethod) {\n        return zipMethod == DEFLATED && channel == null;\n    }"
+  ]
+}

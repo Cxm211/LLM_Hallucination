@@ -1,0 +1,43 @@
+    public TimeSeries createCopy(int start, int end)
+            throws CloneNotSupportedException {
+        if (start < 0) {
+            throw new IllegalArgumentException("Requires start >= 0.");
+        }
+        if (end < start) {
+            throw new IllegalArgumentException("Requires start <= end.");
+        }
+        TimeSeries copy = (TimeSeries) super.clone();
+        copy.data = new java.util.ArrayList();
+        if (this.data.size() > 0) {
+            for (int index = start; index <= end; index++) {
+                TimeSeriesDataItem item
+                        = (TimeSeriesDataItem) this.data.get(index);
+                TimeSeriesDataItem clone = (TimeSeriesDataItem) item.clone();
+                try {
+                    copy.add(clone);
+                }
+                catch (SeriesException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+        return copy;
+    }
+
+// trigger testcase
+public void testCreateCopy3() throws CloneNotSupportedException {
+        TimeSeries s1 = new TimeSeries("S1");
+        s1.add(new Year(2009), 100.0);
+        s1.add(new Year(2010), 101.0);
+        s1.add(new Year(2011), 102.0);
+        assertEquals(100.0, s1.getMinY(), EPSILON);
+        assertEquals(102.0, s1.getMaxY(), EPSILON);
+
+        TimeSeries s2 = s1.createCopy(0, 1);
+        assertEquals(100.0, s2.getMinY(), EPSILON);
+        assertEquals(101.0, s2.getMaxY(), EPSILON);
+
+        TimeSeries s3 = s1.createCopy(1, 2);
+        assertEquals(101.0, s3.getMinY(), EPSILON);
+        assertEquals(102.0, s3.getMaxY(), EPSILON);
+    }

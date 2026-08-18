@@ -1,0 +1,23 @@
+  boolean expectCanAssignToPropertyOf(NodeTraversal t, Node n, JSType rightType,
+      JSType leftType, Node owner, String propName) {
+    // The NoType check is a hack to make typedefs work OK.
+    if (!leftType.isNoType() && !rightType.canAssignTo(leftType)) {
+      JSType ownerType = getJSType(owner);
+      if (ownerType != null && ownerType.isFunctionPrototypeType()) {
+        FunctionType ownerFn = ownerType.toObjectType().getOwnerFunction();
+        if (ownerFn.isInterface()) {
+          return true;
+        }
+      }
+      if ((leftType.isConstructor() || leftType.isEnumType()) && (rightType.isConstructor() || rightType.isEnumType())) {
+        registerMismatch(rightType, leftType, null);
+      } else {
+        mismatch(t, n,
+            "assignment to property " + propName + " of " +
+            getReadableJSTypeName(owner, true),
+            rightType, leftType);
+      }
+      return false;
+    }
+    return true;
+  }

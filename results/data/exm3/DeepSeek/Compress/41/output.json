@@ -1,0 +1,436 @@
+We are given two trigger testcases. The buggy function is `getNextZipEntry`. Let's first analyze the function.
+
+Important: The buggy function is from class `ZipArchiveInputStream`. We are not shown the entire class, only the function.
+
+Observations from the code:
+
+1. The function reads the next ZIP entry from a stream.
+2. It uses a buffer `LFH_BUF` for local file header.
+3. At the start, there is a flag `firstEntry` initially set to `true`. However, note that `firstEntry` is set to `true` at the beginning of the method. Then if `current != null`, they call `closeEntry()` and set `firstEntry = false`. So the `firstEntry` flag is used to decide whether to call `readFirstLocalFileHeader` or `readFully`. However, note that `firstEntry` is set to `false` only if `current != null`. But if `current` is null (i.e., we haven't read any entry yet) then `firstEntry` remains `true`. That's fine.
+
+Potential bug: The variable `firstEntry` is declared at the beginning of the method as `boolean firstEntry = true;`. Then after checking `if (current != null)`, they set `firstEntry = false`. However, if `current != null`, then `firstEntry` becomes false for the rest of the method. This seems correct: the first entry is the one when current is null. But note that there is a condition later: `if (firstEntry) { readFirstLocalFileHeader(LFH_BUF); } else { readFully(LFH_BUF); }`. The `readFirstLocalFileHeader` likely handles the split ZIP signature? Actually, the comment says "split archives have a special signature before the first local file header". So for the first entry, we need to check for that signature.
+
+Now, look at the trigger testcases:
+- `testListAllFilesWithNestedArchive`: This test uses nested ZIPs. It may involve multiple calls to `getNextZipEntry` on the outer stream and then creating a new `ArchiveInputStream` from the inner stream. The bug might be related to handling of nested ZIPs or state of `firstEntry` when reading multiple entries.
+- `testThrowOnInvalidEntry`: This test expects an exception when the ZIP is invalid. It checks that `getNextZipEntry` throws a `ZipException` with a message containing "Unexpected record signature". This suggests that when an invalid signature is encountered, the method should throw an exception. However, in the buggy code, note that after reading the signature, if it's not LFH_SIG, it returns null. But the test expects an exception. So the bug might be that the method should throw a `ZipException` when an unexpected signature is encountered (i.e., not LFH_SIG, CFH_SIG, or AED_SIG). But currently it returns null.
+
+Looking at the code: 
+
+```
+final ZipLong sig = new ZipLong(LFH_BUF);
+if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {
+    hitCentralDirectory = true;
+    skipRemainderOfArchive();
+}
+if (!sig.equals(ZipLong.LFH_SIG)) {
+    return null;
+}
+```
+
+If the signature is CFH_SIG or AED_SIG, it sets `hitCentralDirectory` and skips the remainder, but then the next check `!sig.equals(ZipLong.LFH_SIG)` will be true (since CFH_SIG and AED_SIG are not LFH_SIG), so it returns null. That's okay for those signatures because they indicate the end of entries. However, for an invalid signature (like something else), it also returns null. But the test expects an exception.
+
+Additionally, note that `readFirstLocalFileHeader` might throw an exception if the first local file header is not valid? But the test `testThrowOnInvalidEntry` likely uses a file that has an invalid signature right at the beginning. The buggy function would call `readFirstLocalFileHeader` (since firstEntry is true) and that method might throw an exception? Actually, looking at the catch block:
+
+```
+try {
+    if (firstEntry) {
+        readFirstLocalFileHeader(LFH_BUF);
+    } else {
+        readFully(LFH_BUF);
+    }
+} catch (final EOFException e) {
+    return null;
+}
+```
+
+So if `readFirstLocalFileHeader` throws an EOFException, it returns null. But what if it throws an IOException due to invalid data? That would propagate. However, the test expects a `ZipException` with a specific message. Perhaps `readFirstLocalFileHeader` or `readFully` might throw a `ZipException`? The code doesn't show. The bug might be that `readFirstLocalFileHeader` should throw a ZipException when the signature is invalid, but currently it does not. Alternatively, the bug is that the method should throw a ZipException when an unexpected record signature is read (i.e., not LFH_SIG, CFH_SIG, or AED_SIG). The comment in the test says "Unexpected record signature", so the fix might be to add a check after reading the signature: if sig is not one of the expected ones, throw a ZipException.
+
+But note that the code already returns null for unexpected signatures (including invalid ones). However, the test expects an exception. So we need to change the behavior: when the signature is not LFH_SIG, CFH_SIG, or AED_SIG, throw a ZipException.
+
+However, also consider the case when we are reading the first entry and there might be a split ZIP signature. That is handled in `readFirstLocalFileHeader`. Possibly `readFirstLocalFileHeader` already throws a ZipException for invalid split signature? But the test "invalid-zip.zip" might not be a split archive; it might just have a wrong signature.
+
+Thus, the bug fix likely is: in `getNextZipEntry`, after reading the signature, if the signature is not LFH_SIG, CFH_SIG, or AED_SIG, throw a ZipException instead of returning null.
+
+But wait: the method returns null when there are no more entries (EOF). That is expected. And when we encounter central directory or end-of-archive signatures, we also return null (after setting hitCentralDirectory). That's fine. However, for an invalid signature, we should throw an exception.
+
+Now, look at the code again: 
+
+```
+if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {
+    hitCentralDirectory = true;
+    skipRemainderOfArchive();
+}
+if (!sig.equals(ZipLong.LFH_SIG)) {
+    return null;
+}
+```
+
+So if the signature is CFH_SIG or AED_SIG, it will also satisfy !LFH_SIG and return null. That's okay because we want to stop reading entries. But if the signature is something else (e.g., 0x12345678), then we also return null. That's wrong; we should throw an exception.
+
+Therefore, we need to change the logic: after reading the signature, we should check for LFH_SIG, CFH_SIG, AED_SIG. If it's CFH_SIG or AED_SIG, treat as end of entries (return null). If it's LFH_SIG, proceed. Otherwise, throw a ZipException.
+
+But also note: the `readFirstLocalFileHeader` might have already verified something? Actually, `readFirstLocalFileHeader` reads the first local file header and may also check for split archive signature. If the first bytes are not a valid local file header or split signature, it might throw an exception. So for the first entry, the exception might be thrown by `readFirstLocalFileHeader`. However, for subsequent entries, `readFully` is used, which just reads bytes, and then we check the signature. So for subsequent entries, we need to throw.
+
+Thus, we can modify the code:
+
+```
+final ZipLong sig = new ZipLong(LFH_BUF);
+if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {
+    hitCentralDirectory = true;
+    skipRemainderOfArchive();
+    return null;
+}
+if (!sig.equals(ZipLong.LFH_SIG)) {
+    throw new ZipException("Unexpected record signature: 0x" + Long.toHexString(sig.getValue()));
+}
+```
+
+But note: The test `testThrowOnInvalidEntry` expects the exception to be thrown when the first entry is invalid. In the buggy code, the first entry uses `readFirstLocalFileHeader`. Does `readFirstLocalFileHeader` throw a ZipException? We don't have its code. It might throw an IOException or ZipException. The test passes on the original code? The test is a trigger testcase that fails? Actually, the test is provided as a trigger testcase that likely fails on the buggy version. But we don't know if it passes or fails. The instruction says: "Given buggy function(s) and trigger testcases". The trigger testcases are presumably tests that expose the bug, meaning they fail on the buggy code. But we are not told whether they pass or fail on the buggy code. However, the task is to fix the bug so that the testcases pass. So we assume the trigger testcases fail on the buggy version.
+
+Thus, we need to ensure that `testThrowOnInvalidEntry` passes on our fixed version. That test expects an IOException (ZipException) with a message containing "Unexpected record signature". So we need to throw such an exception.
+
+Now, also consider the other test: `testListAllFilesWithNestedArchive`. This test might fail due to some other bug. Possibly the bug is about nested ZIP reading and the state of `firstEntry`. When we create a nested `ArchiveInputStream` from the current entry's data, the outer stream's `getNextZipEntry` might be called multiple times. The variable `firstEntry` is reset to true each time the method is called. That is fine. However, note that `current` is an instance variable that holds the current entry being read. When we start reading a nested archive, we might be in the middle of reading an entry from the outer stream. The nested stream reads from the same underlying stream? Actually, the test creates a new `ArchiveInputStream` from `in` (the outer ArchiveInputStream). That new stream will have its own state, including `firstEntry`. That's fine.
+
+But there might be a bug related to `closeEntry()` being called when `current != null`. In `getNextZipEntry`, if `current != null`, they call `closeEntry()`. That might close the underlying input stream for the current entry? Possibly causing issues for nested reading. However, the test passes? We don't know.
+
+Alternatively, the bug might be related to `entriesRead` not being incremented correctly, or something else.
+
+Given only the buggy function and the two testcases, we must hypothesize the bug. Let's examine the function more carefully.
+
+Another potential bug: The `firstEntry` flag is set incorrectly when there is a split archive? Actually, the comment says split archives have a special signature before the first local file header. That is handled by `readFirstLocalFileHeader`. But note that `firstEntry` is set to true only when `current` is null. However, what if the stream is closed and reopened? Not relevant.
+
+Wait: The variable `firstEntry` is local to the method. So each call to `getNextZipEntry` starts with `firstEntry = true`. Then if `current != null`, they set `firstEntry = false`. So for the very first call, `current` is null, so `firstEntry` remains true. For subsequent calls, `current` is not null (because we set `current` at the end of the method for the previous entry), so `firstEntry` becomes false. That seems correct.
+
+But there is a subtlety: If `getNextZipEntry` is called after an entry has been fully read and `current` is set to that entry, then we call `closeEntry()` and set `firstEntry = false`. That's fine.
+
+However, what if an exception occurs during reading an entry? Then `current` might still be non-null? Possibly.
+
+But the test `testListAllFilesWithNestedArchive` involves nested archives. The outer stream reads an entry (the nested zip file), then the test creates a new ArchiveInputStream from the outer stream's current entry data. At that point, the outer stream's `current` is not null because the entry is still open? Actually, the outer stream's `getNextEntry` returns a ZipArchiveEntry, but the data hasn't been read yet? The pattern: They get an entry, then create a nested stream from `in` (the outer ArchiveInputStream). That means the nested stream reads from the same input stream as the outer stream? Typically, when you have a ZipArchiveEntry that represents a nested ZIP, you can open a new ZipArchiveInputStream on the raw byte stream of that entry. In the test, they do `new ArchiveStreamFactory().createArchiveInputStream("zip", in)`. Here `in` is the outer ArchiveInputStream. That is, they are creating a new ZIP archive input stream from the outer stream itself, not from the entry's raw data. That seems odd. Actually, the outer `in` is a ZipArchiveInputStream. They are using it as the source for the nested archive. This means the nested stream will read from the same underlying stream as the outer stream. This could cause interference.
+
+Specifically, after reading the entry header for the nested archive, the outer stream's `current` is set to that entry. Then when they create a nested ZipArchiveInputStream from the outer stream, the nested stream will start reading from the current position (which is the start of the compressed data of that entry). That nested stream will call `getNextZipEntry` on its own instance. But the outer stream's state might be affected? Possibly the outer stream's `current` is still set, and when the nested stream reads, it might consume bytes that the outer stream expects to read later.
+
+But the test expects that after reading the nested archive, the outer stream continues with the next entry? Actually, they loop: while ((entry = (ZipArchiveEntry) in.getNextEntry()) != null) { ... }. Inside, they create a nested stream from `in`. That nested stream reads entries from the same underlying stream, consuming bytes. After the nested stream finishes (or throws), the outer loop continues to the next entry. This pattern is used to handle nested ZIPs where the nested archive is stored as a file within the outer ZIP. Typically, you would open a new ZipArchiveInputStream on the raw bytes of that entry (by reading the entry's data). But here they are using the outer stream itself as the source. That might work if the outer stream's position is at the start of the entry's data, and the nested stream reads that data and stops before the next outer entry. However, the outer stream's `getNextEntry` expects to read the next local file header after the current entry's data. But if the nested stream consumes the entire data and also the next local file header, then the outer stream will be confused.
+
+The test passes? The test asserts that they find all files including the nested archive's entries. So it must work.
+
+Now, what could be the bug? Possibly, when reading a nested archive, the outer stream's `firstEntry` flag is reset incorrectly when the outer stream continues. In the buggy code, each call to `getNextZipEntry` resets `firstEntry` to true. But after reading a nested archive, the outer stream's `current` might be null? Actually, after the nested stream reads the nested archive's entries, it might have consumed all data and left the outer stream at the end? The test expects the outer stream to continue reading the next entry after the nested archive. That means the outer stream must still be able to read the next local file header after the nested archive's data.
+
+If the nested stream reads the nested archive's entries and then stops when it hits the central directory (or end), it might leave the outer stream at the correct position. However, the outer stream's `current` is still set to the nested archive entry? Actually, when the outer stream returns the entry for the nested archive, `current` is set to that entry. Then the nested stream reads from the same underlying stream. After the nested stream finishes, the outer stream's `current` is still the same. When the outer stream's `getNextZipEntry` is called again, it will call `closeEntry()` on `current`. That closeEntry might skip the remaining bytes of the current entry if they haven't been read. But the nested stream already read them? Possibly causing an error.
+
+Thus, the bug might be that `closeEntry()` does not account for the fact that the data might have been already consumed by a nested stream. This could cause the outer stream to skip too many bytes or too few.
+
+But we are not given the `closeEntry()` method. So we cannot fix it.
+
+Given the two trigger testcases, one expects an exception for invalid signature, the other is about nested archives. Perhaps the bug is the same: the method returns null for invalid signature, but it should throw. The nested archive test might also rely on throwing an exception when encountering an invalid signature? The nested archive test catches ZipException when trying to create a nested stream from a non-ZIP entry (test3.xml). That is expected. So if the buggy code returns null instead of throwing, then the nested stream creation might not throw, causing the test to fail. But the test expects an exception when trying to read a non-ZIP as a ZIP. That exception is thrown by `new ArchiveStreamFactory().createArchiveInputStream("zip", in)`. That method likely attempts to read the first few bytes and if they are not a ZIP signature, it throws a ZipException. That is independent of `getNextZipEntry`.
+
+Thus, the nested archive test might not be directly related to the bug. But both testcases are provided as triggers, so they both fail on the buggy code. So the bug must cause both testcases to fail.
+
+Let's think: The nested archive test might fail because `getNextZipEntry` returns null prematurely? Possibly when reading the nested archive's entries, the nested stream's `getNextZipEntry` might return null when it should throw an exception? But the test expects to read the nested entries.
+
+Alternatively, the bug might be that `firstEntry` is incorrectly set when reading the nested archive. The nested stream is a new ZipArchiveInputStream, so its `firstEntry` will be true on its first call. That's fine.
+
+Maybe the bug is that when reading a split archive, the `firstEntry` logic is wrong, causing the first entry to be missed? But the test doesn't use split archives.
+
+Given limited information, we need to look at the exact bug. Since we cannot see other methods, we have to rely on the provided code. The most evident issue is the handling of invalid signatures: returning null instead of throwing an exception. That would cause `testThrowOnInvalidEntry` to fail because it expects an exception. For `testListAllFilesWithNestedArchive`, how would that cause failure? Possibly when reading the nested archive, if the nested archive is malformed? But it's not.
+
+Wait, the nested archive test includes an expected exception when trying to read test3.xml as a ZIP. That exception is caught. If `getNextZipEntry` returns null for an invalid signature, then when the nested stream tries to read test3.xml (which is not a ZIP), it might return null instead of throwing, causing the loop to exit without throwing, and then `expectedExceptions` would be empty, causing the assertion `assertEquals(1, expectedExceptions.size())` to fail. That makes sense! So both testcases fail because of the same bug: when an invalid signature is encountered, the method returns null instead of throwing a ZipException.
+
+Therefore, the fix is to change the behavior when the signature is not LFH_SIG, CFH_SIG, or AED_SIG. We should throw a ZipException. However, note that for CFH_SIG and AED_SIG, we already set hitCentralDirectory and return null (after skipping). That's fine. For any other signature (including garbage), we should throw.
+
+But what about the case when we read the first entry and the split archive signature? That is handled by `readFirstLocalFileHeader`. If the first bytes are the split archive signature, then `readFirstLocalFileHeader` likely skips it and reads the actual local file header. So the signature we check later will be LFH_SIG. So that's fine.
+
+Thus, we modify the code after reading the signature:
+
+```
+final ZipLong sig = new ZipLong(LFH_BUF);
+if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {
+    hitCentralDirectory = true;
+    skipRemainderOfArchive();
+    return null;
+}
+if (!sig.equals(ZipLong.LFH_SIG)) {
+    throw new ZipException("Unexpected record signature: 0x" + Long.toHexString(sig.getValue()));
+}
+```
+
+But we must also consider the case where `readFirstLocalFileHeader` might throw a ZipException for invalid split signature. That's okay.
+
+Now, we also need to ensure that the exception message matches the one expected in the test. The test expects the message to contain "Unexpected record signature". The exact message might be different. Looking at the test: `assertTrue(expected.getMessage().contains("Unexpected record signature"));` So as long as our exception message contains that substring, it's fine.
+
+Now, we also need to fix any other functions? The bug might involve `readFirstLocalFileHeader` or `readFully` but we are not given those. However, we are told: "Multiple functions may jointly cause the bug; fix all of them." Since we are only given one function (the one above), we assume that only this function needs to be fixed. But note that the bug might also be in `closeEntry` or other methods, but we cannot see them. However, the testcases likely only fail due to this signature handling. So we fix only the provided function.
+
+Now, we must generate additional trigger testcases. The instruction: "Generate additional trigger testcase(s): create the minimal number of new testcases such that
+   - Every generated testcase MUST fail on the original buggy version (i.e., does NOT pass).
+   - Every generated testcase MUST pass on your fixed version generated previously.
+   - The generated testcases should maximize coverage of different behaviors/branches in both buggy code and generated fixed code while using the minimal number of testcases, and the explored branches should be as different as possible from those covered by the provided trigger testcases."
+
+We already have two trigger testcases: one for invalid signature (which we fix), and one for nested archive (which also fails due to the same bug? Actually, we hypothesized that the nested archive test fails because when reading test3.xml as a ZIP, the nested stream's getNextZipEntry returns null instead of throwing, causing the exception not to be caught. That is the same bug. So both testcases essentially test the same bug: throwing vs returning null for invalid signature. However, the nested archive test also tests other paths (reading multiple entries, nested streams). But the bug is the same.
+
+Therefore, we need additional testcases that cover other branches not covered by these two. Let's analyze the branches in the buggy function.
+
+Key branches:
+
+1. The condition `if (closed || hitCentralDirectory)` -> return null.
+2. `if (current != null)` -> closeEntry() and set firstEntry=false.
+3. Try-catch for EOFException.
+4. Signature checks: 
+   - if sig equals CFH_SIG or AED_SIG -> set hitCentralDirectory, skipRemainderOfArchive, then (later) return null because !LFH_SIG.
+   - if sig not LFH_SIG -> return null (including CFH_SIG/AED_SIG, but also invalid sig).
+5. The rest of the function processes LFH_SIG.
+
+Our fix changes the behavior for invalid signatures (throw exception). So we need to cover the case where an invalid signature is encountered (not LFH_SIG, CFH_SIG, AED_SIG). That is already covered by the provided testcases? The test `testThrowOnInvalidEntry` covers an invalid signature at the beginning of the stream. The nested archive test covers an invalid signature inside a nested stream (when trying to read a non-ZIP entry). So we have coverage for invalid signatures.
+
+But we also need to cover other branches that are not exercised by the provided tests. For example:
+
+- The case where `closed` is true. How to trigger? Possibly by closing the stream.
+- The case where `hitCentralDirectory` is true. That occurs after encountering CFH_SIG or AED_SIG. Then subsequent calls return null. We need a test that reads a ZIP until the central directory and then calls getNextZipEntry again.
+- The case where `current != null` and we call closeEntry. That's normal operation.
+- The case where firstEntry is true and we call `readFirstLocalFileHeader`. That's the first entry.
+- The case where firstEntry is false and we call `readFully`. That's subsequent entries.
+- The case where the signature is CFH_SIG or AED_SIG. That is the end-of-entries case. We need a test that reads a ZIP and reaches the central directory (or end-of-archive). But the provided test `testListAllFilesWithNestedArchive` might read until the end? It reads all entries until null. So it will encounter the central directory? Actually, after reading all entries, `getNextZipEntry` will eventually read the central directory signature and return null. So that branch is covered.
+- The branch where `current.hasDataDescriptor` is true vs false.
+- The branch where `hasUTF8Flag` is true vs false.
+- The branch where `useUnicodeExtraFields` is true and `hasUTF8Flag` is false.
+- The branch for different compression methods: UNSHRINKING, IMPLODING, BZIP2, and others (where current.in is not set).
+- The branch where `current.entry.getCompressedSize() != ArchiveEntry.SIZE_UNKNOWN` and the method is one of those.
+
+We need to generate testcases that cover as many of these branches as possible, but with minimal number of testcases. We should also ensure that the testcases fail on the buggy version. Since the buggy version returns null for invalid signatures, we can design testcases that involve invalid signatures in various contexts, but they would fail because they'd return null instead of throwing. However, we want to cover branches that are not related to invalid signatures? But if the bug is only about invalid signatures, then other branches might already pass on the buggy version? Possibly not. But we are required to generate testcases that fail on the original buggy version. So we need to find scenarios where the buggy version behaves incorrectly (i.e., returns null when it should throw, or throws when it should return null, etc.) But our fix only changes the invalid signature case. So other branches should behave the same. Therefore, to make a testcase that fails on buggy version, we need to trigger the buggy behavior. That is, we need to cause an invalid signature to be read, and expect an exception but the buggy version returns null. That is essentially the same as the provided testcases. However, we can vary the context: e.g., invalid signature in the middle of the stream (not first entry), invalid signature after reading some entries, invalid signature with firstEntry false, etc.
+
+But note: the buggy version returns null for any signature that is not LFH_SIG. That includes CFH_SIG and AED_SIG (which are handled separately). So if we have a ZIP that has an invalid signature in the middle of entries (e.g., corrupted local file header), the buggy version would return null, indicating end of entries, while the correct behavior should be to throw an exception. So we can create a test with a corrupted ZIP that has a valid first entry and then a corrupted second entry. That would test the branch where firstEntry is false and we call readFully, then get an invalid signature. The buggy version would return null, but the fixed version would throw. That's a new branch: firstEntry false.
+
+Also, we can test the case where the signature is CFH_SIG or AED_SIG (which should return null). That branch already works correctly? In the buggy version, for CFH_SIG/AED_SIG, it sets hitCentralDirectory and returns null. That's correct. So a test for that would pass on both versions, so it wouldn't fail on the buggy version. We need testcases that fail on buggy, so we cannot use those.
+
+Therefore, additional testcases must trigger the bug. That means they must involve an invalid signature (not LFH_SIG, CFH_SIG, AED_SIG). We can create variations:
+
+1. Invalid signature at the very beginning (firstEntry true) – already covered by `testThrowOnInvalidEntry`.
+2. Invalid signature after reading one or more valid entries (firstEntry false) – not covered? The nested archive test might involve reading nested entries, but the invalid signature occurs when trying to read a non-ZIP as a ZIP (which is a separate stream). That is also firstEntry true for the nested stream. So not exactly the same.
+
+So we can create a test where we have a ZIP with two entries, and the second entry's local file header is corrupted (invalid signature). Then reading the first entry succeeds, but when reading the second, we get the invalid signature. The buggy version would return null, while the fixed version would throw.
+
+Thus, we need to create a ZIP file for testing. However, we cannot assume we can create files. The testcases likely rely on resource files. We can create a test that uses a byte array to simulate a ZIP stream. The provided trigger testcases use actual files from the classpath. For simplicity, we can create a test that uses a byte array representing a simple ZIP with one valid entry and one corrupted entry. We'll need to write the test in Java.
+
+We also need to cover other branches that might be affected by the bug? Possibly the branch where `closed` is true: if the stream is closed, getNextZipEntry should return null. That is not buggy. So no failure.
+
+Similarly, the branch where `hitCentralDirectory` is true: that works.
+
+Now, we also need to consider the branch where `readFirstLocalFileHeader` might throw a ZipException for split archive issues. That is not related to our fix.
+
+So we need at least one additional testcase that covers the invalid signature in a non-first entry.
+
+Additionally, we might want to cover the case where the invalid signature is CFH_SIG but we are not at the end? Actually, CFH_SIG is valid for central directory. If we encounter it at an unexpected place, it might still be considered end of entries. That's fine.
+
+Thus, we generate one additional testcase: a ZIP with one valid entry and then a corrupted second entry.
+
+We also need to output the testcase code with the exact path. The path must be one of the exact file paths of the provided trigger testcases. The provided trigger testcases are from two files:
+
+1. `org/apache/commons/compress/archivers/ZipTestCase.java`
+2. `org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java`
+
+We can choose either. Since the test `testThrowOnInvalidEntry` is in ZipArchiveInputStreamTest.java, we can add a new test method in that same file. Let's choose `ZipArchiveInputStreamTest.java` as the path.
+
+Now, we need to write the testcase code. It should be a JUnit test. We'll create a method that uses a byte array representing a ZIP with one entry and then a corrupted signature. We'll need to construct a minimal ZIP. We can create a ZIP with a single file "test.txt" with content "hello", using the default compression (STORED). Then after that entry, we write 4 bytes of an invalid signature (e.g., 0x12345678) and then stop. When reading, the first entry should be read correctly, and then when trying to read the second, we should get a ZipException.
+
+We must ensure the buggy version returns null, so the test would fail because it expects an exception. Our fixed version will throw, so the test passes.
+
+We also need to consider that after the first entry, there might be data descriptor, etc. We'll keep it simple.
+
+We'll write the test as:
+
+```
+@Test
+public void testThrowOnInvalidSignatureAfterValidEntry() throws Exception {
+    byte[] zipData = createZipWithOneEntryAndCorruptedSecondEntry();
+    InputStream is = new ByteArrayInputStream(zipData);
+    ZipArchiveInputStream zip = new ZipArchiveInputStream(is);
+    ZipArchiveEntry entry = zip.getNextZipEntry();
+    assertNotNull(entry);
+    assertEquals("test.txt", entry.getName());
+    // Now the next entry should throw
+    try {
+        zip.getNextZipEntry();
+        fail("ZipException expected");
+    } catch (ZipException expected) {
+        assertTrue(expected.getMessage().contains("Unexpected record signature"));
+    } finally {
+        zip.close();
+    }
+}
+```
+
+We need to implement `createZipWithOneEntryAndCorruptedSecondEntry`. We can do it programmatically using ZipOutputStream. But we cannot rely on external libraries beyond the project. Since this is a test in the same project, we can use the Java's `java.util.zip.ZipOutputStream` to create a valid ZIP entry, then write the invalid signature manually.
+
+We'll need to know the exact structure of a local file header. But we can create a ZipOutputStream, write one entry, close the entry, then get the byte array, and then append 4 bytes of invalid signature. However, note that ZipOutputStream writes the central directory after all entries. So if we just write one entry and close the ZipOutputStream, it will write the central directory and end-of-central-directory. That would make the second call to getNextZipEntry read the central directory signature (which is CFH_SIG), and the buggy version would return null (which is correct), not throw. That's not what we want.
+
+We want the second local file header to be invalid. So we need to create a raw ZIP without central directory. We can manually construct the local file header and data. That is more involved.
+
+Alternatively, we can create a ZIP with two entries, but corrupt the second local file header. We can use ZipOutputStream to create two entries, then modify the bytes between the first entry's data and the second entry's local header to be invalid. But that's complex.
+
+Given the time, we can create a simple invalid ZIP by taking a valid one-entry ZIP (with central directory) and then inserting an extra 4-byte invalid signature before the central directory. Actually, after the first entry's data, before the central directory, there is no signature expected. So if we insert an invalid signature there, the next read should see that invalid signature and throw.
+
+But we need to ensure that the ZipArchiveInputStream reads the local file headers sequentially. After reading the first entry, it will read the next 4 bytes expecting a local file header signature. If we insert an invalid signature there, it will detect it.
+
+So we can create a byte array representing a valid ZIP with one entry (STORED), then after the entry's data (and before the central directory), we insert 4 bytes of garbage. However, the central directory starts with CFH_SIG (0x02014b50). If we insert garbage before that, then when reading the next entry, we will read the garbage and get an invalid signature.
+
+But note: after reading the first entry, the stream position is at the end of the entry's data. In a typical ZIP, the next thing is the next local file header (if there is another entry) or the central directory. In our one-entry ZIP, there is no second local file header; the central directory follows immediately after the entry's data. So if we insert garbage before the central directory, then the next read will see garbage, not CFH_SIG. That's what we want.
+
+So we can create a valid ZIP with one entry using ZipOutputStream, get its bytes, then find the position after the entry's data (i.e., after the local file header + file name + extra + data). Then insert 4 bytes of garbage at that position, shifting the rest (central directory) later. That would work.
+
+But implementing that in a test might be heavy. However, we can write a simpler test by using a pre-existing resource file (like we have for invalid-zip.zip). Since we cannot add new resources, we need to create the data programmatically.
+
+Given the constraints, we can create a minimal ZIP manually. The local file header structure:
+
+- signature (4 bytes) = 0x04034b50
+- version needed (2 bytes)
+- general purpose bit (2 bytes)
+- compression method (2 bytes)
+- last mod time (2 bytes)
+- last mod date (2 bytes)
+- crc-32 (4 bytes)
+- compressed size (4 bytes)
+- uncompressed size (4 bytes)
+- file name length (2 bytes)
+- extra field length (2 bytes)
+- file name (variable)
+- extra field (variable)
+
+Then the file data.
+
+For a stored entry with content "hello" (5 bytes), we can compute CRC32. We'll need to set the sizes to 5, CRC32 correct.
+
+We can write a helper method to generate the bytes.
+
+But to keep the testcase minimal, we can use the existing test infrastructure. Perhaps the project has a method to create test ZIPs. We don't know.
+
+Given that we must produce a testcase that is runnable in the same environment, we can assume the existence of a helper method `createZip`? Not sure.
+
+Alternatively, we can create a test that uses a simple ZIP from a resource file that we know is present? Not available.
+
+Given the time, we'll produce a testcase that uses a hard-coded byte array representing a valid single-entry ZIP (with STORED method) and then an invalid signature. We'll compute the bytes manually.
+
+Let's construct a ZIP entry for a file "test.txt" with content "hello". We'll use STORED (method 0). We'll set the CRC32 of "hello". CRC32 of "hello" is 0x3610A686. We'll set last mod time and date to 0 for simplicity.
+
+We'll set general purpose bit to 0 (no data descriptor, no UTF-8). File name length = 8 (since "test.txt" is 8 characters). Extra field length = 0.
+
+So the local file header bytes:
+
+Signature: 0x50 0x4b 0x03 0x04 (little-endian)
+Version needed: 0x0A 0x00 (10)
+GP bit: 0x00 0x00
+Method: 0x00 0x00
+Last mod time: 0x00 0x00
+Last mod date: 0x00 0x00
+CRC32: 0x86 0xA6 0x10 0x36 (little-endian)
+Compressed size: 0x05 0x00 0x00 0x00
+Uncompressed size: 0x05 0x00 0x00 0x00
+File name length: 0x08 0x00
+Extra field length: 0x00 0x00
+File name: "test.txt" (ASCII bytes: 0x74 0x65 0x73 0x74 0x2e 0x74 0x78 0x74)
+
+Then the file data: "hello" (0x68 0x65 0x6c 0x6c 0x6f)
+
+After that, we need the central directory. But we don't want to include it; we want to put an invalid signature instead. So we'll omit the central directory. However, a ZIP without central directory is technically invalid but some readers can still read the local entries. The ZipArchiveInputStream can read local entries without central directory. So we can just stop after the file data, and then append an invalid signature (e.g., 0x12345678). Then when we try to read the next entry, we read the invalid signature.
+
+Thus, our byte array will consist of the local header + file data + invalid signature.
+
+We'll need to ensure that the stream doesn't have any other bytes that could be interpreted as a valid signature. That's fine.
+
+Now, we write the testcase code accordingly.
+
+We'll also need to import necessary classes.
+
+We'll output the testcase with path "org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java". However, note that we are adding a new method to an existing file. We must ensure the testcase compiles. We'll include the full method code.
+
+But the test file may have other imports; we assume they are present. We'll add the method at the end of the class.
+
+Now, we also need to consider that the test should fail on buggy version. The buggy version will return null when it encounters the invalid signature, so the test will not throw an exception and will call `fail`. That's a failure. On fixed version, it will throw ZipException, so the test passes.
+
+Thus, we have one additional testcase.
+
+Is that enough? We should also consider covering the branch where `firstEntry` is true and the split archive signature is present. But that is likely not buggy. However, we need to maximize coverage with minimal testcases. Since we already have a test for firstEntry true (invalid signature at start), and now we have firstEntry false (invalid signature after valid entry), that covers two branches.
+
+We could also cover the branch where `hasDataDescriptor` is true, but that is unrelated to the bug. And the buggy version might not fail there. So we won't.
+
+Thus, we generate one additional testcase.
+
+Now, we need to output the fixed code and the additional testcases in JSON.
+
+We'll write the fixed function. We must output the entire function exactly, with our modifications.
+
+We'll change the signature handling part as described. Also, note that we should keep the same indentation.
+
+We'll produce the fixed function as a single string.
+
+Let's write the fixed code:
+
+We'll replace lines from the signature check to the point before processing. We'll change:
+
+```
+final ZipLong sig = new ZipLong(LFH_BUF);
+if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {
+    hitCentralDirectory = true;
+    skipRemainderOfArchive();
+}
+if (!sig.equals(ZipLong.LFH_SIG)) {
+    return null;
+}
+```
+
+to:
+
+```
+final ZipLong sig = new ZipLong(LFH_BUF);
+if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {
+    hitCentralDirectory = true;
+    skipRemainderOfArchive();
+    return null;
+}
+if (!sig.equals(ZipLong.LFH_SIG)) {
+    throw new ZipException("Unexpected record signature: 0x" + Long.toHexString(sig.getValue()));
+}
+```
+
+But note: The original code after the CFH/AED check still had the `if (!sig.equals(ZipLong.LFH_SIG))` check, which would also return null. We are now returning null explicitly for CFH/AED and throwing for other non-LFH. That's fine.
+
+Now, we need to ensure we import ZipException if not already. It is likely already imported.
+
+We'll output the entire function with the change.
+
+Also, we must ensure we don't break anything else. The function is long; we'll write it as a single string with proper escaping for JSON.
+
+We'll need to count lines exactly as in the source. The source provided in the prompt includes line numbers? No, we don't have line numbers. But we are told to number every physical line starting from 1 per function. However, we don't need to output line numbers; we just need to output the fixed code as a string. The numbering is only for reference when we describe fixes? Not needed in output.
+
+We'll produce the fixed function as a string.
+
+Now, we produce the JSON:
+
+{
+  "fixed_code": [
+    "public ZipArchiveEntry getNextZipEntry() throws IOException {\n        boolean firstEntry = true;\n        if (closed || hitCentralDirectory) {\n            return null;\n        }\n        if (current != null) {\n            closeEntry();\n            firstEntry = false;\n        }\n\n        try {\n            if (firstEntry) {\n                // split archives have a special signature before the\n                // first local file header - look for it and fail with\n                // the appropriate error message if this is a split\n                // archive.\n                readFirstLocalFileHeader(LFH_BUF);\n            } else {\n                readFully(LFH_BUF);\n            }\n        } catch (final EOFException e) {\n            return null;\n        }\n\n        final ZipLong sig = new ZipLong(LFH_BUF);\n        if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {\n            hitCentralDirectory = true;\n            skipRemainderOfArchive();\n            return null;\n        }\n        if (!sig.equals(ZipLong.LFH_SIG)) {\n            throw new ZipException(\"Unexpected record signature: 0x\" + Long.toHexString(sig.getValue()));\n        }\n\n        int off = WORD;\n        current = new CurrentEntry();\n\n        final int versionMadeBy = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n        current.entry.setPlatform((versionMadeBy >> ZipFile.BYTE_SHIFT) & ZipFile.NIBLET_MASK);\n\n        final GeneralPurposeBit gpFlag = GeneralPurposeBit.parse(LFH_BUF, off);\n        final boolean hasUTF8Flag = gpFlag.usesUTF8ForNames();\n        final ZipEncoding entryEncoding = hasUTF8Flag ? ZipEncodingHelper.UTF8_ZIP_ENCODING : zipEncoding;\n        current.hasDataDescriptor = gpFlag.usesDataDescriptor();\n        current.entry.setGeneralPurposeBit(gpFlag);\n\n        off += SHORT;\n\n        current.entry.setMethod(ZipShort.getValue(LFH_BUF, off));\n        off += SHORT;\n\n        final long time = ZipUtil.dosToJavaTime(ZipLong.getValue(LFH_BUF, off));\n        current.entry.setTime(time);\n        off += WORD;\n\n        ZipLong size = null, cSize = null;\n        if (!current.hasDataDescriptor) {\n            current.entry.setCrc(ZipLong.getValue(LFH_BUF, off));\n            off += WORD;\n\n            cSize = new ZipLong(LFH_BUF, off);\n            off += WORD;\n\n            size = new ZipLong(LFH_BUF, off);\n            off += WORD;\n        } else {\n            off += 3 * WORD;\n        }\n\n        final int fileNameLen = ZipShort.getValue(LFH_BUF, off);\n\n        off += SHORT;\n\n        final int extraLen = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n\n        final byte[] fileName = new byte[fileNameLen];\n        readFully(fileName);\n        current.entry.setName(entryEncoding.decode(fileName), fileName);\n\n        final byte[] extraData = new byte[extraLen];\n        readFully(extraData);\n        current.entry.setExtra(extraData);\n\n        if (!hasUTF8Flag && useUnicodeExtraFields) {\n            ZipUtil.setNameAndCommentFromExtraFields(current.entry, fileName, null);\n        }\n\n        processZip64Extra(size, cSize);\n\n        if (current.entry.getCompressedSize() != ArchiveEntry.SIZE_UNKNOWN) {\n            if (current.entry.getMethod() == ZipMethod.UNSHRINKING.getCode()) {\n                current.in = new UnshrinkingInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.IMPLODING.getCode()) {\n                current.in = new ExplodingInputStream(\n                        current.entry.getGeneralPurposeBit().getSlidingDictionarySize(),\n                        current.entry.getGeneralPurposeBit().getNumberOfShannonFanoTrees(),\n                        new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.BZIP2.getCode()) {\n                current.in = new BZip2CompressorInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            }\n        }\n        \n        entriesRead++;\n        return current.entry;\n    }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java",
+      "testcase": "@Test\n    public void testThrowOnInvalidSignatureAfterValidEntry() throws Exception {\n        // Create a ZIP with one valid stored entry and then an invalid signature\n        byte[] zipData = new byte[] {\n            // Local file header signature\n            0x50, 0x4b, 0x03, 0x04,\n            // Version needed to extract (10)\n            0x0a, 0x00,\n            // General purpose bit flag (0)\n            0x00, 0x00,\n            // Compression method (STORED)\n            0x00, 0x00,\n            // Last mod file time\n            0x00, 0x00,\n            // Last mod file date\n            0x00, 0x00,\n            // CRC-32 of \"hello\" (0x3610a686 little-endian)\n            (byte)0x86, (byte)0xa6, 0x10, 0x36,\n            // Compressed size (5)\n            0x05, 0x00, 0x00, 0x00,\n            // Uncompressed size (5)\n            0x05, 0x00, 0x00, 0x00,\n            // File name length (8)\n            0x08, 0x00,\n            // Extra field length (0)\n            0x00, 0x00,\n            // File name \"test.txt\"\n            0x74, 0x65, 0x73, 0x74, 0x2e, 0x74, 0x78, 0x74,\n            // File data \"hello\"\n            0x68, 0x65, 0x6c, 0x6c, 0x6f,\n            // Invalid signature\n            0x12, 0x34, 0x56, 0x78\n        };\n        InputStream is = new ByteArrayInputStream(zipData);\n        ZipArchiveInputStream zip = new ZipArchiveInputStream(is);\n        ZipArchiveEntry entry = zip.getNextZipEntry();\n        assertNotNull(entry);\n        assertEquals(\"test.txt\", entry.getName());\n        // Now the next entry should throw due to invalid signature\n        try {\n            zip.getNextZipEntry();\n            fail(\"ZipException expected\");\n        } catch (ZipException expected) {\n            assertTrue(expected.getMessage().contains(\"Unexpected record signature\"));\n        } finally {\n            zip.close();\n        }\n    }"
+    }
+  ]
+}
+
+Note: We need to ensure that the testcase includes the necessary imports? Since we are adding to an existing test class that already imports the required classes, we don't need to repeat them. However, we need to ensure the test method compiles. It uses `ByteArrayInputStream`, `InputStream`, `ZipArchiveInputStream`, `ZipArchiveEntry`, `ZipException`, and JUnit assertions. The existing test file likely imports these. We'll assume.
+
+We also need to make sure the method is public and annotated with @Test.
+
+Now, we output the JSON. We must escape newlines and quotes properly. In the fixed_code string, we already have newlines. We'll escape them as \n. But when writing the JSON, we need to represent the string with escaped newlines and double quotes.
+
+We'll produce the JSON string accordingly.
+
+Let's construct the final output.{
+  "fixed_code": [
+    "    public ZipArchiveEntry getNextZipEntry() throws IOException {\n        boolean firstEntry = true;\n        if (closed || hitCentralDirectory) {\n            return null;\n        }\n        if (current != null) {\n            closeEntry();\n            firstEntry = false;\n        }\n\n        try {\n            if (firstEntry) {\n                // split archives have a special signature before the\n                // first local file header - look for it and fail with\n                // the appropriate error message if this is a split\n                // archive.\n                readFirstLocalFileHeader(LFH_BUF);\n            } else {\n                readFully(LFH_BUF);\n            }\n        } catch (final EOFException e) {\n            return null;\n        }\n\n        final ZipLong sig = new ZipLong(LFH_BUF);\n        if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {\n            hitCentralDirectory = true;\n            skipRemainderOfArchive();\n            return null;\n        }\n        if (!sig.equals(ZipLong.LFH_SIG)) {\n            throw new ZipException(\"Unexpected record signature: 0x\" + Long.toHexString(sig.getValue()));\n        }\n\n        int off = WORD;\n        current = new CurrentEntry();\n\n        final int versionMadeBy = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n        current.entry.setPlatform((versionMadeBy >> ZipFile.BYTE_SHIFT) & ZipFile.NIBLET_MASK);\n\n        final GeneralPurposeBit gpFlag = GeneralPurposeBit.parse(LFH_BUF, off);\n        final boolean hasUTF8Flag = gpFlag.usesUTF8ForNames();\n        final ZipEncoding entryEncoding = hasUTF8Flag ? ZipEncodingHelper.UTF8_ZIP_ENCODING : zipEncoding;\n        current.hasDataDescriptor = gpFlag.usesDataDescriptor();\n        current.entry.setGeneralPurposeBit(gpFlag);\n\n        off += SHORT;\n\n        current.entry.setMethod(ZipShort.getValue(LFH_BUF, off));\n        off += SHORT;\n\n        final long time = ZipUtil.dosToJavaTime(ZipLong.getValue(LFH_BUF, off));\n        current.entry.setTime(time);\n        off += WORD;\n\n        ZipLong size = null, cSize = null;\n        if (!current.hasDataDescriptor) {\n            current.entry.setCrc(ZipLong.getValue(LFH_BUF, off));\n            off += WORD;\n\n            cSize = new ZipLong(LFH_BUF, off);\n            off += WORD;\n\n            size = new ZipLong(LFH_BUF, off);\n            off += WORD;\n        } else {\n            off += 3 * WORD;\n        }\n\n        final int fileNameLen = ZipShort.getValue(LFH_BUF, off);\n\n        off += SHORT;\n\n        final int extraLen = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n\n        final byte[] fileName = new byte[fileNameLen];\n        readFully(fileName);\n        current.entry.setName(entryEncoding.decode(fileName), fileName);\n\n        final byte[] extraData = new byte[extraLen];\n        readFully(extraData);\n        current.entry.setExtra(extraData);\n\n        if (!hasUTF8Flag && useUnicodeExtraFields) {\n            ZipUtil.setNameAndCommentFromExtraFields(current.entry, fileName, null);\n        }\n\n        processZip64Extra(size, cSize);\n\n        if (current.entry.getCompressedSize() != ArchiveEntry.SIZE_UNKNOWN) {\n            if (current.entry.getMethod() == ZipMethod.UNSHRINKING.getCode()) {\n                current.in = new UnshrinkingInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.IMPLODING.getCode()) {\n                current.in = new ExplodingInputStream(\n                        current.entry.getGeneralPurposeBit().getSlidingDictionarySize(),\n                        current.entry.getGeneralPurposeBit().getNumberOfShannonFanoTrees(),\n                        new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.BZIP2.getCode()) {\n                current.in = new BZip2CompressorInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            }\n        }\n        \n        entriesRead++;\n        return current.entry;\n    }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java",
+      "testcase": "@Test\n    public void testThrowOnInvalidSignatureAfterValidEntry() throws Exception {\n        // Create a ZIP with one valid stored entry and then an invalid signature\n        byte[] zipData = new byte[] {\n            // Local file header signature\n            0x50, 0x4b, 0x03, 0x04,\n            // Version needed to extract (10)\n            0x0a, 0x00,\n            // General purpose bit flag (0)\n            0x00, 0x00,\n            // Compression method (STORED)\n            0x00, 0x00,\n            // Last mod file time\n            0x00, 0x00,\n            // Last mod file date\n            0x00, 0x00,\n            // CRC-32 of \"hello\" (0x3610a686 little-endian)\n            (byte)0x86, (byte)0xa6, 0x10, 0x36,\n            // Compressed size (5)\n            0x05, 0x00, 0x00, 0x00,\n            // Uncompressed size (5)\n            0x05, 0x00, 0x00, 0x00,\n            // File name length (8)\n            0x08, 0x00,\n            // Extra field length (0)\n            0x00, 0x00,\n            // File name \"test.txt\"\n            0x74, 0x65, 0x73, 0x74, 0x2e, 0x74, 0x78, 0x74,\n            // File data \"hello\"\n            0x68, 0x65, 0x6c, 0x6c, 0x6f,\n            // Invalid signature\n            0x12, 0x34, 0x56, 0x78\n        };\n        InputStream is = new ByteArrayInputStream(zipData);\n        ZipArchiveInputStream zip = new ZipArchiveInputStream(is);\n        ZipArchiveEntry entry = zip.getNextZipEntry();\n        assertNotNull(entry);\n        assertEquals(\"test.txt\", entry.getName());\n        // Now the next entry should throw due to invalid signature\n        try {\n            zip.getNextZipEntry();\n            fail(\"ZipException expected\");\n        } catch (ZipException expected) {\n            assertTrue(expected.getMessage().contains(\"Unexpected record signature\"));\n        } finally {\n            zip.close();\n        }\n    }"
+    }
+  ]
+}

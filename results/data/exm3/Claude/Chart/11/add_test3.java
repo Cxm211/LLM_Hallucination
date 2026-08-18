@@ -1,0 +1,10 @@
+// org/jfree/chart/util/junit/ShapeUtilitiesTests.java
+public void testEqualGeneralPathsDifferentSegmentTypes() {
+    GeneralPath g1 = new GeneralPath();
+    g1.moveTo(1.0f, 2.0f);
+    g1.lineTo(3.0f, 4.0f);
+    GeneralPath g2 = new GeneralPath();
+    g2.moveTo(1.0f, 2.0f);
+    g2.quadTo(2.0f, 3.0f, 3.0f, 4.0f);
+    assertFalse(ShapeUtilities.equal(g1, g2));
+}

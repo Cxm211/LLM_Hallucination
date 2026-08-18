@@ -1,0 +1,44 @@
+// ===== FIXED org.apache.commons.cli.TypeHandler :: createValue(String, Class) [lines 64-106] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Cli/Cli-39-fixed/src/main/java/org/apache/commons/cli/TypeHandler.java =====
+    public static Object createValue(final String str, final Class<?> clazz) throws ParseException
+    {
+        if (PatternOptionBuilder.STRING_VALUE == clazz)
+        {
+            return str;
+        }
+        else if (PatternOptionBuilder.OBJECT_VALUE == clazz)
+        {
+            return createObject(str);
+        }
+        else if (PatternOptionBuilder.NUMBER_VALUE == clazz)
+        {
+            return createNumber(str);
+        }
+        else if (PatternOptionBuilder.DATE_VALUE == clazz)
+        {
+            return createDate(str);
+        }
+        else if (PatternOptionBuilder.CLASS_VALUE == clazz)
+        {
+            return createClass(str);
+        }
+        else if (PatternOptionBuilder.FILE_VALUE == clazz)
+        {
+            return createFile(str);
+        }
+        else if (PatternOptionBuilder.EXISTING_FILE_VALUE == clazz)
+        {
+            return openFile(str);
+        }
+        else if (PatternOptionBuilder.FILES_VALUE == clazz)
+        {
+            return createFiles(str);
+        }
+        else if (PatternOptionBuilder.URL_VALUE == clazz)
+        {
+            return createURL(str);
+        }
+        else
+        {
+            return null;
+        }
+    }

@@ -1,0 +1,1 @@
+public Object put(Object key, Object value) { boolean result = false; Collection coll = getCollection(key); if (coll == null) { coll = createCollection(1); result = coll.add(value); if (coll.size() > 0) { getMap().put(key, coll); } } else { result = coll.add(value); } return (result ? value : null); }

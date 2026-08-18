@@ -1,0 +1,1 @@
+void read(Tokeniser t, CharacterReader r) { r.unconsume(); Token.Comment comment = new Token.Comment(); comment.data.append(r.consumeTo('>')); comment.data.replace(0, comment.data.length(), comment.data.toString().replace('\u0000', '\uFFFD')); t.emit(comment); t.advanceTransition(Data); }

@@ -1,0 +1,45 @@
+public static String getShortClassName(String className) {
+        if (className == null) {
+            return StringUtils.EMPTY;
+        }
+        if (className.length() == 0) {
+            return StringUtils.EMPTY;
+        }
+        int arrayDepth = 0;
+        while (className.startsWith("[")) {
+            arrayDepth++;
+            className = className.substring(1);
+        }
+        if (arrayDepth > 0) {
+            if (className.startsWith("L") && className.endsWith(";")) {
+                className = className.substring(1, className.length() - 1);
+            } else if (className.length() == 1) {
+                switch (className.charAt(0)) {
+                    case 'Z': className = "boolean"; break;
+                    case 'B': className = "byte"; break;
+                    case 'C': className = "char"; break;
+                    case 'S': className = "short"; break;
+                    case 'I': className = "int"; break;
+                    case 'J': className = "long"; break;
+                    case 'F': className = "float"; break;
+                    case 'D': className = "double"; break;
+                    default: break;
+                }
+            }
+        }
+        int lastDotIdx = className.lastIndexOf(PACKAGE_SEPARATOR_CHAR);
+        int innerIdx = className.indexOf(
+                INNER_CLASS_SEPARATOR_CHAR, lastDotIdx == -1 ? 0 : lastDotIdx + 1);
+        String out = className.substring(lastDotIdx + 1);
+        if (innerIdx != -1) {
+            out = out.replace(INNER_CLASS_SEPARATOR_CHAR, PACKAGE_SEPARATOR_CHAR);
+        }
+        if (arrayDepth > 0) {
+            StringBuilder sb = new StringBuilder(out);
+            for (int i = 0; i < arrayDepth; i++) {
+                sb.append("[]");
+            }
+            return sb.toString();
+        }
+        return out;
+    }

@@ -1,0 +1,648 @@
+We are given a buggy function `escape` and one trigger test case. Let's first understand the bug.
+
+The buggy function is `org.jsoup.nodes.Entities.escape`. The test case `testShiftJisRoundtrip` fails on the buggy version and should pass on the fixed version. The test case involves parsing an HTML document with a meta tag specifying charset Shift_JIS, and then outputting with escape mode xhtml. The test expects that the output does not contain a '?' (which would indicate an encoding problem) and that it contains either "&#xa0;" or "&nbsp;" (for the non-breaking space). The bug likely is about handling of the non-breaking space character (0xA0) when escape mode is xhtml.
+
+Looking at the escape function, we see a switch statement for characters under MIN_SUPPLEMENTARY_CODE_POINT. For char 0xA0 (non-breaking space), it does:
+
+```java
+case 0xA0:
+    if (escapeMode != EscapeMode.xhtml)
+        accum.append("&nbsp;");
+    else
+        accum.append(c);
+    break;
+```
+
+The logic says: if escape mode is not xhtml, we output "&nbsp;", else we output the character itself (c). However, note that c is (char) codePoint, which for 0xA0 is the Unicode non-breaking space. But when the output charset is Shift_JIS (or another charset that may not include this character?), we need to consider whether the character can be encoded. Actually, the function later checks `canEncode(coreCharset, c, encoder)` for other characters. However, for 0xA0, it bypasses that check and either outputs the entity or the raw character. But if the encoder cannot encode the raw character (0xA0), then we might get a '?' or some replacement character. That seems to be the bug: when escapeMode is xhtml, we should still check if the character can be encoded, and if not, we should fall back to a numeric entity.
+
+Looking at the test: The input contains "before&nbsp;after". When parsed, the `&nbsp;` is decoded to a non-breaking space character (0xA0). Then when outputting with escape mode xhtml, the function currently outputs the raw character (0xA0) if escapeMode is xhtml. However, the output charset is Shift_JIS (since the document has that charset). Shift_JIS may not include the non-breaking space character? Actually, Shift_JIS does include a non-breaking space? I'm not sure. But the test expects that the output does not contain a '?', meaning the raw character was successfully encoded, or if not, it should be escaped as an entity. The test passes if output contains either "&#xa0;" or "&nbsp;". So if the raw character cannot be encoded, we should output "&#xa0;" (numeric hex entity) because escape mode is xhtml (so &nbsp; is not used). Indeed, for xhtml, the spec says that &nbsp; is allowed, but maybe the library prefers numeric entities? However, the code currently does not output "&#xa0;" for 0xA0 when escapeMode is xhtml; it outputs the raw character. But if the encoder cannot encode it, then the encoder will output a replacement (like '?'), which the test detects. So we need to fix: when escapeMode is xhtml, we should still check if the character can be encoded; if not, we should fall back to numeric entity (or maybe to &nbsp;? but xhtml does define &nbsp; as an entity, but the code specifically avoids &nbsp; for xhtml. Actually, the code says if escapeMode != xhtml, use &nbsp;, else use raw character. But maybe the intention is that in xhtml, the numeric entity should be used if the character cannot be encoded, but for the non-breaking space, there is a named entity &nbsp; which is also defined in xhtml. So why does it avoid &nbsp;? Possibly because xhtml requires the numeric entity for non-breaking space? Not sure. However, looking at the test expectation: "Should have contained a '&#xa0;' or a '&nbsp;'." So both are acceptable. So the bug is that when escapeMode is xhtml and the encoder cannot encode 0xA0, we currently output the raw character, which gets replaced by '?'. We should instead output the numeric entity (or &nbsp;? but the condition says if escapeMode != xhtml we output &nbsp;, else we output c. So maybe we should change the logic: for 0xA0, if escapeMode is xhtml, we should check if the character can be encoded; if yes, output c; else output "&#xa0;". Alternatively, we could output "&nbsp;" for xhtml as well, but the code intentionally avoids that.
+
+Wait, there is also a `canEncode` check for other characters. For 0xA0, we skip that check. So we should incorporate the encoding check for 0xA0 as well. But note that the `canEncode` function might be expensive? However, for other characters, after the switch, there is a default clause that does the canEncode check. So the special handling for 0xA0 is to output &nbsp; for non-xhtml modes. But we also need to consider encoding capabilities.
+
+Thus, the fix: for case 0xA0, we should behave similarly to other characters: if escapeMode != xhtml, we output "&nbsp;" (without checking encoding? Actually, &nbsp; is a character entity, which when decoded gives the non-breaking space. But if the output charset cannot encode the &nbsp; string? That's not an issue because &nbsp; is ASCII. So the entity is safe. However, if escapeMode is xhtml, we output the raw character only if it can be encoded; otherwise we need to use a numeric entity. So we should modify the case 0xA0 to:
+
+```java
+case 0xA0:
+    if (escapeMode != EscapeMode.xhtml) {
+        accum.append("&nbsp;");
+    } else {
+        // For xhtml, output raw character if encodable, else numeric entity.
+        if (canEncode(coreCharset, c, encoder))
+            accum.append(c);
+        else
+            accum.append("&#x").append(Integer.toHexString(codePoint)).append(';');
+    }
+    break;
+```
+
+But note that the default clause already does the canEncode check and if not encodable, uses map or numeric entity. However, the map might contain an entry for 0xA0? Possibly, but the escapeMode's map is for named entities. For EscapeMode.xhtml, the map might include &nbsp;? Actually, the map is from character to named entity string. For xhtml, the map may still include &nbsp;? But the code deliberately avoids using the map for 0xA0 when escapeMode is xhtml because it outputs raw character. So we should not rely on the map for 0xA0 in xhtml. So the above fix is appropriate.
+
+Alternatively, we could simply let the default clause handle 0xA0 by removing the special case altogether. But then we would lose the special behavior for non-xhtml (where we want &nbsp; instead of raw character). Actually, the default clause would check the map, and if the map contains the character, it would output the named entity. For escape modes other than xhtml, the map likely includes &nbsp;. For xhtml, the map might also include &nbsp;? If so, then default would output &nbsp; for xhtml as well, which is not what the code intended (since it currently avoids &nbsp; for xhtml). So we need to keep the special case for 0xA0 to differentiate between xhtml and non-xhtml.
+
+But let's examine the intended behavior: In non-xhtml escape modes (like base or extended), we want to use named entities for certain characters including non-breaking space. In xhtml, we want to use the raw character if possible, and if not, a numeric entity (since xhtml does not allow named entities? Actually xhtml does allow named entities, but maybe the library's policy is to use numeric entities for compatibility). The test expects either "&#xa0;" or "&nbsp;" in the output. So both are acceptable. So if we output "&nbsp;" for xhtml, the test would still pass. But the existing code avoids that, so maybe there is a reason. We'll stick to the current intention: for xhtml, output raw character if encodable, else numeric entity. We'll adjust the case accordingly.
+
+Now, also consider the `encoder.canEncode(c)` check for supplementary characters. That part seems fine.
+
+We should also check if there are other bugs. Look at the normaliseWhite logic: It seems to handle whitespace normalization. That might be unrelated.
+
+Thus, the fix is only in the escape function, specifically the case for 0xA0.
+
+Now we need to generate additional trigger testcases that maximize coverage of different behaviors/branches not covered by the provided test case. The provided test case covers:
+- normaliseWhite? Probably not, because the string doesn't have whitespace to normalize.
+- stripLeadingWhite? Not.
+- inAttribute? The test is not in an attribute.
+- escapeMode xhtml.
+- The character 0xA0 (non-breaking space).
+- The encoder is Shift_JIS (or maybe the output charset is Shift_JIS). The encoder cannot encode 0xA0? Actually Shift_JIS does have a representation for non-breaking space? I think Shift_JIS includes 0xA0 as a single-byte character? Actually, Shift_JIS is a Japanese encoding, and 0xA0 is not defined in Shift_JIS? In Shift_JIS, 0xA0 is a half-width katakana? Wait, I'm not sure. But the test indicates that the buggy version outputs a '?' meaning the encoder replaced the character. So the encoder cannot encode 0xA0.
+
+So the provided test covers the branch where escapeMode is xhtml, character is 0xA0, and encoder cannot encode it. The buggy version outputs the raw character, which gets replaced, causing a '?'. Our fix will output "&#xa0;" (since canEncode returns false).
+
+Now we need additional testcases to cover other branches. We should cover:
+1. Other characters in the switch: '&', '<', '>', '"' in both inAttribute true and false.
+2. The default branch where canEncode is true/false, and map contains/does not contain.
+3. The supplementary characters branch.
+4. The normaliseWhite and stripLeadingWhite branches.
+5. Different escape modes (not xhtml).
+6. Different charsets where encoder can encode or cannot encode.
+
+But we must generate minimal number of testcases that maximize coverage. Since we can write multiple assertions in one test case, we can combine many in a single test method.
+
+However, the output format expects each testcase as a separate entry with path. The provided trigger testcase path is "org/jsoup/nodes/DocumentTest.java::testShiftJisRoundtrip". But note the format: "testcase_1_path" is the file path, and "testcase_1_code" is the entire test case code? The example shows a snippet with @Test method. We likely need to output the entire test method (including the method signature and body). But we must ensure it's runnable. Since we cannot see the entire class, we assume we can add new test methods to the same file (DocumentTest.java). However, we might not know the full class context. But we can create test methods that follow the same pattern as the provided one. We'll assume the test class has the necessary imports and setup.
+
+We need to create testcases that fail on the buggy version and pass on the fixed version. For each testcase, we must ensure it fails on the buggy version. That means we need to trigger the buggy behavior. The buggy behavior is only for the 0xA0 character when escapeMode is xhtml and encoder cannot encode it. But there might be other bugs? Let's double-check the code for other potential issues.
+
+Look at the normaliseWhite block: It checks if normaliseWhite is true. It uses `StringUtil.isWhitespace(codePoint)`. If whitespace, it either continues or appends a space. There is a potential bug: `stripLeadingWhite` only matters when `!reachedNonWhite`. But `reachedNonWhite` is initialized false and set to true when we encounter a non-white character. However, note that if the string starts with whitespace and `stripLeadingWhite` is true, we skip that whitespace and do not set `lastWasWhite`? Actually, we continue without appending anything, and `lastWasWhite` remains false? But `lastWasWhite` is only set when we append a space. So if we skip leading whitespace, `lastWasWhite` remains false. That seems correct. However, there is a bug: When `normaliseWhite` is true and we encounter whitespace, we check `(stripLeadingWhite && !reachedNonWhite) || lastWasWhite`. If true, we continue (skip). But if `stripLeadingWhite` is false and `lastWasWhite` is false, we append a space and set `lastWasWhite = true`. That's okay. But consider a sequence of multiple whitespace characters: after the first whitespace, we append a space and set `lastWasWhite = true`. Then for the next whitespace, `lastWasWhite` is true, so we continue (skip). That's correct: we collapse multiple whitespace to a single space.
+
+But what about the case when `stripLeadingWhite` is true and we have leading whitespace followed by non-whitespace? The first whitespace is skipped because `stripLeadingWhite && !reachedNonWhite`. Then we process the non-whitespace, set `lastWasWhite = false` and `reachedNonWhite = true`. Then if later we encounter whitespace again, `lastWasWhite` is false, so we append a space (and set lastWasWhite true). That's fine.
+
+However, there is a subtle bug: When `normaliseWhite` is true and we skip a whitespace due to `lastWasWhite` being true, we continue without resetting `lastWasWhite`? Actually, `lastWasWhite` is already true, and we continue, so it stays true. That means if we have three whitespace characters, the first one we append space and set lastWasWhite true, the second one we skip, lastWasWhite remains true, the third one we skip again because lastWasWhite is still true. That's fine because we already appended one space. But after we encounter a non-whitespace, we set `lastWasWhite = false`. So the logic seems correct.
+
+But what about the case when we skip leading whitespace (stripLeadingWhite true) and the first non-whitespace character is something that also needs to be escaped? That's handled later. So the normaliseWhite logic might be fine.
+
+Another potential bug: In the default branch for single char, we check `canEncode(coreCharset, c, encoder)`. If true, we append c. If false, we check `map.containsKey(c)` and use named entity if present, otherwise numeric entity. However, note that for characters that have a named entity in the map (like '<', '>', etc.), those are already handled in the switch. So the map is for other named entities (like &nbsp; is in the map? Possibly, but 0xA0 is handled separately). So that seems fine.
+
+Now, we should also consider the condition `if (encoder.canEncode(c))` for supplementary characters. That uses the encoder directly, not the `canEncode` helper. The `canEncode` helper likely does some optimization for core charset. But for supplementary characters, it uses the encoder's canEncode method, which is fine.
+
+But there might be a bug: For supplementary characters, if encoder.canEncode(c) returns true, we append c. However, if the encoder can encode the string but the output charset might not support the character? Actually, encoder.canEncode(c) returns true if the character can be encoded. So that's fine. If false, we output numeric entity. That seems correct.
+
+Now, are there any other special characters in the switch? The switch includes '&', 0xA0, '<', '>', '"'. That's it. So other characters (including other control characters?) go to default.
+
+Thus, the only bug seems to be the handling of 0xA0 in xhtml mode when encoder cannot encode it.
+
+We should also test the case where escapeMode is not xhtml (e.g., base or extended) and 0xA0 is handled: it should output "&nbsp;" regardless of encoder capability. That should already work.
+
+Now, to maximize coverage with minimal testcases, we can create a test method that tests various scenarios. But note: we need each testcase to fail on the buggy version. If we include multiple assertions in one test method, the whole test fails if any assertion fails. That's acceptable. However, we need to ensure that the testcase as a whole fails on buggy version. Since the buggy version fails for the 0xA0 xhtml non-encodable case, we must include that scenario. But we also want to test other branches that might pass on buggy version. However, we need each generated testcase to fail on buggy version. That means each testcase must trigger at least one bug. But if we include other assertions that pass on buggy version, the testcase might still pass if the buggy behavior is not triggered? Actually, if the testcase includes an assertion that expects a certain output that the buggy version does not produce, then the testcase will fail. So we can design testcases that test multiple behaviors, but at least one of them must fail on buggy version.
+
+However, the requirement says: "Every generated testcase MUST fail on the original buggy version (i.e., does NOT pass)." So we need to ensure that the entire testcase fails. So we can design a testcase that includes a check for the bug (0xA0 xhtml non-encodable) and also checks other behaviors that might pass, but as long as the bug check fails, the testcase fails. That's fine.
+
+But we also want to maximize coverage of different behaviors. So we can create a comprehensive test method that tests many branches, and it will fail because of the bug. That would satisfy the requirement. However, the instruction says "The generated testcases should maximize coverage of different behaviors/branches in both buggy code and generated fixed code while using the minimal number of testcases". So we can combine many checks into one testcase, but we should also consider that we want to cover branches that are not already covered by the provided trigger testcase. The provided trigger covers: xhtml escape mode, non-breaking space, charset Shift_JIS (non-encodable). So we need to cover other branches: e.g., inAttribute true/false, other characters, normaliseWhite, stripLeadingWhite, other escape modes, other charsets, supplementary characters, etc.
+
+We can create one test method that tests a variety of inputs. But we must ensure that the test method is runnable and compiles. Since we don't have the full class, we assume the test class has the necessary imports and static methods. We'll follow the style of the provided test: it uses Jsoup, Document, etc.
+
+Let's plan to create two additional testcases? But we can try to cover as many branches as possible in one testcase. However, to be safe and to ensure we cover distinct behaviors, we might create two testcases: one focusing on attribute context and another focusing on whitespace normalization. But we also need to cover other escape modes and supplementary characters.
+
+Let's think about the branches in the escape function:
+
+- Outer loop over characters.
+- Branch on normaliseWhite (true/false).
+- Within normaliseWhite, branch on isWhitespace.
+- Within whitespace, branch on (stripLeadingWhite && !reachedNonWhite) || lastWasWhite.
+- If not whitespace, set lastWasWhite=false, reachedNonWhite=true.
+- Then branch on codePoint < MIN_SUPPLEMENTARY_CODE_POINT (single char) vs supplementary.
+- For single char, switch on specific chars: '&', 0xA0, '<', '>', '"'.
+- For each of those, there are sub-branches based on inAttribute and escapeMode.
+- For 0xA0, sub-branch on escapeMode != xhtml.
+- For other chars, default branch: canEncode? if true append c, else if map contains key then named entity, else numeric entity.
+- For supplementary: encoder.canEncode? append string else numeric entity.
+
+We also have the stripLeadingWhite flag and reachedNonWhite flag.
+
+Now, the provided test covers:
+- normaliseWhite? The input string "before&nbsp;after" does not have whitespace, so normaliseWhite is false? Actually, the escape function is called with parameters. In the test, the output settings might have pretty print disabled? Not sure. But the escape function is used in various contexts. In the test, it's called when outputting the HTML. The parameters are determined by the context. For the test, the escape is called with normaliseWhite? Probably false because it's not normalising whitespace. So we need to cover normaliseWhite true.
+
+- stripLeadingWhite: likely false.
+
+- inAttribute: false.
+
+- escapeMode: xhtml.
+
+- encoder: Shift_JIS that cannot encode 0xA0.
+
+So we need to cover:
+
+1. inAttribute = true and false for characters that behave differently: '<', '>', '"', '&', 0xA0? Actually, for 0xA0, inAttribute does not matter; it only depends on escapeMode. For '<', '>', '"', they depend on inAttribute.
+
+2. escapeMode != xhtml (e.g., base or extended) for 0xA0 and other characters.
+
+3. normaliseWhite = true, with various whitespace scenarios, including stripLeadingWhite true/false.
+
+4. Characters that are not in the switch but cannot be encoded, and map contains them (e.g., maybe other named entities like &copy;). We need to know what characters are in the map for a given escape mode.
+
+5. Supplementary characters.
+
+6. Characters that can be encoded.
+
+We can create testcases that invoke the escape function directly (since it's package-private or public? The function is static and likely package-private. We can write a test in the same package (org.jsoup.nodes). But we can also test through the public API, like parsing and outputting as in the provided test.
+
+To test different branches, we can create different documents with different content and output settings. For example:
+- To test inAttribute, we can have an attribute value containing special characters.
+- To test normaliseWhite, we can set the output settings to pretty print? Actually, normaliseWhite is used when escaping text nodes? Not sure.
+
+The escape function is used in `Entities.escape` which is called from `Attribute.html()` and `TextNode.html()` etc. So we can create elements and attributes to trigger different parameters.
+
+Given the complexity, we might create two additional testcases: one that tests attribute escaping (inAttribute true) and one that tests whitespace normalization. But we also need to test other escape modes and supplementary characters.
+
+Let's think about the minimal number: we can create a single test method that covers many scenarios by using parameterized tests? But we cannot change the test framework. We'll just write a single test method with multiple sections.
+
+We must ensure that the test fails on buggy version. So we need to include an assertion that fails due to the bug. That bug is about 0xA0 in xhtml with non-encodable charset. We can include that as one of the checks, and it will fail. However, if we also include other checks that might fail on buggy version? Possibly not. But if the buggy version passes other checks, the test will still fail because the 0xA0 check fails. So that's fine.
+
+Now, we must generate the fixed code. We'll produce the entire escape function with the fix.
+
+Now, let's write the fix for the escape function. We'll modify the case for 0xA0 to include the canEncode check for xhtml.
+
+Also, note that the canEncode function signature: `canEncode(CoreCharset coreCharset, char c, CharsetEncoder encoder)`. We need to call it.
+
+Thus, the fixed case:
+
+```java
+case 0xA0:
+    if (escapeMode != EscapeMode.xhtml) {
+        accum.append("&nbsp;");
+    } else {
+        if (canEncode(coreCharset, c, encoder))
+            accum.append(c);
+        else
+            accum.append("&#x").append(Integer.toHexString(codePoint)).append(';');
+    }
+    break;
+```
+
+Now, we need to ensure we have the canEncode method available. It's defined elsewhere? The function `escape` uses `canEncode`; it's likely a static helper in the same class. We don't need to change it.
+
+Now, output the fixed function as a string.
+
+Now, for additional testcases, we need to produce the exact paths. The provided test path is "org/jsoup/nodes/DocumentTest.java::testShiftJisRoundtrip". But the path likely includes the class name and method name? Actually, the format in the output expects a file path? The example in the instructions: "Each testcase must have a corresponding path end with .java. The path must be one of the exact file paths of the provided trigger testcases." The provided trigger testcase is given as "org/jsoup/nodes/DocumentTest.java::testShiftJisRoundtrip". That seems to indicate the file path is "org/jsoup/nodes/DocumentTest.java". The "::testShiftJisRoundtrip" might be the method name. But the instruction says "path end with .java". So we should use the file path only: "org/jsoup/nodes/DocumentTest.java". We'll assume that.
+
+So we will create new test methods in the same file. We'll need to output the testcase code as a string that includes the entire test method (with @Test annotation, etc.). We'll need to make sure the method names are unique.
+
+Let's create two additional testcases:
+
+1. Test various escaping scenarios including attributes, different escape modes, and supplementary characters. We'll call it `testEscapeVarious`.
+
+2. Test whitespace normalization scenarios. We'll call it `testEscapeWhitespace`.
+
+But we must ensure that the test fails on buggy version. For testEscapeVarious, we can include a check for 0xA0 in xhtml with a charset that cannot encode it (like Shift_JIS). That will fail. For testEscapeWhitespace, we might not include that bug. But then the test might pass on buggy version. So we need to ensure that testEscapeWhitespace also fails on buggy version. Is there any bug in whitespace handling? We suspect not, but we need to include a scenario that triggers the bug. So we can also include the 0xA0 xhtml non-encodable check in that test. But then we are duplicating. Alternatively, we can design testEscapeWhitespace to test only whitespace normalization, but we must also include at least one failing assertion. Since the bug is not about whitespace, we can add a simple assertion that expects a correct behavior for 0xA0, which will fail on buggy version. So we can add a small check at the end. That would make the test fail. So we'll include that.
+
+Thus, both testcases will include a check for the bug, ensuring they fail.
+
+Now, we need to write the test code. We'll simulate using Jsoup to parse HTML and output with specific settings.
+
+Let's design testEscapeVarious:
+
+We'll test:
+- Escape mode base, extended, xhtml.
+- Characters: &, <, >, ", non-breaking space, a character that cannot be encoded (e.g., a supplementary character) with a limited charset.
+- In attribute vs not.
+
+But we need to be careful about charsets. We'll use UTF-8 for most tests, but for the non-encodable case, we'll use a charset that doesn't support the character (like Shift_JIS for non-breaking space, or ASCII for a character like '€').
+
+We'll write a helper method? But we cannot change the class. We'll just put code inside the test method.
+
+We'll create a test that uses `Entities.escape` directly? Since the method is package-private, we can call it if the test is in the same package. The provided test uses Jsoup parsing, which indirectly calls escape. We can do the same.
+
+However, to test specific parameters like inAttribute, we need to create an attribute or a text node. We can do:
+
+```java
+Document doc = Jsoup.parse("<div attr=\"value\">text</div>");
+Element div = doc.select("div").first();
+Attribute attr = div.attributes().get("attr");
+String attrHtml = attr.html(); // This will escape with inAttribute=true
+```
+
+Similarly, for text node, we can get the text node's html.
+
+We can also set output settings on the document.
+
+We'll also test supplementary characters: e.g., a emoji.
+
+Let's write the test method code.
+
+But note: The test class likely already has imports for org.jsoup.*, etc. We'll assume they are present.
+
+We'll write:
+
+```java
+@Test
+public void testEscapeVarious() throws Exception {
+    // Test 1: inAttribute false, escape mode base
+    Document doc = Jsoup.parse("<div>test</div>");
+    doc.outputSettings().escapeMode(Entities.EscapeMode.base);
+    TextNode text = (TextNode) doc.select("div").first().childNode(0);
+    text.text("a & b < c > d \" e");
+    String html = text.html();
+    // Expect escaping? Actually, text nodes escape &, <, >? According to the function, inAttribute false, so < and > are escaped, & is always escaped, " is not escaped.
+    // We'll compute expected manually? But we can rely on the fixed version. However, for the test to fail on buggy version, we need to know the expected output from fixed version.
+    // We'll compute expected by using the fixed logic? That's not possible. Instead, we can assert that the output does not contain certain patterns? But that's not precise.
+    // Better: we can test specific cases where buggy version would produce wrong output. But for these characters, the buggy version might be correct except for 0xA0.
+    // So we'll include a check for 0xA0 with xhtml and non-encodable charset to make the test fail.
+    
+    // So for other checks, we can still assert expected values, and if buggy version passes them, fine. But we need to ensure the test fails overall. So we'll include the bug check.
+    
+    // We'll do multiple sub-tests.
+    
+    // Subtest: 0xA0 in xhtml with Shift_JIS (non-encodable)
+    String input = "<html><body>before&#xa0;after</body></html>";
+    InputStream is = new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8));
+    Document doc2 = Jsoup.parse(is, null, "http://example.com");
+    doc2.outputSettings().escapeMode(Entities.EscapeMode.xhtml);
+    doc2.outputSettings().charset(Charset.forName("Shift_JIS"));
+    String output = doc2.html();
+    assertFalse("Should not contain '?'", output.contains("?"));
+    assertTrue("Should contain &#xa0; or &nbsp;", output.contains("&#xa0;") || output.contains("&nbsp;"));
+    
+    // Subtest: attribute escaping
+    Document doc3 = Jsoup.parse("<div attr=\"\"></div>");
+    Element div3 = doc3.select("div").first();
+    div3.attr("attr", "a & b < c > d \" e");
+    doc3.outputSettings().escapeMode(Entities.EscapeMode.base);
+    String attrHtml = div3.attributes().get("attr").html();
+    // In attribute, " should be escaped to &quot;, < and > should not be escaped? Actually, according to switch: inAttribute true: '<' and '>' are not escaped, '"' is escaped.
+    // So expected: a &amp; b < c > d &quot; e
+    // We'll assert that it does not contain unescaped &, <, >, ".
+    // But we can write specific assertions.
+    assertTrue(attrHtml.contains("&amp;"));
+    assertTrue(attrHtml.contains("<")); // not escaped
+    assertTrue(attrHtml.contains(">")); // not escaped
+    assertTrue(attrHtml.contains("&quot;"));
+    
+    // Subtest: escape mode xhtml, inAttribute false, non-breaking space with UTF-8 (encodable)
+    Document doc4 = Jsoup.parse("<div></div>");
+    doc4.outputSettings().escapeMode(Entities.EscapeMode.xhtml);
+    doc4.outputSettings().charset(StandardCharsets.UTF_8);
+    TextNode text4 = new TextNode("\u00A0"); // non-breaking space
+    String html4 = text4.html();
+    // Since UTF-8 can encode \u00A0, and escape mode xhtml, should output raw character.
+    assertEquals("\u00A0", html4);
+    
+    // Subtest: supplementary character with charset that cannot encode it (e.g., ASCII)
+    Document doc5 = Jsoup.parse("<div></div>");
+    doc5.outputSettings().escapeMode(Entities.EscapeMode.base);
+    doc5.outputSettings().charset(StandardCharsets.US_ASCII);
+    TextNode text5 = new TextNode("\uD83D\uDE00"); // grinning face emoji
+    String html5 = text5.html();
+    // Should be numeric entity because ASCII cannot encode it.
+    assertTrue(html5.contains("&#x"));
+    // More specific: should contain the hex for the code point 0x1F600
+    assertTrue(html5.contains("&#x1f600;") || html5.contains("&#x1F600;"));
+    
+    // Subtest: normaliseWhite not covered here; we have separate test.
+}
+```
+
+But we need to be careful about using `TextNode` constructor: it's package-private? Actually, TextNode has a public constructor `TextNode(String text)`. So we can use it.
+
+Also, we must ensure that the output settings are applied when calling `html()`. For a TextNode, `html()` uses the document's output settings? Actually, TextNode is not directly associated with a document unless added. We can create a document and append the text node to an element, then get the element's html. But we can also call `textNode.html()` which uses the output settings from the owning document? The TextNode's `html()` method might require an `Document.OutputSettings` parameter? Actually, looking at jsoup source, `TextNode.html()` calls `Entities.escape` with the output settings from the node's owner document. So if we create a standalone TextNode, it has no owner document, so `html()` might throw NPE. So we need to add it to a document.
+
+Better approach: create a document, set output settings, then create an element and set its text, then get the element's html. But the element's html will include the tag. We can get the text node from the element and call its `outerHtml()`? Actually, `Element.html()` returns the inner HTML, which includes the escaped text.
+
+Simpler: we can parse a string with the content and then get the body's html.
+
+For example, to test text node escaping, we can do:
+
+```java
+Document doc = Jsoup.parse("");
+doc.outputSettings().escapeMode(...);
+doc.outputSettings().charset(...);
+Element body = doc.body();
+body.text("some text"); // This sets the text content, but note that body.text() escapes? Actually, body.text() returns the text, not HTML. To get the HTML, we use body.html().
+// But body.html() will return the escaped text.
+String html = body.html();
+```
+
+But body.html() returns the inner HTML, which for a body with only text, is the escaped text. So that works.
+
+We'll adopt that.
+
+Now, for testEscapeWhitespace, we'll test the normaliseWhite and stripLeadingWhite parameters. However, these parameters are passed to the escape function based on context. When is normaliseWhite true? Possibly when outputting text in a context where whitespace is normalized, like in `<pre>`? Not sure. We can trigger it by using `Element.html()` with pretty print? Actually, the `escape` method is called from `StringUtil.normaliseWhitespace`? Wait, the function is in `Entities.escape`, and the parameters `normaliseWhite` and `stripLeadingWhite` are used when escaping text nodes? In jsoup, when generating HTML, text nodes are escaped with normaliseWhite = false? I think normaliseWhite is used for normalizing whitespace in certain outputs, like when getting `text()`? Not sure.
+
+We can look at the call sites. But we don't have the source. We can assume that we can test by using the `Element.text()` method? That returns normalized whitespace. However, the `escape` function is used for HTML output, not text output.
+
+Maybe we can test by using `Document.OutputSettings.prettyPrint()`? Pretty print might add whitespace but not necessarily call escape with normaliseWhite.
+
+Given the complexity and time, we might decide to focus on the bug and other clear branches. We can still create a test for whitespace by directly calling the escape method via reflection? That would be more reliable. But the test must be runnable in the same environment. Reflection might be okay.
+
+We can write a test that uses `Entities.escape` via reflection, passing in a StringBuilder and the parameters. That way we can control all parameters directly.
+
+But we need to ensure the test fails on buggy version. We can include a call that triggers the bug (0xA0 xhtml non-encodable) and also calls for whitespace.
+
+Let's design testEscapeWhitespace as a test that uses reflection to call the escape method with various parameters. That will allow us to test normaliseWhite and stripLeadingWhite.
+
+We need to get the class `org.jsoup.nodes.Entities`. Then get the method `escape` with parameters (StringBuilder, String, Document.OutputSettings, boolean, boolean, boolean). Then invoke.
+
+We'll need to create Document.OutputSettings with specific charset and escape mode.
+
+We'll then assert the output.
+
+We'll also include a call for the bug.
+
+Now, we need to generate the fixed code and the testcases.
+
+Let's write the fixed function first.
+
+We'll output the entire escape function as a string. We'll need to escape newlines and quotes for JSON.
+
+Now, for the testcases, we'll write two test methods.
+
+We'll output them as strings with proper escaping.
+
+Now, let's produce the JSON.
+
+First, the fixed code: we have only one buggy function, so fixed_code will be an array with one string.
+
+We'll write the fixed function with the modification.
+
+Now, for additional_testcases: we have two testcases, both with path "org/jsoup/nodes/DocumentTest.java".
+
+But note: we cannot have two test methods with the same path? Actually, they are both in the same file. So we need to output two entries, each with the same path but different testcase code (different method). However, the output format expects an array of objects, each with path and testcase. The path can be the same. That's fine.
+
+But we need to ensure that when combined, the file contains both methods. However, we are outputting each testcase as a separate piece of code that should be added to the file. But if we output two separate testcases, they are two separate methods. The test file would then have both methods. That's okay.
+
+So we'll output:
+
+{
+  "fixed_code": [ "static void escape(... ) { ... }" ],
+  "additional_testcases": [
+    {
+      "path": "org/jsoup/nodes/DocumentTest.java",
+      "testcase": "@Test\npublic void testEscapeVarious() { ... }"
+    },
+    {
+      "path": "org/jsoup/nodes/DocumentTest.java",
+      "testcase": "@Test\npublic void testEscapeWhitespace() { ... }"
+    }
+  ]
+}
+
+Now, we need to write the testcase code carefully, escaping characters.
+
+Let's write the fixed function code:
+
+We'll copy the original function and replace the case for 0xA0.
+
+Original function lines (with numbering as per instruction, but we don't need to number in output). We'll produce the entire function.
+
+We'll write it as a single string with line breaks.
+
+Now, let's construct the JSON. We'll do it programmatically in our mind.
+
+We'll output the final answer.
+
+But before that, we need to double-check if there are any other bugs. Consider the condition `if (encoder.canEncode(c))` for supplementary characters. This uses the encoder's canEncode method which may have performance issues but is fine. However, note that the encoder might be null? The encoder is from out.encoder(), which returns a CharsetEncoder. It should not be null.
+
+Also, note the use of `coreCharset` and `canEncode`. The `canEncode` method likely checks if the character is in the core charset's range to avoid expensive encoder checks. That's fine.
+
+Now, let's produce the fixed function.
+
+We'll replace the case 0xA0 block with the fixed version.
+
+Here is the entire fixed function (with the fix indicated):
+
+```java
+    static void escape(StringBuilder accum, String string, Document.OutputSettings out,
+                       boolean inAttribute, boolean normaliseWhite, boolean stripLeadingWhite) {
+
+        boolean lastWasWhite = false;
+        boolean reachedNonWhite = false;
+        final EscapeMode escapeMode = out.escapeMode();
+        final CharsetEncoder encoder = out.encoder();
+        final CoreCharset coreCharset = CoreCharset.byName(encoder.charset().name());
+        final Map<Character, String> map = escapeMode.getMap();
+        final int length = string.length();
+
+        int codePoint;
+        for (int offset = 0; offset < length; offset += Character.charCount(codePoint)) {
+            codePoint = string.codePointAt(offset);
+
+            if (normaliseWhite) {
+                if (StringUtil.isWhitespace(codePoint)) {
+                    if ((stripLeadingWhite && !reachedNonWhite) || lastWasWhite)
+                        continue;
+                    accum.append(' ');
+                    lastWasWhite = true;
+                    continue;
+                } else {
+                    lastWasWhite = false;
+                    reachedNonWhite = true;
+                }
+            }
+            // surrogate pairs, split implementation for efficiency on single char common case (saves creating strings, char[]):
+            if (codePoint < Character.MIN_SUPPLEMENTARY_CODE_POINT) {
+                final char c = (char) codePoint;
+                // html specific and required escapes:
+                switch (c) {
+                    case '&':
+                        accum.append("&amp;");
+                        break;
+                    case 0xA0:
+                        if (escapeMode != EscapeMode.xhtml) {
+                            accum.append("&nbsp;");
+                        } else {
+                            if (canEncode(coreCharset, c, encoder))
+                                accum.append(c);
+                            else
+                                accum.append("&#x").append(Integer.toHexString(codePoint)).append(';');
+                        }
+                        break;
+                    case '<':
+                        if (!inAttribute)
+                            accum.append("&lt;");
+                        else
+                            accum.append(c);
+                        break;
+                    case '>':
+                        if (!inAttribute)
+                            accum.append("&gt;");
+                        else
+                            accum.append(c);
+                        break;
+                    case '"':
+                        if (inAttribute)
+                            accum.append("&quot;");
+                        else
+                            accum.append(c);
+                        break;
+                    default:
+                        if (canEncode(coreCharset, c, encoder))
+                            accum.append(c);
+                        else if (map.containsKey(c))
+                            accum.append('&').append(map.get(c)).append(';');
+                        else
+                            accum.append("&#x").append(Integer.toHexString(codePoint)).append(';');
+                }
+            } else {
+                final String c = new String(Character.toChars(codePoint));
+                if (encoder.canEncode(c)) // uses fallback encoder for simplicity
+                    accum.append(c);
+                else
+                    accum.append("&#x").append(Integer.toHexString(codePoint)).append(';');
+            }
+        }
+    }
+```
+
+Now, for the testcases.
+
+We'll write testEscapeVarious:
+
+```java
+@Test
+public void testEscapeVarious() throws Exception {
+    // Test 1: 0xA0 in xhtml with Shift_JIS (non-encodable) - bug case
+    String input = "<html><body>before&#xa0;after</body></html>";
+    InputStream is = new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8));
+    Document doc = Jsoup.parse(is, null, "http://example.com");
+    doc.outputSettings().escapeMode(Entities.EscapeMode.xhtml);
+    doc.outputSettings().charset(Charset.forName("Shift_JIS"));
+    String output = doc.html();
+    assertFalse("Should not contain '?'", output.contains("?"));
+    assertTrue("Should contain &#xa0; or &nbsp;", output.contains("&#xa0;") || output.contains("&nbsp;"));
+    
+    // Test 2: attribute escaping with base escape mode
+    Document doc2 = Jsoup.parse("<div></div>");
+    doc2.outputSettings().escapeMode(Entities.EscapeMode.base);
+    Element div = doc2.select("div").first();
+    div.attr("test", "a & b < c > d \" e");
+    String attrHtml = div.attributes().get("test").html();
+    assertTrue(attrHtml.contains("&amp;"));
+    assertTrue(attrHtml.contains("<")); // not escaped in attribute
+    assertTrue(attrHtml.contains(">")); // not escaped in attribute
+    assertTrue(attrHtml.contains("&quot;"));
+    
+    // Test 3: text node escaping with xhtml and UTF-8 (encodable non-breaking space)
+    Document doc3 = Jsoup.parse("<div></div>");
+    doc3.outputSettings().escapeMode(Entities.EscapeMode.xhtml);
+    doc3.outputSettings().charset(StandardCharsets.UTF_8);
+    Element body3 = doc3.body();
+    body3.text("\u00A0"); // set text content (non-breaking space)
+    String html3 = body3.html();
+    assertEquals("\u00A0", html3);
+    
+    // Test 4: supplementary character with ASCII charset (cannot encode)
+    Document doc4 = Jsoup.parse("<div></div>");
+    doc4.outputSettings().escapeMode(Entities.EscapeMode.base);
+    doc4.outputSettings().charset(StandardCharsets.US_ASCII);
+    Element body4 = doc4.body();
+    body4.text("\uD83D\uDE00"); // grinning face emoji
+    String html4 = body4.html();
+    assertTrue("Should contain numeric entity for emoji", html4.contains("&#x1f600;") || html4.contains("&#x1F600;"));
+    
+    // Test 5: escape mode extended, character that has named entity (e.g., copyright symbol)
+    // The extended escape mode includes many named entities. We'll test with '©' (0xA9)
+    Document doc5 = Jsoup.parse("<div></div>");
+    doc5.outputSettings().escapeMode(Entities.EscapeMode.extended);
+    doc5.outputSettings().charset(StandardCharsets.UTF_8);
+    Element body5 = doc5.body();
+    body5.text("\u00A9"); // copyright symbol
+    String html5 = body5.html();
+    // Should output &copy; or raw character? According to the escape function, if map contains it, it will output named entity.
+    // The extended map includes &copy; for copyright.
+    assertTrue(html5.equals("&copy;") || html5.equals("\u00A9"));
+    // Actually, since UTF-8 can encode it, and map contains it, the default branch will use map because map.containsKey is true before canEncode? Wait, order: first canEncode, if true, append c. So if canEncode returns true, it will output raw character. So it may output raw character. That's fine.
+    // We'll just ensure no '?'.
+    assertFalse(html5.contains("?"));
+}
+```
+
+But note: In test 5, the behavior depends on canEncode. Since UTF-8 can encode copyright, it will output raw character. That's fine.
+
+Now, for testEscapeWhitespace:
+
+We'll use reflection to call escape directly.
+
+We'll need to import the necessary classes.
+
+We'll write:
+
+```java
+@Test
+public void testEscapeWhitespace() throws Exception {
+    // Get the escape method
+    Class<?> entitiesClass = Class.forName("org.jsoup.nodes.Entities");
+    Method escapeMethod = entitiesClass.getDeclaredMethod("escape", StringBuilder.class, String.class,
+            Document.OutputSettings.class, boolean.class, boolean.class, boolean.class);
+    escapeMethod.setAccessible(true);
+    
+    // Helper to call escape and return string
+    java.util.function.Function<Object[], String> callEscape = params -> {
+        StringBuilder accum = new StringBuilder();
+        try {
+            escapeMethod.invoke(null, accum, (String)params[0], (Document.OutputSettings)params[1],
+                    (boolean)params[2], (boolean)params[3], (boolean)params[4]);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        return accum.toString();
+    };
+    
+    // Create output settings with base escape mode and UTF-8 charset (encodes everything)
+    Document.OutputSettings out = new Document.OutputSettings();
+    out.escapeMode(Entities.EscapeMode.base);
+    out.charset(StandardCharsets.UTF_8);
+    
+    // Test normaliseWhite = true, stripLeadingWhite = false
+    String input1 = "  a  b  c  ";
+    String result1 = callEscape.apply(new Object[]{input1, out, false, true, false});
+    // Expect spaces collapsed to single spaces, leading/trailing spaces? With stripLeadingWhite false, leading spaces should be collapsed to one space? Actually, the first two spaces: first space triggers append(' ') and lastWasWhite=true, second space skips because lastWasWhite true. So we get one space. Then 'a' (non-white), then two spaces: first space after non-white: lastWasWhite is false, so append space and set lastWasWhite true, second space skips. So result should be " a b c " (single spaces between words, and leading/trailing spaces? The leading spaces: first space appended? Since stripLeadingWhite false and reachedNonWhite false, the first whitespace will not be skipped because lastWasWhite is false and stripLeadingWhite false, so we append a space. So leading space becomes one space. Similarly, trailing spaces: after 'c', there are two spaces. The first space: lastWasWhite false (since previous char 'c' non-white), so append space and set lastWasWhite true. The second space: lastWasWhite true, so skip. So trailing space remains one space. So overall: " a b c ". But note that there is also a space before 'a', between 'a' and 'b', between 'b' and 'c', and after 'c'. So " a b c ". That's correct.
+    assertEquals(" a b c ", result1);
+    
+    // Test normaliseWhite = true, stripLeadingWhite = true
+    String input2 = "  a  b  c  ";
+    String result2 = callEscape.apply(new Object[]{input2, out, false, true, true});
+    // Leading whitespace should be skipped until first non-white. So no leading space. Result: "a b c " (trailing space remains because trailing spaces are not stripped).
+    // Let's compute: first two spaces: stripLeadingWhite true and reachedNonWhite false, so skip. Then 'a' (set reachedNonWhite true, lastWasWhite false). Then two spaces: first space: lastWasWhite false, so append space and set lastWasWhite true; second space: lastWasWhite true, skip. Then 'b', then spaces, then 'c', then two spaces: first space after c: append space, second skip. So result: "a b c ".
+    assertEquals("a b c ", result2);
+    
+    // Test normaliseWhite = false
+    String input3 = "  a  b  c  ";
+    String result3 = callEscape.apply(new Object[]{input3, out, false, false, false});
+    // Should not modify whitespace, so output same as input.
+    assertEquals(input3, result3);
+    
+    // Also include a bug check to ensure test fails on buggy version: 0xA0 in xhtml with Shift_JIS
+    Document.OutputSettings out2 = new Document.OutputSettings();
+    out2.escapeMode(Entities.EscapeMode.xhtml);
+    out2.charset(Charset.forName("Shift_JIS"));
+    String input4 = "\u00A0";
+    String result4 = callEscape.apply(new Object[]{input4, out2, false, false, false});
+    // Should not contain '?'
+    assertFalse(result4.contains("?"));
+    // Should contain &#xa0; or &nbsp;
+    assertTrue(result4.contains("&#xa0;") || result4.contains("&nbsp;"));
+}
+```
+
+We need to handle the reflection properly. Also, we need to import Classes.
+
+Now, we need to escape the strings for JSON. We'll do that manually by replacing double quotes and backslashes.
+
+We'll write the final output.
+
+Let's construct the JSON.
+
+We'll write the fixed code string first. We'll replace newlines with \n and double quotes with \". We'll also escape backslashes.
+
+We'll do it step by step mentally, but in the final answer we'll provide the JSON.
+
+Now, I'll produce the final answer.{
+  "fixed_code": ["    static void escape(StringBuilder accum, String string, Document.OutputSettings out,\n                       boolean inAttribute, boolean normaliseWhite, boolean stripLeadingWhite) {\n\n        boolean lastWasWhite = false;\n        boolean reachedNonWhite = false;\n        final EscapeMode escapeMode = out.escapeMode();\n        final CharsetEncoder encoder = out.encoder();\n        final CoreCharset coreCharset = CoreCharset.byName(encoder.charset().name());\n        final Map<Character, String> map = escapeMode.getMap();\n        final int length = string.length();\n\n        int codePoint;\n        for (int offset = 0; offset < length; offset += Character.charCount(codePoint)) {\n            codePoint = string.codePointAt(offset);\n\n            if (normaliseWhite) {\n                if (StringUtil.isWhitespace(codePoint)) {\n                    if ((stripLeadingWhite && !reachedNonWhite) || lastWasWhite)\n                        continue;\n                    accum.append(' ');\n                    lastWasWhite = true;\n                    continue;\n                } else {\n                    lastWasWhite = false;\n                    reachedNonWhite = true;\n                }\n            }\n            // surrogate pairs, split implementation for efficiency on single char common case (saves creating strings, char[]):\n            if (codePoint < Character.MIN_SUPPLEMENTARY_CODE_POINT) {\n                final char c = (char) codePoint;\n                // html specific and required escapes:\n                switch (c) {\n                    case '&':\n                        accum.append(\"&amp;\");\n                        break;\n                    case 0xA0:\n                        if (escapeMode != EscapeMode.xhtml) {\n                            accum.append(\"&nbsp;\");\n                        } else {\n                            if (canEncode(coreCharset, c, encoder))\n                                accum.append(c);\n                            else\n                                accum.append(\"&#x\").append(Integer.toHexString(codePoint)).append(';');\n                        }\n                        break;\n                    case '<':\n                        if (!inAttribute)\n                            accum.append(\"&lt;\");\n                        else\n                            accum.append(c);\n                        break;\n                    case '>':\n                        if (!inAttribute)\n                            accum.append(\"&gt;\");\n                        else\n                            accum.append(c);\n                        break;\n                    case '\"':\n                        if (inAttribute)\n                            accum.append(\"&quot;\");\n                        else\n                            accum.append(c);\n                        break;\n                    default:\n                        if (canEncode(coreCharset, c, encoder))\n                            accum.append(c);\n                        else if (map.containsKey(c))\n                            accum.append('&').append(map.get(c)).append(';');\n                        else\n                            accum.append(\"&#x\").append(Integer.toHexString(codePoint)).append(';');\n                }\n            } else {\n                final String c = new String(Character.toChars(codePoint));\n                if (encoder.canEncode(c)) // uses fallback encoder for simplicity\n                    accum.append(c);\n                else\n                    accum.append(\"&#x\").append(Integer.toHexString(codePoint)).append(';');\n            }\n        }\n    }"],
+  "additional_testcases": [
+    {
+      "path": "org/jsoup/nodes/DocumentTest.java",
+      "testcase": "@Test\npublic void testEscapeVarious() throws Exception {\n    // Bug case: 0xA0 in xhtml with Shift_JIS (non-encodable)\n    String input = \"<html><body>before&#xa0;after</body></html>\";\n    java.io.InputStream is = new java.io.ByteArrayInputStream(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));\n    org.jsoup.nodes.Document doc = org.jsoup.Jsoup.parse(is, null, \"http://example.com\");\n    doc.outputSettings().escapeMode(org.jsoup.nodes.Entities.EscapeMode.xhtml);\n    doc.outputSettings().charset(java.nio.charset.Charset.forName(\"Shift_JIS\"));\n    String output = doc.html();\n    org.junit.Assert.assertFalse(\"Should not contain '?'\", output.contains(\"?\"));\n    org.junit.Assert.assertTrue(\"Should contain &#xa0; or &nbsp;\", output.contains(\"&#xa0;\") || output.contains(\"&nbsp;\"));\n    \n    // Attribute escaping with base escape mode\n    org.jsoup.nodes.Document doc2 = org.jsoup.Jsoup.parse(\"<div></div>\");\n    doc2.outputSettings().escapeMode(org.jsoup.nodes.Entities.EscapeMode.base);\n    org.jsoup.nodes.Element div = doc2.select(\"div\").first();\n    div.attr(\"test\", \"a & b < c > d \\\" e\");\n    String attrHtml = div.attributes().get(\"test\").html();\n    org.junit.Assert.assertTrue(attrHtml.contains(\"&amp;\"));\n    org.junit.Assert.assertTrue(attrHtml.contains(\"<\"));\n    org.junit.Assert.assertTrue(attrHtml.contains(\">\"));\n    org.junit.Assert.assertTrue(attrHtml.contains(\"&quot;\"));\n    \n    // Text node with xhtml and UTF-8 (encodable non-breaking space)\n    org.jsoup.nodes.Document doc3 = org.jsoup.Jsoup.parse(\"<div></div>\");\n    doc3.outputSettings().escapeMode(org.jsoup.nodes.Entities.EscapeMode.xhtml);\n    doc3.outputSettings().charset(java.nio.charset.StandardCharsets.UTF_8);\n    org.jsoup.nodes.Element body3 = doc3.body();\n    body3.text(\"\\u00A0\");\n    String html3 = body3.html();\n    org.junit.Assert.assertEquals(\"\\u00A0\", html3);\n    \n    // Supplementary character with ASCII charset (cannot encode)\n    org.jsoup.nodes.Document doc4 = org.jsoup.Jsoup.parse(\"<div></div>\");\n    doc4.outputSettings().escapeMode(org.jsoup.nodes.Entities.EscapeMode.base);\n    doc4.outputSettings().charset(java.nio.charset.StandardCharsets.US_ASCII);\n    org.jsoup.nodes.Element body4 = doc4.body();\n    body4.text(\"\\uD83D\\uDE00\");\n    String html4 = body4.html();\n    org.junit.Assert.assertTrue(\"Should contain numeric entity for emoji\", html4.contains(\"&#x1f600;\") || html4.contains(\"&#x1F600;\"));\n    \n    // Extended escape mode with copyright symbol\n    org.jsoup.nodes.Document doc5 = org.jsoup.Jsoup.parse(\"<div></div>\");\n    doc5.outputSettings().escapeMode(org.jsoup.nodes.Entities.EscapeMode.extended);\n    doc5.outputSettings().charset(java.nio.charset.StandardCharsets.UTF_8);\n    org.jsoup.nodes.Element body5 = doc5.body();\n    body5.text(\"\\u00A9\");\n    String html5 = body5.html();\n    org.junit.Assert.assertFalse(html5.contains(\"?\"));\n}\n"
+    },
+    {
+      "path": "org/jsoup/nodes/DocumentTest.java",
+      "testcase": "@Test\npublic void testEscapeWhitespace() throws Exception {\n    // Use reflection to call the package-private escape method\n    Class<?> entitiesClass = Class.forName(\"org.jsoup.nodes.Entities\");\n    java.lang.reflect.Method escapeMethod = entitiesClass.getDeclaredMethod(\"escape\", StringBuilder.class, String.class,\n            org.jsoup.nodes.Document.OutputSettings.class, boolean.class, boolean.class, boolean.class);\n    escapeMethod.setAccessible(true);\n    \n    // Helper to call escape\n    java.util.function.Function<Object[], String> callEscape = params -> {\n        StringBuilder accum = new StringBuilder();\n        try {\n            escapeMethod.invoke(null, accum, (String)params[0], (org.jsoup.nodes.Document.OutputSettings)params[1],\n                    (boolean)params[2], (boolean)params[3], (boolean)params[4]);\n        } catch (Exception e) {\n            throw new RuntimeException(e);\n        }\n        return accum.toString();\n    };\n    \n    // Base settings with UTF-8\n    org.jsoup.nodes.Document.OutputSettings out = new org.jsoup.nodes.Document.OutputSettings();\n    out.escapeMode(org.jsoup.nodes.Entities.EscapeMode.base);\n    out.charset(java.nio.charset.StandardCharsets.UTF_8);\n    \n    // normaliseWhite = true, stripLeadingWhite = false\n    String input1 = \"  a  b  c  \";\n    String result1 = callEscape.apply(new Object[]{input1, out, false, true, false});\n    org.junit.Assert.assertEquals(\" a b c \", result1);\n    \n    // normaliseWhite = true, stripLeadingWhite = true\n    String input2 = \"  a  b  c  \";\n    String result2 = callEscape.apply(new Object[]{input2, out, false, true, true});\n    org.junit.Assert.assertEquals(\"a b c \", result2);\n    \n    // normaliseWhite = false\n    String input3 = \"  a  b  c  \";\n    String result3 = callEscape.apply(new Object[]{input3, out, false, false, false});\n    org.junit.Assert.assertEquals(input3, result3);\n    \n    // Bug check: 0xA0 in xhtml with Shift_JIS\n    org.jsoup.nodes.Document.OutputSettings out2 = new org.jsoup.nodes.Document.OutputSettings();\n    out2.escapeMode(org.jsoup.nodes.Entities.EscapeMode.xhtml);\n    out2.charset(java.nio.charset.Charset.forName(\"Shift_JIS\"));\n    String input4 = \"\\u00A0\";\n    String result4 = callEscape.apply(new Object[]{input4, out2, false, false, false});\n    org.junit.Assert.assertFalse(result4.contains(\"?\"));\n    org.junit.Assert.assertTrue(result4.contains(\"&#xa0;\") || result4.contains(\"&nbsp;\"));\n}\n"
+    }
+  ]
+}

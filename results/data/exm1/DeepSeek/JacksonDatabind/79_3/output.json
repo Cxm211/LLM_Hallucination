@@ -1,0 +1,245 @@
+We are given source code that includes three methods: `findObjectReferenceInfo`, `ObjectIdInfo` constructor, and `createContextual`. There is also a large list of test methods. The task is to identify which test methods actually trigger a bug and produce a fix.
+
+First, analyze the buggy code. The relevant code snippet:
+
+```java
+if (objectIdInfo == null) {
+    // no ObjectId override, but maybe ObjectIdRef?
+    if (oiw != null) {
+        objectIdInfo = intr.findObjectReferenceInfo(accessor,
+                new ObjectIdInfo(NAME_FOR_OBJECT_REF, null, null, null));
+        oiw = _objectIdWriter.withAlwaysAsId(objectIdInfo.getAlwaysAsId());
+    }
+}
+```
+
+The bug: when `objectIdInfo` is null (no @JsonIdentityInfo), but `oiw` (ObjectIdWriter) is not null, it calls `intr.findObjectReferenceInfo` with a newly constructed `ObjectIdInfo` that has `alwaysAsId = null` (because the constructor takes `boolean alwaysAsId` and the value is `null`, but the parameter is `boolean` so it will be autoboxed? Actually the constructor signature is `(PropertyName prop, Class<?> scope, Class<? extends ObjectIdGenerator<?>> gen, boolean alwaysAsId, Class<? extends ObjectIdResolver> resolver)`. The fourth argument is a primitive `boolean`, so passing `null` will cause a NullPointerException due to autounboxing. That is the bug: `new ObjectIdInfo(NAME_FOR_OBJECT_REF, null, null, null)` where the fourth argument is `null` but the constructor expects a `boolean`. This will throw a NullPointerException.
+
+Now examine the test methods. The bug manifests when an object has an `ObjectIdWriter` (i.e., @JsonIdentityInfo annotation on a property or class?) but no @JsonIdentityReference annotation? Actually the code is inside `createContextual` in `BeanSerializerBase`. It is called during serialization. The bug occurs when a property has an ObjectIdWriter (due to @JsonIdentityInfo) but the property's accessor has no @ObjectIdInfo (i.e., the field itself does not have @JsonIdentityInfo). In that case, `objectIdInfo` is null, but `oiw` is not null, and then it tries to create a new ObjectIdInfo with null for alwaysAsId, causing NPE.
+
+So which test methods trigger this? Let's look for tests that involve serialization of objects with ObjectId. Many tests in `TestObjectIdSerialization`, `TestObjectIdDeserialization`, etc. Also `AlwaysAsReferenceFirstTest` might trigger it. Also `testIssue1607` in `AlwaysAsReferenceFirstTest` might? Let's examine:
+
+- `testAlwaysAsId` in `TestObjectIdSerialization`: it creates `AlwaysContainer` and expects output `{"a":1,"b":2}`. `AlwaysContainer` likely has @JsonIdentityInfo with generator, and it has @JsonIdentityReference(alwaysAsId=true) on a property? Actually the test expects that always-as-id works. But the bug is in the case where there is no @JsonIdentityInfo on the property but an ObjectIdWriter exists? Let's look at the exact code path: In `createContextual`, the condition is `if (objectIdInfo == null)`. `objectIdInfo` comes from `intr.findObjectIdInfo(accessor)`. If the property has no @JsonIdentityInfo annotation, this returns null. Then if `oiw != null` (meaning the class itself has ObjectIdWriter because the class has @JsonIdentityInfo), it enters the buggy block. So the test must involve a class with @JsonIdentityInfo and a property that does not have that annotation but the property is used with something like @JsonIdentityReference? Actually the bug is in the "else" branch of the inner if? Wait the code structure: 
+
+```java
+ObjectIdInfo objectIdInfo = intr.findObjectIdInfo(accessor);
+if (objectIdInfo == null) {
+    // no ObjectId override, but maybe ObjectIdRef?
+    if (oiw != null) {
+        objectIdInfo = intr.findObjectReferenceInfo(accessor,
+                new ObjectIdInfo(NAME_FOR_OBJECT_REF, null, null, null));
+        oiw = _objectIdWriter.withAlwaysAsId(objectIdInfo.getAlwaysAsId());
+    }
+} else { ... }
+```
+
+So the bug happens when `objectIdInfo` is null but `oiw` is not null. That is, the property does not have @JsonIdentityInfo, but the class (via `_objectIdWriter`) has an ObjectIdWriter (because the class is annotated with @JsonIdentityInfo). For example, a class with @JsonIdentityInfo on the class, and a property that is a reference type that should use that ObjectId. But the property itself may have @JsonIdentityReference annotation. In that case, the code tries to get the reference info and creates a dummy ObjectIdInfo with null boolean. That causes NPE.
+
+Now which test triggers this? Look at `testIssue1255` in `AlwaysAsReferenceFirstTest`:
+
+```java
+Foo mo = new Foo();
+mo.bar1 = new Bar();
+mo.bar2 = mo.bar1;
+String json = MAPPER.writeValueAsString(mo);
+```
+
+Foo and Bar classes might have @JsonIdentityInfo. This test likely triggers the code path.
+
+Similarly `testIssue1607`:
+
+```java
+String json = MAPPER.writeValueAsString(new ReallyAlwaysContainer());
+assertEquals(aposToQuotes("{'alwaysClass':1,'alwaysProp':2}"), json);
+```
+
+This might also trigger.
+
+Also `testAlwaysAsId` in `TestObjectIdSerialization` uses `AlwaysContainer` which likely uses @JsonIdentityReference(alwaysAsId=true) and the class has @JsonIdentityInfo. That might also trigger.
+
+But we need to identify which tests actually fail due to this bug. Since the bug is a NullPointerException when autoboxing null to boolean, any test that hits that code path will fail with an NPE.
+
+Let's examine the class definitions used in tests. They are not provided, but we can infer. The bug is in `createContextual` which is part of `BeanSerializerBase`. It is called during serialization for bean serializers. So any serialization of a bean that has a @JsonIdentityInfo annotation (which sets `_objectIdWriter`) and a property that does not have its own @JsonIdentityInfo annotation will go into that branch. But the property must have an `@JsonIdentityReference`? Actually the `intr.findObjectReferenceInfo` is called only if `oirw != null`; it's independent of the property having @JsonIdentityReference. The code just calls `findObjectReferenceInfo` with a dummy ObjectIdInfo. So even without @JsonIdentityReference, it will try to create that dummy ObjectIdInfo and fail.
+
+So any serialization of a bean with ObjectId will hit this? Actually not necessarily; the condition `objectIdInfo == null` is true if the accessor (property) does not have @JsonIdentityInfo. But the class might have @JsonIdentityInfo. However, `createContextual` is called per property? It is a contextual serializer for a bean property? Actually `createContextual` is in `BeanSerializerBase` and is used when constructing serializer for a property? Let's see the context: The provided code is from `BeanSerializerBase.createContextual`. This method is used to modify the serializer based on property annotations. It is called for each property that is being serialized. The `accessor` is the property's member (field or getter). So if a property does not have @JsonIdentityInfo, but the bean class has @JsonIdentityInfo (which sets `_objectIdWriter` on the bean serializer originally), then when `createContextual` is called for a property, `oiw` is initially `_objectIdWriter` (from the class), but `objectIdInfo` from the property is null. So it enters the buggy block. So many tests that use ObjectId will hit this.
+
+From the test list, many tests in `TestObjectIdSerialization` and `TestObjectIdDeserialization` involve serialization with ObjectId. For example, `testSimpleSerializationClass`, `testSimpleSerializationProperty`, etc. Also `testAlwaysAsId` likely hits it.
+
+We need to identify which test methods actually trigger the bug. Since the bug is present in the code, any test that causes the `createContextual` to be called for a property on a bean with ObjectId will fail. But not all tests may serialize such beans. For example, `testColumnMetadata` in `TestObjectId` serializes `Wrapper` containing `ColumnMetadata`. `ColumnMetadata` might have ObjectId? Possibly.
+
+Given the large number of test methods, we need to select only those that are relevant. The bug is in the `createContextual` method, which is called during serialization of beans that have ObjectIdWriter. So we look for tests that involve serialization of objects with @JsonIdentityInfo. Many tests in the ObjectId packages.
+
+From the list: 
+- `testIssue1255` (AlwaysAsReferenceFirstTest)
+- `testIssue1607` (AlwaysAsReferenceFirstTest)
+- `testAlwaysAsId` (TestObjectIdSerialization)
+- `testAlwaysIdForTree` (TestObjectIdSerialization)
+- `testSimpleSerializationClass` (TestObjectIdSerialization)
+- `testSimpleSerializationProperty` (TestObjectIdSerialization)
+- `testSerializeWithOpaqueStringId` (TestObjectIdSerialization)
+- `testCustomPropertyForClass` (TestObjectIdSerialization)
+- `testCustomPropertyViaProperty` (TestObjectIdSerialization)
+- `testEmptyObjectWithId` (TestObjectIdSerialization)
+- `testObjectAndTypeId` (TestObjectId)
+- `testMixedRefsIssue188` (TestObjectId)
+- `testColumnMetadata` (TestObjectId)
+- `testPolymorphicRoundtrip` (TestObjectIdWithPolymorphic)
+- `testIssue811` (TestObjectIdWithPolymorphic)
+- `testFull825` (ObjectId825BTest)
+- `testDeserialize` (ObjectId825Test)
+- `testAtomicWithObjectId` (ReferentialWithObjectIdTest)
+- `testIssue877` (TestAbstractWithObjectId)
+- `testSimple` (WrapperObjectWithObjectIdTest) -- WrapperObjectWithObjectIdTest.testSimple serializes Company with computers, which likely have ObjectId.
+- `testStructJSOGRef`, `testPolymorphicRoundTrip`, `testAlterativePolymorphicRoundTrip669` (JSOGDeserialize622Test) involve ObjectId.
+- `testIssue263` (TestVisibleTypeId) might not involve ObjectId.
+- `testVisibleTypeId408` (TestVisibleTypeId) involves ExternalBeanWithId, which likely uses @JsonIdentityReference? Possibly.
+- `testVisibleWithProperty`, `testVisibleWithWrapperArray`, etc. in TestVisibleTypeId are about type id, not ObjectId.
+- `testWrapperWithGetter`, etc. in TestWithGenerics involve type id, not ObjectId.
+
+Also some tests in `TestObjectIdWithEquals` like `testSimpleEquals`, `testEqualObjectIdsExternal`.
+
+But we must be careful: the bug occurs only when the property does not have its own @JsonIdentityInfo but the class does. For example, if a class has @JsonIdentityInfo and all properties are themselves annotated with @JsonIdentityInfo, then `objectIdInfo` would not be null and the buggy branch is avoided. So the test must have a class with ObjectId but some property without ObjectId.
+
+Let's examine `testAlwaysAsId`: It uses `AlwaysContainer`. `AlwaysContainer` likely has a class-level @JsonIdentityInfo and properties that use @JsonIdentityReference. In that case, what is `objectIdInfo` for those properties? The property may not have @JsonIdentityInfo, so `objectIdInfo` is null, and `oiw` is set. So it enters the buggy branch. So it will throw NPE. This test is likely to fail.
+
+Similarly `testIssue1255`: Foo has bar1 and bar2, and bar1 and bar2 are of type Bar. Bar might not have its own @JsonIdentityInfo, but Foo might have? Actually the test is about AlwaysAsReference, so the objects have ObjectId and references. Could trigger.
+
+`testObjectAndTypeId`: BaseEntity, Bar, Foo. Again likely.
+
+Given the constraints, we need to output the list of test methods that trigger the bug. Since the bug is a NullPointerException that would cause any serialization attempt using ObjectId to fail if the property lacks @JsonIdentityInfo, many Tests will fail. However, we must only include those that actually execute the buggy code path. To be safe, we can include all tests that involve serialization of objects with ObjectId, especially those in `TestObjectIdSerialization`, `TestObjectId`, `AlwaysAsReferenceFirstTest`, `TestObjectIdWithPolymorphic`, `TestObjectIdWithEquals`, `ObjectId825Test`, `ReferentialWithObjectIdTest`, `TestAbstractWithObjectId`, `WrapperObjectWithObjectIdTest`, `JSOGDeserialize622Test`. But note that deserialization tests do not cause serialization of ObjectId (unless they also serialize). Some tests like testSimpleDeserializationClass only read, not write. So we need to focus on write tests.
+
+From the list, explicit serialization tests:
+- testIssue1255 (writes Foo)
+- testIssue1607 (writes ReallyAlwaysContainer)
+- testAlwaysAsId (writes AlwaysContainer)
+- testAlwaysIdForTree (writes TreeNode)
+- testSimpleSerializationClass (writes Identifiable)
+- testSimpleSerializationProperty (writes IdWrapper)
+- testSerializeWithOpaqueStringId (writes StringIdentifiable)
+- testCustomPropertyForClass (writes IdentifiableWithProp)
+- testCustomPropertyViaProperty (writes IdWrapperCustom)
+- testEmptyObjectWithId (writes EmptyObject)
+- testObjectAndTypeId (writes Bar)
+- testMixedRefsIssue188 (writes Company)
+- testColumnMetadata (writes Wrapper)
+- testPolymorphicRoundtrip (writes Impl)
+- testIssue811 (writes Process)
+- testFull825 (reads and writes? It uses mapper.readValue, not write, but later it writes? Actually testFull825 uses mapper.readValue to parse JSON, not write. So it doesn't trigger the bug.
+- testDeserialize (ObjectId825Test) writes a then reads? Actually `testDeserialize`: it writes a and then reads. So write triggers.
+- testAtomicWithObjectId (writes EmployeeList)
+- testIssue877 (writes ListWrapper)
+- testSimple (WrapperObjectWithObjectIdTest) writes company
+- testSimpleEquals (writes Foo with bars)
+- testEqualObjectIdsExternal (writes List<Element>)
+- testIssue263? Not relevant.
+- testVisibleTypeId408? It writes ExternalBeanWithId, which might have ObjectId? It has `bean` field and `_type`; probably not ObjectId.
+- testIssue709? Not.
+
+We need to output the test method paths. Format: "full_trigger_method_path1". The test methods are given as comments like "// com.fasterxml.jackson.databind.objectid.AlwaysAsReferenceFirstTest::testIssue1255". So we need to output "com.fasterxml.jackson.databind.objectid.AlwaysAsReferenceFirstTest.testIssue1255".
+
+Now, fix: The bug is in `findObjectReferenceInfo`? Actually the buggy line is in `createContextual` where it passes `null` as the boolean parameter. The fix is to pass `false` or something appropriate. But we must also consider the `findObjectReferenceInfo` method? `findObjectReferenceInfo` is provided but not buggy: it correctly handles the annotation. The problem is the caller. So we need to fix the call in `createContextual`.
+
+The line:
+```java
+objectIdInfo = intr.findObjectReferenceInfo(accessor,
+        new ObjectIdInfo(NAME_FOR_OBJECT_REF, null, null, null));
+```
+The fourth argument should be a boolean. Since `alwaysAsId` defaults to false, we should pass `false`. Alternatively, we could pass `false` to avoid NPE. That is the minimal fix.
+
+Thus, in the fixed code, we change `null` to `false` (or `Boolean.FALSE` but primitive). So the line becomes:
+```java
+objectIdInfo = intr.findObjectReferenceInfo(accessor,
+        new ObjectIdInfo(NAME_FOR_OBJECT_REF, null, null, false, null));
+```
+
+But wait: the constructor takes `boolean alwaysAsId`. So passing `false` is correct.
+
+We also need to output the full fixed code for all functions given. The input functions are: `findObjectReferenceInfo`, the `ObjectIdInfo` constructor, and `createContextual`. We must output all three in the same order, with the fix applied only to the buggy line. The other functions are fine.
+
+Now, we need to produce the JSON.
+
+First, list all test methods that trigger the bug. We'll select a subset that are likely to hit the code path. Since the bug is a widespread issue with any ObjectId serialization that doesn't have @JsonIdentityInfo on the property, many tests will fail. But we should include only those that are in the provided list and that actually serialize with ObjectId. Let's go through each test comment and decide.
+
+From the Provided test list (the large block of test methods), only a portion is explicitly listed. The actual test names appear in the comments. We need to output the full method paths. We'll list all tests that are in the test packages relevant to ObjectId.
+
+I'll extract all test method paths that involve serialization with ObjectId. Since the bug is in serialization, only tests that call `writeValueAsString` or `writeValue` on an object with ObjectId will trigger. So we include:
+
+1. com.fasterxml.jackson.databind.objectid.AlwaysAsReferenceFirstTest.testIssue1255
+2. com.fasterxml.jackson.databind.objectid.AlwaysAsReferenceFirstTest.testIssue1607
+3. com.fasterxml.jackson.databind.objectid.TestObjectId.testColumnMetadata
+4. com.fasterxml.jackson.databind.objectid.TestObjectId.testMixedRefsIssue188
+5. com.fasterxml.jackson.databind.objectid.TestObjectId.testObjectAndTypeId
+6. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testAlwaysAsId
+7. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testAlwaysIdForTree
+8. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testSimpleSerializationClass (but note: it writes and also reads? It writes, then reads, but the read might not trigger, but write does.)
+9. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testSimpleSerializationProperty
+10. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testSerializeWithOpaqueStringId
+11. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testCustomPropertyForClass
+12. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testCustomPropertyViaProperty
+13. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testEmptyObjectWithId
+14. com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testInvalidProp (this expects failure, but it will fail differently with NPE? Actually it expects JsonMappingException about can not find property. But with the bug, it may throw NPE instead, so it still triggers.)
+15. com.fasterxml.jackson.databind.objectid.TestObjectIdWithPolymorphic.testPolymorphicRoundtrip
+16. com.fasterxml.jackson.databind.objectid.TestObjectIdWithPolymorphic.testIssue811
+17. com.fasterxml.jackson.databind.objectid.TestObjectIdWithEquals.testSimpleEquals
+18. com.fasterxml.jackson.databind.objectid.TestObjectIdWithEquals.testEqualObjectIdsExternal
+19. com.fasterxml.jackson.databind.objectid.ObjectId825Test.testDeserialize
+20. com.fasterxml.jackson.databind.objectid.ReferentialWithObjectIdTest.testAtomicWithObjectId
+21. com.fasterxml.jackson.databind.objectid.TestAbstractWithObjectId.testIssue877
+22. com.fasterxml.jackson.databind.objectid.WrapperObjectWithObjectIdTest.testSimple
+23. com.fasterxml.jackson.databind.objectid.JSOGDeserialize622Test.testPolymorphicRoundTrip - This writes a JSOGWrapper, which has ObjectId? Possibly.
+24. com.fasterxml.jackson.databind.objectid.JSOGDeserialize622Test.testAlterativePolymorphicRoundTrip669 - Writes Outer with inner, likely ObjectId.
+
+Also `testIssue263` etc. don't involve ObjectId. So we include the above.
+
+But we also need to consider that not all of these tests may actually hit the buggy code path because the property may have its own @JsonIdentityInfo. For example, `testSimpleSerializationClass` uses `Identifiable` which likely has @JsonIdentityInfo on the class, and the property `next` of type Identifiable might inherit the same ObjectId, so `findObjectIdInfo` on the accessor may return the class-level ObjectIdInfo? Actually `intr.findObjectIdInfo(accessor)` looks for annotation on the property, not the class. So if the property does not have the annotation, it returns null. So it will enter the buggy branch. So likely all these tests trigger it.
+
+We should output all these. The problem says "Determine which testcase methods actually expose the bug." So we need to be accurate. Given the code, any test that serializes a bean with a class-level @JsonIdentityInfo will hit this, because the property accessor will not have the annotation. So we include all tests that serialize such beans.
+
+Now, let's produce the JSON.
+
+Note: The provided source includes the buggy code. The fixed functions must be exactly as input but with the fix applied. So we need to output the three functions as JSON strings.
+
+The three functions:
+1. `findObjectReferenceInfo`
+2. `ObjectIdInfo` constructor
+3. `createContextual`
+
+We'll output them in order.
+
+We'll fix only the line in `createContextual`: change `null` to `false`.
+
+Also ensure no other changes.
+
+Now, produce JSON.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.objectid.AlwaysAsReferenceFirstTest.testIssue1255",
+    "com.fasterxml.jackson.databind.objectid.AlwaysAsReferenceFirstTest.testIssue1607",
+    "com.fasterxml.jackson.databind.objectid.TestObjectId.testColumnMetadata",
+    "com.fasterxml.jackson.databind.objectid.TestObjectId.testMixedRefsIssue188",
+    "com.fasterxml.jackson.databind.objectid.TestObjectId.testObjectAndTypeId",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testAlwaysAsId",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testAlwaysIdForTree",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testSimpleSerializationClass",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testSimpleSerializationProperty",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testSerializeWithOpaqueStringId",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testCustomPropertyForClass",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testCustomPropertyViaProperty",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testEmptyObjectWithId",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdSerialization.testInvalidProp",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdWithPolymorphic.testPolymorphicRoundtrip",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdWithPolymorphic.testIssue811",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdWithEquals.testSimpleEquals",
+    "com.fasterxml.jackson.databind.objectid.TestObjectIdWithEquals.testEqualObjectIdsExternal",
+    "com.fasterxml.jackson.databind.objectid.ObjectId825Test.testDeserialize",
+    "com.fasterxml.jackson.databind.objectid.ReferentialWithObjectIdTest.testAtomicWithObjectId",
+    "com.fasterxml.jackson.databind.objectid.TestAbstractWithObjectId.testIssue877",
+    "com.fasterxml.jackson.databind.objectid.WrapperObjectWithObjectIdTest.testSimple",
+    "com.fasterxml.jackson.databind.objectid.JSOGDeserialize622Test.testPolymorphicRoundTrip",
+    "com.fasterxml.jackson.databind.objectid.JSOGDeserialize622Test.testAlterativePolymorphicRoundTrip669"
+  ],
+  "fixed_code": [
+    "    public ObjectIdInfo findObjectReferenceInfo(Annotated ann, ObjectIdInfo objectIdInfo) {\n        JsonIdentityReference ref = _findAnnotation(ann, JsonIdentityReference.class);\n        if (ref != null) {\n            objectIdInfo = objectIdInfo.withAlwaysAsId(ref.alwaysAsId());\n        }\n        return objectIdInfo;\n    }",
+    "    protected ObjectIdInfo(PropertyName prop, Class<?> scope, Class<? extends ObjectIdGenerator<?>> gen,\n            boolean alwaysAsId, Class<? extends ObjectIdResolver> resolver)\n    {\n        _propertyName = prop;\n        _scope = scope;\n        _generator = gen;\n        _alwaysAsId = alwaysAsId;\n        if (resolver == null) {\n            resolver = SimpleObjectIdResolver.class;\n        }\n        _resolver = resolver;\n    }",
+    "    public JsonSerializer<?> createContextual(SerializerProvider provider,\n            BeanProperty property)\n        throws JsonMappingException\n    {\n        final AnnotationIntrospector intr = provider.getAnnotationIntrospector();\n        final AnnotatedMember accessor = (property == null || intr == null)\n                ? null : property.getMember();\n        final SerializationConfig config = provider.getConfig();\n        \n        // Let's start with one big transmutation: Enums that are annotated\n        // to serialize as Objects may want to revert\n        JsonFormat.Shape shape = null;\n        if (accessor != null) {\n            JsonFormat.Value format = intr.findFormat((Annotated) accessor);\n\n            if (format != null) {\n                shape = format.getShape();\n                // or, alternatively, asked to revert \"back to\" other representations...\n                if (shape != _serializationShape) {\n                    if (_handledType.isEnum()) {\n                        switch (shape) {\n                        case STRING:\n                        case NUMBER:\n                        case NUMBER_INT:\n                            // 12-Oct-2014, tatu: May need to introspect full annotations... but\n                            //   for now, just do class ones\n                            BeanDescription desc = config.introspectClassAnnotations(_handledType);\n                            JsonSerializer<?> ser = EnumSerializer.construct(_handledType,\n                                    provider.getConfig(), desc, format);\n                            return provider.handlePrimaryContextualization(ser, property);\n                        }\n                    }\n                }\n            }\n        }\n\n        ObjectIdWriter oiw = _objectIdWriter;\n        String[] ignorals = null;\n        Object newFilterId = null;\n        \n        // Then we may have an override for Object Id\n        if (accessor != null) {\n            ignorals = intr.findPropertiesToIgnore(accessor, true);\n            ObjectIdInfo objectIdInfo = intr.findObjectIdInfo(accessor);\n            if (objectIdInfo == null) {\n                // no ObjectId override, but maybe ObjectIdRef?\n                if (oiw != null) {\n                    objectIdInfo = intr.findObjectReferenceInfo(accessor,\n                            new ObjectIdInfo(NAME_FOR_OBJECT_REF, null, null, false, null));\n                    oiw = _objectIdWriter.withAlwaysAsId(objectIdInfo.getAlwaysAsId());\n                }\n            } else {\n                // Ugh: mostly copied from BeanDeserializerBase: but can't easily change it\n                // to be able to move to SerializerProvider (where it really belongs)\n                \n                // 2.1: allow modifications by \"id ref\" annotations as well:\n                objectIdInfo = intr.findObjectReferenceInfo(accessor, objectIdInfo);\n                ObjectIdGenerator<?> gen;\n                Class<?> implClass = objectIdInfo.getGeneratorType();\n                JavaType type = provider.constructType(implClass);\n                JavaType idType = provider.getTypeFactory().findTypeParameters(type, ObjectIdGenerator.class)[0];\n                // Property-based generator is trickier\n                if (implClass == ObjectIdGenerators.PropertyGenerator.class) { // most special one, needs extra work\n                    String propName = objectIdInfo.getPropertyName().getSimpleName();\n                    BeanPropertyWriter idProp = null;\n\n                    for (int i = 0, len = _props.length ;; ++i) {\n                        if (i == len) {\n                            throw new IllegalArgumentException(\"Invalid Object Id definition for \"+_handledType.getName()\n                                    +\": can not find property with name '\"+propName+\"'\");\n                        }\n                        BeanPropertyWriter prop = _props[i];\n                        if (propName.equals(prop.getName())) {\n                            idProp = prop;\n                            /* Let's force it to be the first property to output\n                             * (although it may still get rearranged etc)\n                             */\n                            if (i > 0) { // note: must shuffle both regular properties and filtered\n                                System.arraycopy(_props, 0, _props, 1, i);\n                                _props[0] = idProp;\n                                if (_filteredProps != null) {\n                                    BeanPropertyWriter fp = _filteredProps[i];\n                                    System.arraycopy(_filteredProps, 0, _filteredProps, 1, i);\n                                    _filteredProps[0] = fp;\n                                }\n                            }\n                            break;\n                        }\n                    }\n                    idType = idProp.getType();\n                    gen = new PropertyBasedObjectIdGenerator(objectIdInfo, idProp);\n                    oiw = ObjectIdWriter.construct(idType, (PropertyName) null, gen, objectIdInfo.getAlwaysAsId());\n                } else { // other types need to be simpler\n                    gen = provider.objectIdGeneratorInstance(accessor, objectIdInfo);\n                    oiw = ObjectIdWriter.construct(idType, objectIdInfo.getPropertyName(), gen,\n                            objectIdInfo.getAlwaysAsId());\n                }\n            }\n            \n            // Or change Filter Id in use?\n            Object filterId = intr.findFilterId(accessor);\n            if (filterId != null) {\n                // but only consider case of adding a new filter id (no removal via annotation)\n                if (_propertyFilterId == null || !filterId.equals(_propertyFilterId)) {\n                    newFilterId = filterId;\n                }\n            }\n        }\n        // either way, need to resolve serializer:\n        BeanSerializerBase contextual = this;\n        if (oiw != null) {\n            JsonSerializer<?> ser = provider.findValueSerializer(oiw.idType, property);\n            oiw = oiw.withSerializer(ser);\n            if (oiw != _objectIdWriter) {\n                contextual = contextual.withObjectIdWriter(oiw);\n            }\n        }\n        // And possibly add more properties to ignore\n        if (ignorals != null && ignorals.length != 0) {\n            contextual = contextual.withIgnorals(ignorals);\n        }\n        if (newFilterId != null) {\n            contextual = contextual.withFilterId(newFilterId);\n        }\n        if (shape == null) {\n            shape = _serializationShape;\n        }\n        if (shape == JsonFormat.Shape.ARRAY) {\n            return contextual.asArraySerializer();\n        }\n        return contextual;\n    }"
+  ]
+}

@@ -1,0 +1,1 @@
+    return super.hasProperty(name) || "prototype".equals(name);

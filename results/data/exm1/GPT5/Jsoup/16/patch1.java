@@ -1,0 +1,13 @@
+void outerHtmlHead(StringBuilder accum, int depth, Document.OutputSettings out) {
+        accum.append("<!DOCTYPE ");
+        String name = attr("name");
+        if (!StringUtil.isBlank(name))
+            accum.append(name);
+        else
+            accum.append("html");
+        if (!StringUtil.isBlank(attr("publicId")))
+            accum.append(" PUBLIC \"").append(attr("publicId")).append("\"");
+        if (!StringUtil.isBlank(attr("systemId")))
+            accum.append(" \"").append(attr("systemId")).append("\"");
+        accum.append('>');
+    }

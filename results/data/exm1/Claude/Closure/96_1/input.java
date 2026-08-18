@@ -1,0 +1,3027 @@
+// buggy code
+  private void visitParameterList(NodeTraversal t, Node call,
+      FunctionType functionType) {
+    Iterator<Node> arguments = call.children().iterator();
+    arguments.next(); // skip the function name
+
+    Iterator<Node> parameters = functionType.getParameters().iterator();
+    int ordinal = 0;
+    Node parameter = null;
+    Node argument = null;
+    while (arguments.hasNext() &&
+           parameters.hasNext()) {
+      // If there are no parameters left in the list, then the while loop
+      // above implies that this must be a var_args function.
+        parameter = parameters.next();
+      argument = arguments.next();
+      ordinal++;
+
+      validator.expectArgumentMatchesParameter(t, argument,
+          getJSType(argument), getJSType(parameter), call, ordinal);
+    }
+
+    int numArgs = call.getChildCount() - 1;
+    int minArgs = functionType.getMinArguments();
+    int maxArgs = functionType.getMaxArguments();
+    if (minArgs > numArgs || maxArgs < numArgs) {
+      report(t, call, WRONG_ARGUMENT_COUNT,
+              validator.getReadableJSTypeName(call.getFirstChild(), false),
+              String.valueOf(numArgs), String.valueOf(minArgs),
+              maxArgs != Integer.MAX_VALUE ?
+              " and no more than " + maxArgs + " argument(s)" : "");
+    }
+  }
+
+// relevant test
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testIgnoresNativeObject
+  public void testIgnoresNativeObject() {
+    String externs = " function String(val) {}";
+    String js = "var str = new String('4');";
+    test(externs, js, js, null, null);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testNewNodesWithMoreThanOneFile
+  public void testNewNodesWithMoreThanOneFile() {
+    
+    String[] js = new String[] {
+        "var goog = {};" +
+        " function Bar() {}" +
+        "goog.require('Bar');",
+        "var bar = new Bar();"};
+    String warning = "'Bar' used but not goog.require'd";
+    test(js, js, null, MISSING_REQUIRE_WARNING, warning);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testPassWithoutWarningsAndMultipleFiles
+  public void testPassWithoutWarningsAndMultipleFiles() {
+    String[] js = new String[] {
+        "var goog = {};" +
+        "goog.require('Foo'); var foo = new Foo();",
+        "goog.require('Bar'); var bar = new Bar();"};
+    testSame(js);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testFailWithWarningsAndMultipleFiles
+  public void testFailWithWarningsAndMultipleFiles() {
+    
+    String[] js = new String[] {
+        "var goog = {};" +
+        " function Bar() {}" +
+        "goog.require('Bar');",
+        "var bar = new Bar();"};
+    String warning = "'Bar' used but not goog.require'd";
+    test(js, js, null, MISSING_REQUIRE_WARNING, warning);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testCanStillCallNumberWithoutNewOperator
+  public void testCanStillCallNumberWithoutNewOperator() {
+    String externs = " function Number(opt_value) {}";
+    String js = "var n = Number('42');";
+    test(externs, js, js, null, null);
+    js = "var n = Number();";
+    test(externs, js, js, null, null);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testRequiresAreCaughtBeforeProcessed
+  public void testRequiresAreCaughtBeforeProcessed() {
+    String js = "var foo = {}; var bar = new foo.bar.goo();";
+    JSSourceFile input = JSSourceFile.fromCode("foo.js", js);
+    Compiler compiler = new Compiler();
+    CompilerOptions opts = new CompilerOptions();
+    opts.checkRequires = CheckLevel.WARNING;
+    opts.closurePass = true;
+
+    Result result = compiler.compile(new JSSourceFile[] {},
+        new JSSourceFile[] {input}, opts);
+    JSError[] warnings = result.warnings;
+    assertNotNull(warnings);
+    assertTrue(warnings.length > 0);
+
+    String expectation = "'foo.bar.goo' used but not goog.require'd";
+
+    for (JSError warning : warnings) {
+      if (expectation.equals(warning.description)) {
+        return;
+      }
+    }
+
+    fail("Could not find the following warning:" + expectation);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testNoWarningsForThisConstructor
+  public void testNoWarningsForThisConstructor() {
+    String js =
+      "var goog = {};" +
+      "goog.Foo = function() {};" +
+      "goog.Foo.bar = function() {" +
+      "  return new this.constructor; " +
+      "};";
+    testSame(js);
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testBug2062487
+  public void testBug2062487() {
+    testSame(
+      "var goog = {};" +
+      "goog.Foo = function() {" +
+      "   this.x_ = function() {};" +
+      "  this.y_ = new this.x_();" +
+      "};");
+  }
+
+// com.google.javascript.jscomp.CheckRequiresForConstructorsTest::testIgnoreDuplicateWarningsForSingleClasses
+  public void testIgnoreDuplicateWarningsForSingleClasses(){
+    
+    String[] js = new String[]{
+      "var goog = {};" +
+      "goog.Foo = function() {};" +
+      "goog.Foo.bar = function(){" +
+      "  var first = new goog.Forgot();" +
+      "  var second = new goog.Forgot();" +
+      "};"};
+    String warning = "'goog.Forgot' used but not goog.require'd";
+    test(js, js, null, MISSING_REQUIRE_WARNING, warning);
+  }
+
+// com.google.javascript.jscomp.CheckSideEffectsTest::test
+  public void test(String js, DiagnosticType error) {
+    test(js, error == null ? js : null, error);
+  }
+
+// com.google.javascript.jscomp.CheckSideEffectsTest::testUselessCode
+  public void testUselessCode() {
+    test("function f(x) { if(x) return; }", ok);
+    test("function f(x) { if(x); }", e);
+
+    test("if(x) x = y;", ok);
+    test("if(x) x == bar();", e);
+
+    test("x = 3;", ok);
+    test("x == 3;", e);
+
+    test("var x = 'test'", ok);
+    test("var x = 'test'\n'str'", e);
+
+    test("", ok);
+    test("foo();;;;bar();;;;", ok);
+
+    test("var a, b; a = 5, b = 6", ok);
+    test("var a, b; a = 5, b == 6", e);
+    test("var a, b; a = (5, 6)", e);      
+    test("var a, b; a = (b = 7, 6)", ok);
+    test("function x(){}\nfunction f(a, b){}\nf(1,(x(), 2));", ok);
+    test("function x(){}\nfunction f(a, b){}\nf(1,(2, 3));", e);
+  }
+
+// com.google.javascript.jscomp.CheckSideEffectsTest::testUselessCodeInFor
+  public void testUselessCodeInFor() {
+    test("for(var x = 0; x < 100; x++) { foo(x) }", ok);
+    test("for(; true; ) { bar() }", ok);
+    test("for(foo(); true; foo()) { bar() }", ok);
+    test("for(void 0; true; foo()) { bar() }", e);
+    test("for(foo(); true; void 0) { bar() }", e);
+
+    test("for(foo in bar) { foo() }", ok);
+    test("for (i = 0; el = el.previousSibling; i++) {}", ok);
+    test("for (i = 0; el = el.previousSibling; i++);", ok);
+  }
+
+// com.google.javascript.jscomp.CheckSideEffectsTest::testTypeAnnotations
+  public void testTypeAnnotations() {
+    test("x;", e);
+    test("a.b.c.d;", e);
+    test(" a.b.c.d;", ok);
+    test("if (true) {  a.b.c.d; }", ok);
+
+    test("function A() { this.foo; }", e);
+    test("function A() {  this.foo; }", ok);
+  }
+
+// com.google.javascript.jscomp.CheckSideEffectsTest::testJSDocComments
+  public void testJSDocComments() {
+    test("function A() {  this.foo; }", ok);
+    test("function A() {  this.foo; }", e);
+  }
+
+// com.google.javascript.jscomp.CheckSideEffectsTest::testIssue80
+  public void testIssue80() {
+    test("(0, eval)('alert');", ok);
+    test("(0, foo)('alert');", e);
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testCorrectSimple
+  public void testCorrectSimple() {
+    testSame("var x");
+    testSame("var x = 1");
+    testSame("var x = 1; x = 2;");
+    testSame("if (x) { var x = 1 }");
+    testSame("if (x) { var x = 1 } else { var y = 2 }");
+    testSame("while(x) {}");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testIncorrectSimple
+  public void testIncorrectSimple() {
+    assertUnreachable("function f() { return; x=1; }");
+    assertUnreachable("function f() { return; x=1; x=1; }");
+    assertUnreachable("function f() { return; var x = 1; }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testCorrectIfReturns
+  public void testCorrectIfReturns() {
+    testSame("function f() { if (x) { return } }");
+    testSame("function f() { if (x) { return } return }");
+    testSame("function f() { if (x) { if (y) { return } } else { return }}");
+    testSame("function f()" +
+        "{ if (x) { if (y) { return } return } else { return }}");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testInCorrectIfReturns
+  public void testInCorrectIfReturns() {
+    assertUnreachable(
+        "function f() { if (x) { return } else { return } return }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testCorrectSwitchReturn
+  public void testCorrectSwitchReturn() {
+    testSame("function f() { switch(x) { default: return; case 1: x++; }}");
+    testSame("function f() {" +
+        "switch(x) { default: return; case 1: x++; } return }");
+    testSame("function f() {" +
+        "switch(x) { default: return; case 1: return; }}");
+    testSame("function f() {" +
+        "switch(x) { case 1: return; } return }");
+    testSame("function f() {" +
+        "switch(x) { case 1: case 2: return; } return }");
+    testSame("function f() {" +
+        "switch(x) { case 1: return; case 2: return; } return }");
+    testSame("function f() {" +
+        "switch(x) { case 1 : return; case 2: return; } return }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testInCorrectSwitchReturn
+  public void testInCorrectSwitchReturn() {
+    assertUnreachable("function f() {" +
+        "switch(x) { default: return; case 1: return; } return }");
+    assertUnreachable("function f() {" +
+        "switch(x) { default: return; return; case 1: return; } }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testCorrectLoopBreaksAndContinues
+  public void testCorrectLoopBreaksAndContinues() {
+    testSame("while(1) { foo(); break }");
+    testSame("while(1) { foo(); continue }");
+    testSame("for(;;) { foo(); break }");
+    testSame("for(;;) { foo(); continue }");
+    testSame("for(;;) { if (x) { break } }");
+    testSame("for(;;) { if (x) { continue } }");
+    testSame("do { foo(); continue} while(1)");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testInCorrectLoopBreaksAndContinues
+  public void testInCorrectLoopBreaksAndContinues() {
+    assertUnreachable("while(1) { foo(); break; bar()}");
+    assertUnreachable("while(1) { foo(); continue; bar() }");
+    assertUnreachable("for(;;) { foo(); break; bar() }");
+    assertUnreachable("for(;;) { foo(); continue; bar() }");
+    assertUnreachable("for(;;) { if (x) { break; bar() } }");
+    assertUnreachable("for(;;) { if (x) { continue; bar() } }");
+    assertUnreachable("do { foo(); continue; bar()} while(1)");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testUncheckedWhileInDo
+  public void testUncheckedWhileInDo() {
+    assertUnreachable("do { foo(); break} while(1)");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testUncheckedConditionInFor
+  public void testUncheckedConditionInFor() {
+    assertUnreachable("for(var x = 0; x < 100; x++) { break };");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testFunctionDeclaration
+  public void testFunctionDeclaration() {
+    
+    testSame("function f() { return; function ff() { }}");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testVarDeclaration
+  public void testVarDeclaration() {
+    assertUnreachable("function f() { return; var x = 1 }");
+    
+    assertUnreachable("function f() { return; var x }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testReachableTryCatchFinally
+  public void testReachableTryCatchFinally() {
+    testSame("try { } finally {  }");
+    testSame("try { foo(); } finally bar(); ");
+    testSame("try { foo() } finally { bar() }");
+    testSame("try { foo(); } catch (e) {e()} finally bar(); ");
+    testSame("try { foo() } catch (e) {e()} finally { bar() }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testUnreachableCatch
+  public void testUnreachableCatch() {
+    assertUnreachable("try { var x = 0 } catch (e) { }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testSpuriousBreak
+  public void testSpuriousBreak() {
+    testSame("switch (x) { default: throw x; break; }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testInstanceOfThrowsException
+  public void testInstanceOfThrowsException() {
+    testSame("function f() {try { if (value instanceof type) return true; } " +
+             "catch (e) { }}");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testFalseCondition
+  public void testFalseCondition() {
+    assertUnreachable("if(false) { }");
+    assertUnreachable("if(0) { }");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testUnreachableLoop
+  public void testUnreachableLoop() {
+    assertUnreachable("while(false) {}");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testInfiniteLoop
+  public void testInfiniteLoop() {
+    testSame("while (true) { foo(); break; }");
+
+    
+    assertUnreachable("while(true) {} foo()");
+  }
+
+// com.google.javascript.jscomp.CheckUnreachableCodeTest::testSuppression
+  public void testSuppression() {
+    assertUnreachable("if(false) { }");
+
+    testSame(
+        "\n" +
+        "if(false) { }");
+
+    testSame(
+        "\n" +
+        "function f() { if(false) { } }");
+
+    testSame(
+        "\n" +
+        "function f() { if(false) { } }");
+
+    assertUnreachable(
+        "\n" +
+        "function f() { if(false) { } }\n" +
+        "function g() { if(false) { } }\n");
+
+    testSame(
+        "\n" +
+        "function f() {\n" +
+        "  function g() { if(false) { } }\n" +
+        "  if(false) { } }\n");
+
+    assertUnreachable(
+        "function f() {\n" +
+        "  \n" +
+        "  function g() { if(false) { } }\n" +
+        "  if(false) { } }\n");
+
+    testSame(
+        "function f() {\n" +
+        "  \n" +
+        "  function g() { if(false) { } }\n" +
+        "}\n");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testRemoveAbstract
+  public void testRemoveAbstract() {
+    test("function Foo() {}; Foo.prototype.doSomething = goog.abstractMethod;",
+        "function Foo() {};");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testRemoveMultiplySetAbstract
+  public void testRemoveMultiplySetAbstract() {
+    test("function Foo() {}; Foo.prototype.doSomething = " +
+        "Foo.prototype.doSomethingElse = Foo.prototype.oneMore = " +
+        "goog.abstractMethod;",
+        "function Foo() {};");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testDoNotRemoveNormal
+  public void testDoNotRemoveNormal() {
+    testSame("function Foo() {}; Foo.prototype.doSomething = function() {};");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testDoNotRemoveOverride
+  public void testDoNotRemoveOverride() {
+    test("function Foo() {}; Foo.prototype.doSomething = goog.abstractMethod;" +
+         "function Bar() {}; goog.inherits(Bar, Foo);" +
+         "Bar.prototype.doSomething = function() {}",
+         "function Foo() {}; function Bar() {}; goog.inherits(Bar, Foo);" +
+         "Bar.prototype.doSomething = function() {}");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testDoNotRemoveNonQualifiedName
+  public void testDoNotRemoveNonQualifiedName() {
+    testSame("document.getElementById('x').y = goog.abstractMethod;");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testStopRemovalAtNonQualifiedName
+  public void testStopRemovalAtNonQualifiedName() {
+    test("function Foo() {}; function Bar() {};" +
+         "Foo.prototype.x = document.getElementById('x').y = Bar.prototype.x" +
+         " = goog.abstractMethod;",
+         "function Foo() {}; function Bar() {};" +
+         "Foo.prototype.x = document.getElementById('x').y = " +
+         "goog.abstractMethod;");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testAssertionRemoval1
+  public void testAssertionRemoval1() {
+    test("var x = goog.asserts.assert(y(), 'message');", "var x = y();");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testAssertionRemoval2
+  public void testAssertionRemoval2() {
+    test("goog.asserts.assert(y(), 'message');", "");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testAssertionRemoval3
+  public void testAssertionRemoval3() {
+    test("goog.asserts.assert();", "");
+  }
+
+// com.google.javascript.jscomp.ClosureCodeRemovalTest::testAssertionRemoval4
+  public void testAssertionRemoval4() {
+    test("var x = goog.asserts.assert();", "var x = void 0;");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testVarAndOptionalParams
+  public void testVarAndOptionalParams() {
+    Node args = new Node(Token.LP,
+        Node.newString(Token.NAME, "a"),
+        Node.newString(Token.NAME, "b"));
+    Node optArgs = new Node(Token.LP,
+        Node.newString(Token.NAME, "opt_a"),
+        Node.newString(Token.NAME, "opt_b"));
+
+    assertFalse(conv.isVarArgsParameter(args.getFirstChild()));
+    assertFalse(conv.isVarArgsParameter(args.getLastChild()));
+    assertFalse(conv.isVarArgsParameter(optArgs.getFirstChild()));
+    assertFalse(conv.isVarArgsParameter(optArgs.getLastChild()));
+
+    assertFalse(conv.isOptionalParameter(args.getFirstChild()));
+    assertFalse(conv.isOptionalParameter(args.getLastChild()));
+    assertFalse(conv.isOptionalParameter(optArgs.getFirstChild()));
+    assertFalse(conv.isOptionalParameter(optArgs.getLastChild()));
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInlineName
+  public void testInlineName() {
+    assertFalse(conv.isConstant("a"));
+    assertFalse(conv.isConstant("XYZ123_"));
+    assertFalse(conv.isConstant("ABC"));
+    assertFalse(conv.isConstant("ABCdef"));
+    assertFalse(conv.isConstant("aBC"));
+    assertFalse(conv.isConstant("A"));
+    assertFalse(conv.isConstant("_XYZ123"));
+    assertFalse(conv.isConstant("a$b$XYZ123_"));
+    assertFalse(conv.isConstant("a$b$ABC_DEF"));
+    assertFalse(conv.isConstant("a$b$A"));
+    assertFalse(conv.isConstant("a$b$a"));
+    assertFalse(conv.isConstant("a$b$ABCdef"));
+    assertFalse(conv.isConstant("a$b$aBC"));
+    assertFalse(conv.isConstant("a$b$"));
+    assertFalse(conv.isConstant("$"));
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testExportedName
+  public void testExportedName() {
+    assertFalse(conv.isExported("_a"));
+    assertFalse(conv.isExported("_a_"));
+    assertFalse(conv.isExported("a"));
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testPrivateName
+  public void testPrivateName() {
+    assertFalse(conv.isPrivate("a_"));
+    assertFalse(conv.isPrivate("a"));
+    assertFalse(conv.isPrivate("_a_"));
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testEnumKey
+  public void testEnumKey() {
+    assertTrue(conv.isValidEnumKey("A"));
+    assertTrue(conv.isValidEnumKey("123"));
+    assertTrue(conv.isValidEnumKey("FOO_BAR"));
+
+    assertTrue(conv.isValidEnumKey("a"));
+    assertTrue(conv.isValidEnumKey("someKeyInCamelCase"));
+    assertTrue(conv.isValidEnumKey("_FOO_BAR"));
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection1
+  public void testInheritanceDetection1() {
+    assertNotClassDefining("goog.foo(A, B);");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection2
+  public void testInheritanceDetection2() {
+    assertDefinesClasses("goog.inherits(A, B);", "A", "B");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection3
+  public void testInheritanceDetection3() {
+    assertDefinesClasses("A.inherits(B);", "A", "B");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection4
+  public void testInheritanceDetection4() {
+    assertDefinesClasses("goog.inherits(goog.A, goog.B);", "goog.A", "goog.B");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection5
+  public void testInheritanceDetection5() {
+    assertDefinesClasses("goog.A.inherits(goog.B);", "goog.A", "goog.B");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection6
+  public void testInheritanceDetection6() {
+    assertNotClassDefining("A.inherits(this.B);");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection7
+  public void testInheritanceDetection7() {
+    assertNotClassDefining("this.A.inherits(B);");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection8
+  public void testInheritanceDetection8() {
+    assertNotClassDefining("goog.inherits(A, B, C);");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection9
+  public void testInheritanceDetection9() {
+    assertDefinesClasses("A.mixin(B.prototype);",
+        "A", "B");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetection10
+  public void testInheritanceDetection10() {
+    assertDefinesClasses("goog.mixin(A.prototype, B.prototype);",
+        "A", "B");
+  }
+
+// com.google.javascript.jscomp.ClosureCodingConventionTest::testInheritanceDetectionPostCollapseProperties
+  public void testInheritanceDetectionPostCollapseProperties() {
+    assertDefinesClasses("goog$inherits(A, B);", "A", "B");
+    assertNotClassDefining("goog$inherits(A);");
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsDef1
+  public void testGoogIsDef1() throws Exception {
+    testClosureFunction("goog.isDef",
+        createOptionalType(NUMBER_TYPE),
+        NUMBER_TYPE,
+        createOptionalType(NUMBER_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsDef2
+  public void testGoogIsDef2() throws Exception {
+    testClosureFunction("goog.isDef",
+        createNullableType(NUMBER_TYPE),
+        createNullableType(NUMBER_TYPE),
+        createNullableType(NUMBER_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsNull1
+  public void testGoogIsNull1() throws Exception {
+    testClosureFunction("goog.isNull",
+        createOptionalType(NUMBER_TYPE),
+        NULL_TYPE,
+        createOptionalType(NUMBER_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsNull2
+  public void testGoogIsNull2() throws Exception {
+    testClosureFunction("goog.isNull",
+        createNullableType(NUMBER_TYPE),
+        NULL_TYPE,
+        NUMBER_TYPE);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsDefAndNotNull1
+  public void testGoogIsDefAndNotNull1() throws Exception {
+    testClosureFunction("goog.isDefAndNotNull",
+        createOptionalType(NUMBER_TYPE),
+        NUMBER_TYPE,
+        createOptionalType(NUMBER_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsDefAndNotNull2
+  public void testGoogIsDefAndNotNull2() throws Exception {
+    testClosureFunction("goog.isDefAndNotNull",
+        createNullableType(NUMBER_TYPE),
+        NUMBER_TYPE,
+        createNullableType(NUMBER_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsDefAndNotNull3
+  public void testGoogIsDefAndNotNull3() throws Exception {
+    testClosureFunction("goog.isDefAndNotNull",
+        createOptionalType(createNullableType(NUMBER_TYPE)),
+        NUMBER_TYPE,
+        createOptionalType(createNullableType(NUMBER_TYPE)));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsString1
+  public void testGoogIsString1() throws Exception {
+    testClosureFunction("goog.isString",
+        createNullableType(STRING_TYPE),
+        STRING_TYPE,
+        NULL_TYPE);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsString2
+  public void testGoogIsString2() throws Exception {
+    testClosureFunction("goog.isString",
+        createNullableType(NUMBER_TYPE),
+        createNullableType(NUMBER_TYPE),
+        createNullableType(NUMBER_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsBoolean1
+  public void testGoogIsBoolean1() throws Exception {
+    testClosureFunction("goog.isBoolean",
+        createNullableType(BOOLEAN_TYPE),
+        BOOLEAN_TYPE,
+        NULL_TYPE);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsBoolean2
+  public void testGoogIsBoolean2() throws Exception {
+    testClosureFunction("goog.isBoolean",
+        createUnionType(BOOLEAN_TYPE, STRING_TYPE, NO_OBJECT_TYPE),
+        BOOLEAN_TYPE,
+        createUnionType(STRING_TYPE, NO_OBJECT_TYPE));
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsNumber
+  public void testGoogIsNumber() throws Exception {
+    testClosureFunction("goog.isNumber",
+        createNullableType(NUMBER_TYPE),
+        NUMBER_TYPE,
+        NULL_TYPE);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsFunction
+  public void testGoogIsFunction() throws Exception {
+    testClosureFunction("goog.isFunction",
+        createNullableType(OBJECT_FUNCTION_TYPE),
+        OBJECT_FUNCTION_TYPE,
+        NULL_TYPE);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsArray
+  public void testGoogIsArray() throws Exception {
+    testClosureFunction("goog.isArray",
+        OBJECT_TYPE,
+        ARRAY_TYPE,
+        OBJECT_TYPE);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsArrayOnNull
+  public void testGoogIsArrayOnNull() throws Exception {
+    testClosureFunction("goog.isArray",
+        null,
+        ARRAY_TYPE,
+        null);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsFunctionOnNull
+  public void testGoogIsFunctionOnNull() throws Exception {
+    testClosureFunction("goog.isFunction",
+        null,
+        U2U_CONSTRUCTOR_TYPE,
+        null);
+  }
+
+// com.google.javascript.jscomp.ClosureReverseAbstractInterpreterTest::testGoogIsObjectOnNull
+  public void testGoogIsObjectOnNull() throws Exception {
+    testClosureFunction("goog.isObject",
+        null,
+        OBJECT_TYPE,
+        null);
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testSimple
+  public void testSimple() {
+    inFunction("var x; var y; x=1; x; y=1; y; return y",
+               "var x;        x=1; x; x=1; x; return x");
+
+    inFunction("var x,y; x=1; x; y=1; y",
+               "var x  ; x=1; x; x=1; x");
+
+    inFunction("var x,y; x=1; y=2; y; x");
+
+    inFunction("y=0; var x, y; y; x=0; x",
+               "y=0; var y   ; y; y=0;y");
+
+    inFunction("var x,y; x=1; y=x; y",
+               "var x  ; x=1; x=x; x");
+
+    inFunction("var x,y; x=1; y=x+1; y",
+               "var x  ; x=1; x=x+1; x");
+
+    inFunction("x=1; x; y=2; y; var x; var y",
+               "x=1; x; x=2; x; var x");
+
+    inFunction("var x=1; var y=x+1; return y",
+               "var x=1;     x=x+1; return x");
+
+    inFunction("var x=1; var y=0; x+=1; y");
+
+    inFunction("var x=1; x+=1; var y=0; y",
+               "var x=1; x+=1;     x=0; x");
+
+    inFunction("var x=1; foo(bar(x+=1)); var y=0; y",
+               "var x=1; foo(bar(x+=1));     x=0; x");
+
+    inFunction("var y, x=1; f(x+=1, y)");
+
+    inFunction("var x; var y; y += 1, y, x = 1; x");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testMergeThreeVarNames
+  public void testMergeThreeVarNames() {
+    inFunction("var x,y,z; x=1; x; y=1; y; z=1; z",
+               "var x    ; x=1; x; x=1; x; x=1; x");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testDifferentBlock
+  public void testDifferentBlock() {
+    inFunction("if(1) { var x = 0; x } else { var y = 0; y }",
+               "if(1) { var x = 0; x } else {     x = 0; x }");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testLoops
+  public void testLoops() {
+    inFunction("var x; while(1) { x; x = 1; var y = 1; y }");
+    inFunction("var y = 1; y; while(1) { var x = 1; x }",
+               "var y = 1; y; while(1) {     y = 1; y }");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testEscaped
+  public void testEscaped() {
+    inFunction("var x = 1; x; function f() { x };  var y = 0; y; f()");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testFor
+  public void testFor() {
+    inFunction("var x = 1; x; for (;;) var y; y = 1; y",
+               "var x = 1; x; for (;;)      ; x = 1; x");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testForIn
+  public void testForIn() {
+    
+    inFunction("var x = 1, k; x;      ; for (var y in k) { y }",
+               "var x = 1, k; x;      ; for (var y in k) { y }");
+
+    inFunction("var x = 1, k; x; y = 1; for (var y in k) { y }",
+               "var x = 1, k; x; x = 1; for (    x in k) { x }");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testLoopInductionVar
+  public void testLoopInductionVar() {
+    inFunction(
+        "for(var x = 0; x < 10; x++){}" +
+        "for(var y = 0; y < 10; y++){}" +
+        "for(var z = 0; z < 10; z++){}",
+
+        "for(var x = 0; x < 10; x++){}" +
+        "for(x = 0; x < 10; x++){}" +
+        "for(x = 0; x < 10; x++){}");
+
+    inFunction(
+        "for(var x = 0; x < 10; x++){z}" +
+        "for(var y = 0, z = 0; y < 10; y++){z}",
+
+        "for(var x = 0; x < 10; x++){z}" +
+        "for(var x = 0, z = 0; x < 10; x++){z}");
+
+    inFunction("var x = 1; x; for (var y; y=1; ) {y}",
+               "var x = 1; x; for (     ; x=1; ) {x}");
+
+    inFunction("var x = 1; x; y = 1; while(y) var y; y",
+               "var x = 1; x; x = 1; while(x); x");
+
+    inFunction("var x = 1; x; f:var y; y=1",
+               "var x = 1; x; x=1");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testSwitchCase
+  public void testSwitchCase() {
+    inFunction("var x = 1; switch(x) { case 1: var y; case 2: } y = 1; y",
+               "var x = 1; switch(x) { case 1:        case 2: } x = 1; x");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testDuplicatedVar
+  public void testDuplicatedVar() {
+    
+    inFunction("z = 1; var x = 0; x; z; var y = 2, z = 1; y; z;",
+               "z = 1; var x = 0; x; z; var x = 2, z = 1; x; z;");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testTryCatch
+  public void testTryCatch() {
+    inFunction("try {} catch (e) { } var x = 4; x;",
+               "try {} catch (e) { } var x = 4; x;");
+    inFunction("var x = 4; x; try {} catch (e) { }",
+               "var x = 4; x; try {} catch (e) { }");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testDeadAssignment
+  public void testDeadAssignment() {
+    inFunction("var x = 6; var y; y = 4; x");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testParameter
+  public void testParameter() {
+    test("function FUNC(param) {var x = 0; x}",
+         "function FUNC(param) {param = 0; param}");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testParameter2
+  public void testParameter2() {
+    
+    test("function FUNC(x,y) {x = 0; x; y = 0; y}");
+    test("function FUNC(x,y,z) {x = 0; x; y = 0; z = 0; z}");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testParameter3
+  public void testParameter3() {
+    
+    test("function FUNC(x) {var y; y = 0; x; y}");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testParameter4
+  public void testParameter4() {
+    
+    
+    test("function FUNC(x, y) {var a,b; y; a=0; a; x; b=0; b}",
+         "function FUNC(x, y) {var a; y; a=0; a; x; a=0; a}");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testParameter4b
+  public void testParameter4b() {
+    
+    test("function FUNC(x, y, z) {var a,b; y; a=0; a; x; b=0; b}",
+         "function FUNC(x, y, z) {         y; y=0; y; x; x=0; x}");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testLiveRangeChangeWithinCfgNode
+  public void testLiveRangeChangeWithinCfgNode() {
+    inFunction("var x, y; x = 1, y = 2, y, x");
+    inFunction("var x, y; x = 1,x; y");
+
+    
+    inFunction("var x; var y; y = 1, y, x = 1; x");
+    inFunction("var x; var y; y = 1; y, x = 1; x", "var x; x = 1; x, x = 1; x");
+    inFunction("var x, y; y = 1, x = 1, x, y += 1, y");
+    inFunction("var x, y; y = 1, x = 1, x, y ++, y");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testLiveRangeChangeWithinCfgNode2
+  public void testLiveRangeChangeWithinCfgNode2() {
+    inFunction("var x; var y; var a; var b;" +
+               "y = 1, a = 1, y, a, x = 1, b = 1; x; b");
+    inFunction("var x; var y; var a; var b;" +
+               "y = 1, a = 1, y, a, x = 1; x; b = 1; b",
+               "var x; var y; var a;       " +
+               "y = 1, a = 1, y, a, x = 1; x; x = 1; x");
+    inFunction("var x; var y; var a; var b;" +
+               "y = 1, a = 1, y, x = 1; a; x; b = 1; b",
+               "var x; var y; var a;       " +
+               "y = 1, a = 1, y, x = 1; a; x; x = 1; x");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testFunctionNameReuse
+  public void testFunctionNameReuse() {
+
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testBug1401831
+  public void testBug1401831() {
+    
+    
+    String src = "function f(opt_a2) {" +
+        "  var buffer;" +
+        "  if (opt_a2) {" +
+        "    for(var i = 0; i < arguments.length; i++) {" +
+        "      buffer += arguments[i];" +
+        "    }" +
+        "  }" +
+        "  return buffer;" +
+        "}";
+    test(src, src);
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testDeterministic
+  public void testDeterministic() {
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    inFunction("var a,b,c,d,e;" +
+               "  a=1; b=1; a; b;" +
+               "  b=1; c=1; b; c;" +
+               "  c=1; d=1; c; d;" +
+               "  d=1; e=1; d; e;" +
+               "  e=1; a=1; e; a;",
+
+               "var a,b,    e;" +
+               "  a=1; b=1; a; b;" +
+               "  b=1; a=1; b; a;" +
+               "  a=1; b=1; a; b;" +
+               "  b=1; e=1; b; e;" +
+               "  e=1; a=1; e; a;");
+
+    
+    
+    
+    
+    
+    inFunction("var d,a,b,c,e;" +
+               "  a=1; b=1; a; b;" +
+               "  b=1; c=1; b; c;" +
+               "  c=1; d=1; c; d;" +
+               "  d=1; e=1; d; e;" +
+               "  e=1; a=1; e; a;",
+
+               "var d,  b,c  ;" +
+               "  d=1; b=1; d; b;" +
+               "  b=1; c=1; b; c;" +
+               "  c=1; d=1; c; d;" +
+               "  d=1; b=1; d; b;" +
+               "  b=1; d=1; b; d;");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testVarLiveRangeCross
+  public void testVarLiveRangeCross() {
+    inFunction("var a={}; var b=a.S(); b",
+               "var a={};     a=a.S(); a");
+    inFunction("var a={}; var b=a.S(), c=b.SS(); b; c",
+               "var a={}; var b=a.S(), a=b.SS(); b; a");
+    inFunction("var a={}; var b=a.S(), c=a.SS(), d=a.SSS(); b; c; d",
+               "var a={}; var b=a.S(), c=a.SS(), a=a.SSS(); b; c; a");
+    inFunction("var a={}; var b=a.S(), c=a.SS(), d=a.SSS(); b; c; d",
+               "var a={}; var b=a.S(), c=a.SS(), a=a.SSS(); b; c; a");
+    inFunction("var a={}; d=1; d; var b=a.S(), c=a.SS(), d=a.SSS(); b; c; d");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testBug1445366
+  public void testBug1445366() {
+    
+    inFunction(
+        " var iframe = getFrame();" +
+        " try {" +
+        "   var win = iframe.contentWindow;" +
+        " } catch (e) {" +
+        " } finally {" +
+        "   if (win)" +
+        "     this.setupWinUtil_();" +
+        "   else" +
+        "     this.load();" +
+        " }");
+
+    
+    inFunction(
+        " var iframe = getFrame();" +
+        " var win = iframe.contentWindow;" +
+        " if (win)" +
+        "   this.setupWinUtil_();" +
+        " else" +
+        "   this.load();",
+
+        " var iframe = getFrame();" +
+        " iframe = iframe.contentWindow;" +
+        " if (iframe)" +
+        "   this.setupWinUtil_();" +
+        " else" +
+        "   this.load();");
+  }
+
+// com.google.javascript.jscomp.CoalesceVariableNamesTest::testUsePseduoNames
+  public void testUsePseduoNames() {
+    usePseudoName = true;
+    inFunction("var x   = 0; print(x  ); var   y = 1; print(  y)",
+               "var x_y = 0; print(x_y);     x_y = 1; print(x_y)");
+
+    inFunction("var x_y = 1; var x   = 0; print(x  ); var     y = 1;" +
+               "print(  y); print(x_y);",
+
+               "var x_y = 1; var x_y$ = 0; print(x_y$);     x_y$ = 1;" + "" +
+               "print(x_y$); print(x_y);");
+
+    inFunction("var x_y = 1; function f() {" +
+               "var x    = 0; print(x  ); var y = 1; print( y);" +
+               "print(x_y);}",
+
+               "var x_y = 1; function f() {" +
+               "var x_y$ = 0; print(x_y$); x_y$ = 1; print(x_y$);" +
+               "print(x_y);}");
+
+    inFunction("var x   = 0; print(x  ); var   y = 1; print(  y); " +
+               "var closure_var; function bar() { print(closure_var); }",
+               "var x_y = 0; print(x_y);     x_y = 1; print(x_y); " +
+               "var closure_var; function bar() { print(closure_var); }");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrint
+  public void testPrint() {
+    assertPrint("10 + a + b", "10+a+b");
+    assertPrint("10 + (30*50)", "10+30*50");
+    assertPrint("with(x) { x + 3; }", "with(x)x+3");
+    assertPrint("\"aa'a\"", "\"aa'a\"");
+    assertPrint("\"aa\\\"a\"", "'aa\"a'");
+    assertPrint("function foo()\n{return 10;}", "function foo(){return 10}");
+    assertPrint("a instanceof b", "a instanceof b");
+    assertPrint("typeof(a)", "typeof a");
+    assertPrint(
+        "var foo = x ? { a : 1 } : {a: 3, b:4, \"default\": 5, \"foo-bar\": 6}",
+        "var foo=x?{a:1}:{a:3,b:4,\"default\":5,\"foo-bar\":6}");
+
+    
+    assertPrint("function foo(){throw 'error';}",
+        "function foo(){throw\"error\";}");
+    
+    assertPrint("if (true) function foo(){return}",
+        "if(true){function foo(){return}}");
+
+    assertPrint("var x = 10; { var y = 20; }", "var x=10;var y=20");
+
+    assertPrint("while (x-- > 0);", "while(x-- >0);");
+    assertPrint("x-- >> 1", "x-- >>1");
+
+    assertPrint("(function () {})(); ",
+        "(function(){})()");
+
+    
+    assertPrint("var a,b,c,d;a || (b&& c) && (a || d)",
+        "var a,b,c,d;a||b&&c&&(a||d)");
+    assertPrint("var a,b,c; a || (b || c); a * (b * c); a | (b | c)",
+        "var a,b,c;a||b||c;a*b*c;a|b|c");
+    assertPrint("var a,b,c; a / b / c;a / (b / c); a - (b - c);",
+        "var a,b,c;a/b/c;a/(b/c);a-(b-c)");
+    assertPrint("var a,b; a = b = 3;",
+        "var a,b;a=b=3");
+    assertPrint("var a,b,c,d; a = (b = c = (d = 3));",
+        "var a,b,c,d;a=b=c=d=3");
+    assertPrint("var a,b,c; a += (b = c += 3);",
+        "var a,b,c;a+=b=c+=3");
+    assertPrint("var a,b,c; a *= (b -= c);",
+        "var a,b,c;a*=b-=c");
+
+    
+    assertPrint("'<script>'", "\"<script>\"");
+    assertPrint("'</script>'", "\"<\\/script>\"");
+    assertPrint("\"</script> </SCRIPT>\"", "\"<\\/script> <\\/SCRIPT>\"");
+
+    assertPrint("'-->'", "\"--\\>\"");
+    assertPrint("']]>'", "\"]]\\>\"");
+    assertPrint("' --></script>'", "\" --\\><\\/script>\"");
+
+    assertPrint("/--> <\\/script>/g", "/--\\> <\\/script>/g");
+
+    
+    assertPrint("a ? delete b[0] : 3", "a?delete b[0]:3");
+    assertPrint("(delete a[0])/10", "delete a[0]/10");
+
+    
+
+    
+    assertPrint("new A", "new A");
+    assertPrint("new A()", "new A");
+    assertPrint("new A('x')", "new A(\"x\")");
+
+    
+    assertPrint("new A().a()", "(new A).a()");
+    assertPrint("(new A).a()", "(new A).a()");
+
+    
+    assertPrint("new A('y').a()", "(new A(\"y\")).a()");
+
+    
+    assertPrint("new A.B", "new A.B");
+    assertPrint("new A.B()", "new A.B");
+    assertPrint("new A.B('z')", "new A.B(\"z\")");
+
+    
+    assertPrint("(new A.B).a()", "(new A.B).a()");
+    assertPrint("new A.B().a()", "(new A.B).a()");
+    
+    assertPrint("new A.B('w').a()", "(new A.B(\"w\")).a()");
+
+    
+    assertPrint("x + +y", "x+ +y");
+    assertPrint("x - (-y)", "x- -y");
+    assertPrint("x++ +y", "x++ +y");
+    assertPrint("x-- -y", "x-- -y");
+    assertPrint("x++ -y", "x++-y");
+
+    
+    assertPrint("foo:for(;;){break foo;}", "foo:for(;;)break foo");
+    assertPrint("foo:while(1){continue foo;}", "foo:while(1)continue foo");
+
+    
+    assertPrint("({})", "({})");
+    assertPrint("var x = {};", "var x={}");
+    assertPrint("({}).x", "({}).x");
+    assertPrint("({})['x']", "({})[\"x\"]");
+    assertPrint("({}) instanceof Object", "({})instanceof Object");
+    assertPrint("({}) || 1", "({})||1");
+    assertPrint("1 || ({})", "1||{}");
+    assertPrint("({}) ? 1 : 2", "({})?1:2");
+    assertPrint("0 ? ({}) : 2", "0?{}:2");
+    assertPrint("0 ? 1 : ({})", "0?1:{}");
+    assertPrint("typeof ({})", "typeof{}");
+    assertPrint("f({})", "f({})");
+
+    
+    assertPrint("(function(){})", "(function(){})");
+    assertPrint("(function(){})()", "(function(){})()");
+    assertPrint("(function(){})instanceof Object",
+        "(function(){})instanceof Object");
+    assertPrint("(function(){}).bind().call()",
+        "(function(){}).bind().call()");
+    assertPrint("var x = function() { };", "var x=function(){}");
+    assertPrint("var x = function() { }();", "var x=function(){}()");
+    assertPrint("(function() {}), 2", "(function(){}),2");
+
+    
+    assertPrint("(function f(){})", "(function f(){})");
+
+    
+    assertPrint("function f(){}", "function f(){}");
+
+    
+    assertPrint("({ 'a': 4, '\\u0100': 4 })", "({a:4,\"\\u0100\":4})");
+
+    
+    assertPrint("if (true) { alert();}", "if(true)alert()");
+    assertPrint("if (false) {} else {alert(\"a\");}",
+        "if(false);else alert(\"a\")");
+    assertPrint("for(;;) { alert();};", "for(;;)alert()");
+
+    assertPrint("do { alert(); } while(true);",
+        "do alert();while(true)");
+    assertPrint("myLabel: { alert();}",
+        "myLabel:alert()");
+    assertPrint("myLabel: for(;;) continue myLabel;",
+        "myLabel:for(;;)continue myLabel");
+
+    
+    assertPrint("if (true) var x; x = 4;", "if(true)var x;x=4");
+
+    
+    assertPrint("\\u00fb", "\\u00fb");
+    assertPrint("\\u00fa=1", "\\u00fa=1");
+    assertPrint("function \\u00f9(){}", "function \\u00f9(){}");
+    assertPrint("x.\\u00f8", "x.\\u00f8");
+    assertPrint("x.\\u00f8", "x.\\u00f8");
+    assertPrint("abc\\u4e00\\u4e01jkl", "abc\\u4e00\\u4e01jkl");
+
+    
+    assertPrint("! ! true", "!!true");
+    assertPrint("!(!(true))", "!!true");
+    assertPrint("typeof(void(0))", "typeof void 0");
+    assertPrint("typeof(void(!0))", "typeof void!0");
+    assertPrint("+ - + + - + 3", "+-+ +-+3"); 
+    assertPrint("+(--x)", "+--x");
+    assertPrint("-(++x)", "-++x");
+
+    
+    assertPrint("-(--x)", "- --x");
+    assertPrint("!(~~5)", "!~~5");
+    assertPrint("~(a/b)", "~(a/b)");
+
+    
+    assertPrint("new (foo.bar()).factory(baz)", "new (foo.bar().factory)(baz)");
+    assertPrint("new (bar()).factory(baz)", "new (bar().factory)(baz)");
+    assertPrint("new (new foobar(x)).factory(baz)",
+        "new (new foobar(x)).factory(baz)");
+
+    
+    assertPrint("a ? b : (c ? d : e)", "a?b:c?d:e");
+    assertPrint("a ? (b ? c : d) : e", "a?b?c:d:e");
+    assertPrint("(a ? b : c) ? d : e", "(a?b:c)?d:e");
+
+    
+    assertPrint("if (x) if (y); else;", "if(x)if(y);else;");
+
+    
+    assertPrint("a,b,c", "a,b,c");
+    assertPrint("(a,b),c", "a,b,c");
+    assertPrint("a,(b,c)", "a,b,c");
+    assertPrint("x=a,b,c", "x=a,b,c");
+    assertPrint("x=(a,b),c", "x=(a,b),c");
+    assertPrint("x=a,(b,c)", "x=a,b,c");
+    assertPrint("x=a,y=b,z=c", "x=a,y=b,z=c");
+    assertPrint("x=(a,y=b,z=c)", "x=(a,y=b,z=c)");
+    assertPrint("x=[a,b,c,d]", "x=[a,b,c,d]");
+    assertPrint("x=[(a,b,c),d]", "x=[(a,b,c),d]");
+    assertPrint("x=[(a,(b,c)),d]", "x=[(a,b,c),d]");
+    assertPrint("x=[a,(b,c,d)]", "x=[a,(b,c,d)]");
+    assertPrint("var x=(a,b)", "var x=(a,b)");
+    assertPrint("var x=a,b,c", "var x=a,b,c");
+    assertPrint("var x=(a,b),c", "var x=(a,b),c");
+    assertPrint("var x=a,b=(c,d)", "var x=a,b=(c,d)");
+    assertPrint("foo(a,b,c,d)", "foo(a,b,c,d)");
+    assertPrint("foo((a,b,c),d)", "foo((a,b,c),d)");
+    assertPrint("foo((a,(b,c)),d)", "foo((a,b,c),d)");
+    assertPrint("f(a+b,(c,d,(e,f,g)))", "f(a+b,(c,d,e,f,g))");
+    assertPrint("({}) , 1 , 2", "({}),1,2");
+    assertPrint("({}) , {} , {}", "({}),{},{}");
+
+    
+    assertPrint("if (x){}", "if(x);");
+    assertPrint("if(x);", "if(x);");
+    assertPrint("if(x)if(y);", "if(x)if(y);");
+    assertPrint("if(x){if(y);}", "if(x)if(y);");
+    assertPrint("if(x){if(y){};;;}", "if(x)if(y);");
+    assertPrint("if(x){;;function y(){};;}", "if(x){function y(){}}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testHook
+  public void testHook() {
+    assertPrint("a ? b = 1 : c = 2", "a?b=1:c=2");
+    assertPrint("x = a ? b = 1 : c = 2", "x=a?b=1:c=2");
+    assertPrint("(x = a) ? b = 1 : c = 2", "(x=a)?b=1:c=2");
+
+    assertPrint("x, a ? b = 1 : c = 2", "x,a?b=1:c=2");
+    assertPrint("x, (a ? b = 1 : c = 2)", "x,a?b=1:c=2");
+    assertPrint("(x, a) ? b = 1 : c = 2", "(x,a)?b=1:c=2");
+
+    assertPrint("a ? (x, b) : c = 2", "a?(x,b):c=2");
+    assertPrint("a ? b = 1 : (x,c)", "a?b=1:(x,c)");
+
+    assertPrint("a ? b = 1 : c = 2 + x", "a?b=1:c=2+x");
+    assertPrint("(a ? b = 1 : c = 2) + x", "(a?b=1:c=2)+x");
+    assertPrint("a ? b = 1 : (c = 2) + x", "a?b=1:(c=2)+x");
+
+    assertPrint("a ? (b?1:2) : 3", "a?b?1:2:3");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrintInOperatorInForLoop
+  public void testPrintInOperatorInForLoop() {
+    
+    
+    
+    assertPrint("var a={}; for (var i = (\"length\" in a); i;) {}",
+        "var a={};for(var i=(\"length\"in a);i;);");
+    assertPrint("var a={}; for (var i = (\"length\" in a) ? 0 : 1; i;) {}",
+        "var a={};for(var i=(\"length\"in a)?0:1;i;);");
+    assertPrint("var a={}; for (var i = (\"length\" in a) + 1; i;) {}",
+        "var a={};for(var i=(\"length\"in a)+1;i;);");
+    assertPrint("var a={};for (var i = (\"length\" in a|| \"size\" in a);;);",
+        "var a={};for(var i=(\"length\"in a)||(\"size\"in a);;);");
+    assertPrint("var a={};for (var i = a || a || (\"size\" in a);;);",
+        "var a={};for(var i=a||a||(\"size\"in a);;);");
+
+    
+    assertPrint("var a={}; for (var i = -(\"length\" in a); i;) {}",
+        "var a={};for(var i=-(\"length\"in a);i;);");
+    assertPrint("var a={};function b_(p){ return p;};" +
+        "for(var i=1,j=b_(\"length\" in a);;) {}",
+        "var a={};function b_(p){return p}" +
+            "for(var i=1,j=b_(\"length\"in a);;);");
+
+    
+    assertPrint("var a={}; for (;(\"length\" in a);) {}",
+        "var a={};for(;\"length\"in a;);");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testLiteralProperty
+  public void testLiteralProperty() {
+    assertPrint("(64).toString()", "(64).toString()");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testAmbiguousElseClauses
+  public void testAmbiguousElseClauses() {
+    assertPrintNode("if(x)if(y);else;",
+        new Node(Token.IF,
+            Node.newString(Token.NAME, "x"),
+            new Node(Token.BLOCK,
+                new Node(Token.IF,
+                    Node.newString(Token.NAME, "y"),
+                    new Node(Token.BLOCK),
+
+                    
+                    new Node(Token.BLOCK)))));
+
+    assertPrintNode("if(x){if(y);}else;",
+        new Node(Token.IF,
+            Node.newString(Token.NAME, "x"),
+            new Node(Token.BLOCK,
+                new Node(Token.IF,
+                    Node.newString(Token.NAME, "y"),
+                    new Node(Token.BLOCK))),
+
+            
+            new Node(Token.BLOCK)));
+
+    assertPrintNode("if(x)if(y);else{if(z);}else;",
+        new Node(Token.IF,
+            Node.newString(Token.NAME, "x"),
+            new Node(Token.BLOCK,
+                new Node(Token.IF,
+                    Node.newString(Token.NAME, "y"),
+                    new Node(Token.BLOCK),
+                    new Node(Token.BLOCK,
+                        new Node(Token.IF,
+                            Node.newString(Token.NAME, "z"),
+                            new Node(Token.BLOCK))))),
+
+            
+            new Node(Token.BLOCK)));
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testLineBreak
+  public void testLineBreak() {
+    
+    assertLineBreak("function a() {}\n" +
+        "function b() {}",
+        "function a(){}\n" +
+        "function b(){}\n");
+
+    
+    assertLineBreak("var a = {};\n" +
+        "a.foo = function () {}\n" +
+        "function b() {}",
+        "var a={};a.foo=function(){};\n" +
+        "function b(){}\n");
+
+    
+    assertLineBreak("var a = {\n" +
+        "  b: function() {},\n" +
+        "  c: function() {}\n" +
+        "};\n" +
+        "alert(a);",
+
+        "var a={b:function(){},\n" +
+        "c:function(){}};\n" +
+        "alert(a)");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrettyPrinter
+  public void testPrettyPrinter() {
+    
+    
+    assertPrettyPrint("(function(){})();","(function() {\n})()");
+    assertPrettyPrint("var a = (function() {});alert(a);",
+        "var a = function() {\n};\nalert(a)");
+
+    
+    
+    assertPrettyPrint("if (1) {}",
+        "if(1) {\n" +
+        "}\n");
+    assertPrettyPrint("if (1) {alert(\"\");}",
+        "if(1) {\n" +
+        "  alert(\"\")\n" +
+        "}\n");
+    assertPrettyPrint("if (1)alert(\"\");",
+        "if(1) {\n" +
+        "  alert(\"\")\n" +
+        "}\n");
+    assertPrettyPrint("if (1) {alert();alert();}",
+        "if(1) {\n" +
+        "  alert();\n" +
+        "  alert()\n" +
+        "}\n");
+
+    
+    assertPrettyPrint("label: alert();",
+        "label:alert()");
+
+    
+    assertPrettyPrint("if (1) alert();",
+        "if(1) {\n" +
+        "  alert()\n" +
+        "}\n");
+    assertPrettyPrint("for (;;) alert();",
+        "for(;;) {\n" +
+        "  alert()\n" +
+        "}\n");
+
+    assertPrettyPrint("while (1) alert();",
+        "while(1) {\n" +
+        "  alert()\n" +
+        "}\n");
+
+    
+    assertPrettyPrint("if (1) {} else {alert(a);}",
+        "if(1) {\n" +
+        "}else {\n  alert(a)\n}\n");
+
+    
+    assertPrettyPrint("if (1) alert(a); else alert(b);",
+        "if(1) {\n" +
+        "  alert(a)\n" +
+        "}else {\n" +
+        "  alert(b)\n" +
+        "}\n");
+
+    
+    assertPrettyPrint("for(;;) { alert();}",
+        "for(;;) {\n" +
+         "  alert()\n" +
+         "}\n");
+    assertPrettyPrint("for(;;) {}",
+        "for(;;) {\n" +
+        "}\n");
+    assertPrettyPrint("for(;;) { alert(); alert(); }",
+        "for(;;) {\n" +
+        "  alert();\n" +
+        "  alert()\n" +
+        "}\n");
+
+    
+    assertPrettyPrint("do { alert(); } while(true);",
+        "do {\n" +
+        "  alert()\n" +
+        "}while(true)");
+
+    
+    assertPrettyPrint("myLabel: { alert();}",
+        "myLabel: {\n" +
+        "  alert()\n" +
+        "}\n");
+
+    
+    
+    assertPrettyPrint("myLabel: for(;;) continue myLabel;",
+        "myLabel:for(;;) {\n" +
+        "  continue myLabel\n" +
+        "}\n");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrettyPrinter2
+  public void testPrettyPrinter2() {
+    assertPrettyPrint(
+        "if(true) f();",
+        "if(true) {\n" +
+        "  f()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "if (true) { f() } else { g() }",
+        "if(true) {\n" +
+        "  f()\n" +
+        "}else {\n" +
+        "  g()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "if(true) f(); for(;;) g();",
+        "if(true) {\n" +
+        "  f()\n" +
+        "}\n" +
+        "for(;;) {\n" +
+        "  g()\n" +
+        "}\n");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrettyPrinter3
+  public void testPrettyPrinter3() {
+    assertPrettyPrint(
+        "try {} catch(e) {}if (1) {alert();alert();}",
+        "try {\n" +
+        "}catch(e) {\n" +
+        "}\n" +
+        "if(1) {\n" +
+        "  alert();\n" +
+        "  alert()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "try {} finally {}if (1) {alert();alert();}",
+        "try {\n" +
+        "}finally {\n" +
+        "}\n" +
+        "if(1) {\n" +
+        "  alert();\n" +
+        "  alert()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "try {} catch(e) {} finally {} if (1) {alert();alert();}",
+        "try {\n" +
+        "}catch(e) {\n" +
+        "}finally {\n" +
+        "}\n" +
+        "if(1) {\n" +
+        "  alert();\n" +
+        "  alert()\n" +
+        "}\n");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrettyPrinter4
+  public void testPrettyPrinter4() {
+    assertPrettyPrint(
+        "function f() {}if (1) {alert();}",
+        "function f() {\n" +
+        "}\n" +
+        "if(1) {\n" +
+        "  alert()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "var f = function() {};if (1) {alert();}",
+        "var f = function() {\n" +
+        "};\n" +
+        "if(1) {\n" +
+        "  alert()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "(function() {})();if (1) {alert();}",
+        "(function() {\n" +
+        "})();\n" +
+        "if(1) {\n" +
+        "  alert()\n" +
+        "}\n");
+
+    assertPrettyPrint(
+        "(function() {alert();alert();})();if (1) {alert();}",
+        "(function() {\n" +
+        "  alert();\n" +
+        "  alert()\n" +
+        "})();\n" +
+        "if(1) {\n" +
+        "  alert()\n" +
+        "}\n");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotations
+  public void testTypeAnnotations() {
+    assertTypeAnnotations(
+        " function Foo(){}",
+        "\n"
+        + "function Foo() {\n}\n");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsTypeDef
+  public void testTypeAnnotationsTypeDef() {
+    
+    
+    
+    assertTypeAnnotations(
+        " goog.java.Long;\n"
+        + "\n"
+        + "function f(a){};\n",
+        "goog.java.Long;\n"
+        + "\n"
+        + "function f(a) {\n}\n");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsAssign
+  public void testTypeAnnotationsAssign() {
+    assertTypeAnnotations(" var Foo = function(){}",
+        "\n"
+        + "var Foo = function() {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsNamespace
+  public void testTypeAnnotationsNamespace() {
+    assertTypeAnnotations("var a = {};"
+        + " a.Foo = function(){}",
+        "var a = {};\n"
+        + "\n"
+        + "a.Foo = function() {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsMemberSubclass
+  public void testTypeAnnotationsMemberSubclass() {
+    assertTypeAnnotations("var a = {};"
+        + " a.Foo = function(){};"
+        + " a.Bar = function(){}",
+        "var a = {};\n"
+        + "\n"
+        + "a.Foo = function() {\n};\n"
+        + "\n"
+        + "a.Bar = function() {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsInterface
+  public void testTypeAnnotationsInterface() {
+    assertTypeAnnotations("var a = {};"
+        + " a.Foo = function(){};"
+        + " a.Bar = function(){}",
+        "var a = {};\n"
+        + "\n"
+        + "a.Foo = function() {\n};\n"
+        + "\n"
+        + "a.Bar = function() {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsMember
+  public void testTypeAnnotationsMember() {
+    assertTypeAnnotations("var a = {};"
+        + " a.Foo = function(){}"
+        + "\n"
+        + "a.Foo.prototype.foo = function(foo) { return 3; };"
+        + ""
+        + "a.Foo.prototype.bar = '';",
+        "var a = {};\n"
+        + "\n"
+        + "a.Foo = function() {\n};\n"
+        + "\n"
+        + "a.Foo.prototype.foo = function(foo) {\n  return 3\n};\n"
+        + "\n"
+        + "a.Foo.prototype.bar = \"\"");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsImplements
+  public void testTypeAnnotationsImplements() {
+    assertTypeAnnotations("var a = {};"
+        + " a.Foo = function(){};\n"
+        + " a.I = function(){};\n"
+        + " a.I2 = function(){};\n"
+        + " a.Bar = function(){}",
+        "var a = {};\n"
+        + "\n"
+        + "a.Foo = function() {\n};\n"
+        + "\n"
+        + "a.I = function() {\n};\n"
+        + "\n"
+        + "a.I2 = function() {\n};\n"
+        + "\n"
+        + "a.Bar = function() {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsDispatcher1
+  public void testTypeAnnotationsDispatcher1() {
+    assertTypeAnnotations(
+        "var a = {};\n" +
+        "\n" +
+        "a.Foo = function(){}",
+        "var a = {};\n" +
+        "\n" +
+        "a.Foo = function() {\n" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTypeAnnotationsDispatcher2
+  public void testTypeAnnotationsDispatcher2() {
+    assertTypeAnnotations(
+        "var a = {};\n" +
+        "\n" +
+        "a.Foo = function(){}\n" +
+        "\n" +
+        "a.Foo.prototype.foo = function() {};",
+
+        "var a = {};\n" +
+        "\n" +
+        "a.Foo = function() {\n" +
+        "};\n" +
+        "\n" +
+        "a.Foo.prototype.foo = function() {\n" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testU2UFunctionTypeAnnotation
+  public void testU2UFunctionTypeAnnotation() {
+    assertTypeAnnotations(
+        " var x = function() {}",
+        "\nvar x = function() {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testEmitUnknownParamTypesAsAllType
+  public void testEmitUnknownParamTypesAsAllType() {
+    assertTypeAnnotations(
+        "var a = function(x) {}",
+        "\n" +
+        "var a = function(x) {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testOptionalTypesAnnotation
+  public void testOptionalTypesAnnotation() {
+    assertTypeAnnotations(
+        "\n" +
+        "var a = function(x) {}",
+        "\n" +
+        "var a = function(x) {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testVariableArgumentsTypesAnnotation
+  public void testVariableArgumentsTypesAnnotation() {
+    assertTypeAnnotations(
+        "\n" +
+        "var a = function(x) {}",
+        "\n" +
+        "var a = function(x) {\n}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testTempConstructor
+  public void testTempConstructor() {
+    assertTypeAnnotations(
+        "var x = function() {\n\nfunction t1() {}\n" +
+        " \nfunction t2() {}\n" +
+        " t1.prototype = t2.prototype}",
+        "\nvar x = function() {\n" +
+        "  \n" +
+        "function t1() {\n  }\n" +
+        "  \n" +
+        "function t2() {\n  }\n" +
+        "  t1.prototype = t2.prototype\n}"
+    );
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testSubtraction
+  public void testSubtraction() {
+    Compiler compiler = new Compiler();
+    Node n = compiler.parseTestCode("x - -4");
+    assertEquals(0, compiler.getErrorCount());
+
+    assertEquals(
+        "x- -4",
+        new CodePrinter.Builder(n).setLineLengthThreshold(
+            CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD).build());
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testFunctionWithCall
+  public void testFunctionWithCall() {
+    assertPrint(
+        "var user = new function() {"
+        + "alert(\"foo\")}",
+        "var user=new function(){"
+        + "alert(\"foo\")}");
+    assertPrint(
+        "var user = new function() {"
+        + "this.name = \"foo\";"
+        + "this.local = function(){alert(this.name)};}", 
+        "var user=new function(){"
+        + "this.name=\"foo\";"
+        + "this.local=function(){alert(this.name)}}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testLineLength
+  public void testLineLength() {
+    
+    assertLineLength("var aba,bcb,cdc",
+        "var aba,bcb," +
+        "\ncdc");
+
+    
+    assertLineLength(
+        "\"foo\"+\"bar,baz,bomb\"+\"whee\"+\";long-string\"\n+\"aaa\"",
+        "\"foo\"+\"bar,baz,bomb\"+" +
+        "\n\"whee\"+\";long-string\"+" +
+        "\n\"aaa\"");
+
+    
+    assertLineLength("var abazaba=1234",
+        "var abazaba=" +
+        "\n1234");
+
+    
+    assertLineLength("var abab=1;var bab=2",
+        "var abab=1;" +
+        "\nvar bab=2");
+
+    
+    assertLineLength("var a=/some[reg](ex),with.*we?rd|chars/i;var b=a",
+        "var a=/some[reg](ex),with.*we?rd|chars/i;" +
+        "\nvar b=a");
+
+    
+    assertLineLength("var a=\"foo,{bar};baz\";var b=a",
+        "var a=\"foo,{bar};baz\";" +
+        "\nvar b=a");
+
+    
+    assertLineLength("var a=\"a\";a++;var b=\"bbb\";",
+        "var a=\"a\";a++;\n" +
+        "var b=\"bbb\"");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testParsePrintParse
+  public void testParsePrintParse() {
+    testReparse("3;");
+    testReparse("var a = b;");
+    testReparse("var x, y, z;");
+    testReparse("try { foo() } catch(e) { bar() }");
+    testReparse("try { foo() } catch(e) { bar() } finally { stuff() }");
+    testReparse("try { foo() } finally { stuff() }");
+    testReparse("throw 'me'");
+    testReparse("function foo(a) { return a + 4; }");
+    testReparse("function foo() { return; }");
+    testReparse("var a = function(a, b) { foo(); return a + b; }");
+    testReparse("b = [3, 4, 'paul', \"Buchhe it\",,5];");
+    testReparse("v = (5, 6, 7, 8)");
+    testReparse("d = 34.0; x = 0; y = .3; z = -22");
+    testReparse("d = -x; t = !x + ~y;");
+    testReparse("'hi';  stuff(a,b) \n foo(); 
+    testReparse("a = b++ + ++c; a = b++-++c; a = - --b; a = - ++b;");
+    testReparse("a++; b= a++; b = ++a; b = a--; b = --a; a+=2; b-=5");
+    testReparse("a = (2 + 3) * 4;");
+    testReparse("a = 1 + (2 + 3) + 4;");
+    testReparse("x = a ? b : c; x = a ? (b,3,5) : (foo(),bar());");
+    testReparse("a = b | c || d ^ e && f & !g != h << i <= j < k >>> l > m * n % !o");
+    testReparse("a == b; a != b; a === b; a == b == a; (a == b) == a; a == (b == a);");
+    testReparse("if (a > b) a = b; if (b < 3) a = 3; else c = 4;");
+    testReparse("if (a == b) { a++; } if (a == 0) { a++; } else { a --; }");
+    testReparse("for (var i in a) b += i;");
+    testReparse("for (var i = 0; i < 10; i++){ b /= 2; if (b == 2)break;else continue;}");
+    testReparse("for (x = 0; x < 10; x++) a /= 2;");
+    testReparse("for (;;) a++;");
+    testReparse("while(true) { blah(); }while(true) blah();");
+    testReparse("do stuff(); while(a>b);");
+    testReparse("[0, null, , true, false, this];");
+    testReparse("s.replace(/absc/, 'X').replace(/ab/gi, 'Y');");
+    testReparse("new Foo; new Bar(a, b,c);");
+    testReparse("with(foo()) { x = z; y = t; } with(bar()) a = z;");
+    testReparse("delete foo['bar']; delete foo;");
+    testReparse("var x = { 'a':'paul', 1:'3', 2:(3,4) };");
+    testReparse("switch(a) { case 2: case 3: { stuff(); break; }" +
+        "case 4: morestuff(); break; default: done();}");
+    testReparse("x = foo['bar'] + foo['my stuff'] + foo[bar] + f.stuff;");
+    testReparse("a.v = b.v; x['foo'] = y['zoo'];");
+    testReparse("'test' in x; 3 in x; a in x;");
+    testReparse("'foo\"bar' + \"foo'c\" + 'stuff\\n and \\\\more'");
+    testReparse("x.__proto__;");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testDoLoopIECompatiblity
+  public void testDoLoopIECompatiblity() {
+    
+    assertPrint("function(){if(e1){do foo();while(e2)}else foo()}",
+        "function(){if(e1){do foo();while(e2)}else foo()}");
+
+    assertPrint("function(){if(e1)do foo();while(e2)else foo()}",
+        "function(){if(e1){do foo();while(e2)}else foo()}");
+
+    assertPrint("if(x){do{foo()}while(y)}else bar()",
+        "if(x){do foo();while(y)}else bar()");
+
+    assertPrint("if(x)do{foo()}while(y);else bar()",
+        "if(x){do foo();while(y)}else bar()");
+
+    assertPrint("if(x){do{foo()}while(y)}",
+        "if(x){do foo();while(y)}");
+
+    assertPrint("if(x)do{foo()}while(y);",
+        "if(x){do foo();while(y)}");
+
+    assertPrint("if(x)A:do{foo()}while(y);",
+        "if(x){A:do foo();while(y)}");
+
+    assertPrint("var i = 0;a: do{b: do{i++;break b;} while(0);} while(0);",
+        "var i=0;a:do{b:do{i++;break b}while(0)}while(0)");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testFunctionSafariCompatiblity
+  public void testFunctionSafariCompatiblity() {
+    
+    assertPrint("function(){if(e1){function goo(){return true}}else foo()}",
+        "function(){if(e1){function goo(){return true}}else foo()}");
+
+    assertPrint("function(){if(e1)function goo(){return true}else foo()}",
+        "function(){if(e1){function goo(){return true}}else foo()}");
+
+    assertPrint("if(e1){function goo(){return true}}",
+        "if(e1){function goo(){return true}}");
+
+    assertPrint("if(e1)function goo(){return true}",
+        "if(e1){function goo(){return true}}");
+
+    assertPrint("if(e1)A:function goo(){return true}",
+        "if(e1){A:function goo(){return true}}");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testExponents
+  public void testExponents() {
+    assertPrintNumber("1", 1);
+    assertPrintNumber("10", 10);
+    assertPrintNumber("100", 100);
+    assertPrintNumber("1E3", 1000);
+    assertPrintNumber("1E4", 10000);
+    assertPrintNumber("1E5", 100000);
+    assertPrintNumber("-1", -1);
+    assertPrintNumber("-10", -10);
+    assertPrintNumber("-100", -100);
+    assertPrintNumber("-1E3", -1000);
+    assertPrintNumber("-12341234E4", -123412340000L);
+    assertPrintNumber("1E18", 1000000000000000000L);
+    assertPrintNumber("1E5", 100000.0);
+    assertPrintNumber("100000.1", 100000.1);
+
+    assertPrintNumber("1.0E-6", 0.000001);
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testDirectEval
+  public void testDirectEval() {
+    assertPrint("eval('1');", "eval(\"1\")");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testIndirectEval
+  public void testIndirectEval() {
+    Node n = parse("eval('1');");
+    assertPrintNode("eval(\"1\")", n);
+    n.getFirstChild().getFirstChild().getFirstChild().putBooleanProp(
+        Node.DIRECT_EVAL, false);
+    assertPrintNode("(0,eval)(\"1\")", n);
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testFreeCall1
+  public void testFreeCall1() {
+    assertPrint("foo(a);", "foo(a)");
+    assertPrint("x.foo(a);", "x.foo(a)");
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testFreeCall2
+  public void testFreeCall2() {
+    Node n = parse("foo(a);");
+    assertPrintNode("foo(a)", n);
+    Node call =  n.getFirstChild().getFirstChild();
+    assertTrue(call.getType() == Token.CALL);
+    call.putBooleanProp(Node.FREE_CALL, true);
+    assertPrintNode("foo(a)", n);
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testFreeCall3
+  public void testFreeCall3() {
+    Node n = parse("x.foo(a);");
+    assertPrintNode("x.foo(a)", n);
+    Node call =  n.getFirstChild().getFirstChild();
+    assertTrue(call.getType() == Token.CALL);
+    call.putBooleanProp(Node.FREE_CALL, true);
+    assertPrintNode("(0,x.foo)(a)", n);
+  }
+
+// com.google.javascript.jscomp.CodePrinterTest::testPrintScript
+  public void testPrintScript() {
+    
+    
+    Node ast = new Node(Token.SCRIPT, 
+        new Node(Token.EXPR_RESULT, Node.newString("f")), 
+        new Node(Token.EXPR_RESULT, Node.newString("g"))); 
+    String result = new CodePrinter.Builder(ast).setPrettyPrint(true).build();    
+    assertEquals("\"f\";\n\"g\"", result);
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testGlobalScope
+  public void testGlobalScope() {
+    test("var f = function(){}", "function f(){}");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testLocalScope1
+  public void testLocalScope1() {
+    test("function f(){ var x = function(){}; x() }",
+         "function f(){ function x(){} x() }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testLocalScope2
+  public void testLocalScope2() {
+    test("function f(){ var x = function(){}; return x }",
+         "function f(){ function x(){} return x }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testVarNotImmediatelyBelowScriptOrBlock1
+  public void testVarNotImmediatelyBelowScriptOrBlock1() {
+    testSame("if (x) var f = function(){}");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testVarNotImmediatelyBelowScriptOrBlock2
+  public void testVarNotImmediatelyBelowScriptOrBlock2() {
+    testSame("var x = 1;" +
+             "if (x == 1) {" +
+             "  var f = function () { alert('b')}" +
+             "} else {" +
+             "  f = function() { alert('c')}" +
+             "}" +
+             "f();");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testVarNotImmediatelyBelowScriptOrBlock3
+  public void testVarNotImmediatelyBelowScriptOrBlock3() {
+    testSame("var x = 1; if (x) {var f = function(){return x}; f(); x--;}");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testMultipleVar
+  public void testMultipleVar() {
+    test("var f = function(){}; var g = f", "function f(){} var g = f");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testMultipleVar2
+  public void testMultipleVar2() {
+    test("var f = function(){}; var g = f; var h = function(){}",
+         "function f(){}var g = f;function h(){}");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testBothScopes
+  public void testBothScopes() {
+    test("var x = function() { var y = function(){} }",
+         "function x() { function y(){} }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testLocalScopeOnly1
+  public void testLocalScopeOnly1() {
+    test("if (x) var f = function(){ var g = function(){} }",
+         "if (x) var f = function(){ function g(){} }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testLocalScopeOnly2
+  public void testLocalScopeOnly2() {
+    test("if (x) var f = function(){ var g = function(){} };",
+         "if (x) var f = function(){ function g(){} }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testReturn
+  public void testReturn() {
+    test("var f = function(x){return 2*x}; var g = f(2);",
+         "function f(x){return 2*x} var g = f(2)");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testAlert
+  public void testAlert() {
+    test("var x = 1; var f = function(){alert(x)};",
+         "var x = 1; function f(){alert(x)}");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testRecursiveInternal1
+  public void testRecursiveInternal1() {
+    testSame("var f = function foo() { foo() }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testRecursiveInternal2
+  public void testRecursiveInternal2() {
+    testSame("var f = function foo() { function g(){foo()} g() }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testRecursiveExternal1
+  public void testRecursiveExternal1() {
+    test("var f = function foo() { f() }",
+         "function f() { f() }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testRecursiveExternal2
+  public void testRecursiveExternal2() {
+    test("var f = function foo() { function g(){f()} g() }",
+         "function f() { function g(){f()} g() }");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testConstantFunction1
+  public void testConstantFunction1() {
+    test("var FOO = function(){};FOO()",
+         "function FOO(){}FOO()");
+  }
+
+// com.google.javascript.jscomp.CollapseAnonymousFunctionsTest::testInnerFunction1
+  public void testInnerFunction1() {
+    test(
+        "function f() { " +
+        "  var x = 3; var y = function() { return 4; }; return x + y();" +
+        "}",
+        "function f() { " +
+        "  function y() { return 4; } var x = 3; return x + y();" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testCollapse
+  public void testCollapse() {
+    test("var a = {}; a.b = {}; var c = a.b;",
+         "var a$b = {}; var c = a$b");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testMultiLevelCollapse
+  public void testMultiLevelCollapse() {
+    test("var a = {}; a.b = {}; a.b.c = {}; var d = a.b.c;",
+         "var a$b$c = {}; var d = a$b$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testDecrement
+  public void testDecrement() {
+    test("var a = {}; a.b = 5; a.b--; a.b = 5",
+         "var a$b = 5; a$b--; a$b = 5");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testIncrement
+  public void testIncrement() {
+    test("var a = {}; a.b = 5; a.b++; a.b = 5",
+         "var a$b = 5; a$b++; a$b = 5");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitDeclaration
+  public void testObjLitDeclaration() {
+    test("var a = {b: {}, c: {}}; var d = a.b; var e = a.c",
+         "var a$b = {}; var a$c = {}; var d = a$b; var e = a$c");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitDeclarationWithDuplicateKeys
+  public void testObjLitDeclarationWithDuplicateKeys() {
+    test("var a = {b: 0, b: 1}; var c = a.b;",
+         "var a$b = 0; var a$b = 1; var c = a$b;",
+         SyntacticScopeCreator.VAR_MULTIPLY_DECLARED_ERROR);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignmentDepth1
+  public void testObjLitAssignmentDepth1() {
+    test("var a = {b: {}, c: {}}; var d = a.b; var e = a.c",
+         "var a$b = {}; var a$c = {}; var d = a$b; var e = a$c");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignmentDepth2
+  public void testObjLitAssignmentDepth2() {
+    test("var a = {}; a.b = {c: {}, d: {}}; var e = a.b.c; var f = a.b.d",
+         "var a$b$c = {}; var a$b$d = {}; var e = a$b$c; var f = a$b$d");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignmentDepth3
+  public void testObjLitAssignmentDepth3() {
+    test("var a = {}; a.b = {}; a.b.c = {d: 1, e: 2}; var f = a.b.c.d",
+         "var a$b$c$d = 1; var a$b$c$e = 2; var f = a$b$c$d");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignmentDepth4
+  public void testObjLitAssignmentDepth4() {
+    test("var a = {}; a.b = {}; a.b.c = {}; a.b.c.d = {e: 1, f: 2}; " +
+         "var g = a.b.c.d.e",
+         "var a$b$c$d$e = 1; var a$b$c$d$f = 2; var g = a$b$c$d$e");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectDeclaredToPreserveItsPreviousValue1
+  public void testGlobalObjectDeclaredToPreserveItsPreviousValue1() {
+    test("var a = a ? a : {}; a.c = 1;",
+         "var a = a ? a : {}; var a$c = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectDeclaredToPreserveItsPreviousValue2
+  public void testGlobalObjectDeclaredToPreserveItsPreviousValue2() {
+    test("var a = a || {}; a.c = 1;",
+         "var a = a || {}; var a$c = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth1_1
+  public void testGlobalObjectNameInBooleanExpressionDepth1_1() {
+    test("var a = {b: 0}; a.c = 1; if (a) x();",
+         "var a$b = 0; var a = {}; var a$c = 1; if (a) x();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth1_2
+  public void testGlobalObjectNameInBooleanExpressionDepth1_2() {
+    test("var a = {b: 0}; a.c = 1; if (!(a && a.c)) x();",
+         "var a$b = 0; var a = {}; var a$c = 1; if (!(a && a$c)) x();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth1_3
+  public void testGlobalObjectNameInBooleanExpressionDepth1_3() {
+    test("var a = {b: 0}; a.c = 1; while (a || a.c) x();",
+         "var a$b = 0; var a = {}; var a$c = 1; while (a || a$c) x();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth1_4
+  public void testGlobalObjectNameInBooleanExpressionDepth1_4() {
+    testSame("var a = {}; a.c = 1; var d = a || {}; a.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth1_5
+  public void testGlobalObjectNameInBooleanExpressionDepth1_5() {
+    testSame("var a = {}; a.c = 1; var d = a.c || a; a.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth1_6
+  public void testGlobalObjectNameInBooleanExpressionDepth1_6() {
+    test("var a = {b: 0}; a.c = 1; var d = !(a.c || a); a.c;",
+         "var a$b = 0; var a = {}; var a$c = 1; var d = !(a$c || a); a$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth2
+  public void testGlobalObjectNameInBooleanExpressionDepth2() {
+    test("var a = {b: {}}; a.b.c = 1; if (a.b) x(a.b.c);",
+         "var a$b = {}; var a$b$c = 1; if (a$b) x(a$b$c);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalObjectNameInBooleanExpressionDepth3
+  public void testGlobalObjectNameInBooleanExpressionDepth3() {
+    
+    
+    
+    
+    
+    test("var a = {}; a.b = {};  a.b.c = function(){};" +
+         " a.b.z = 1; var d = a.b && a.b.c;",
+         "var a$b = {}; var a$b$c = function(){};" +
+         " a$b.z = 1; var d = a$b && a$b$c;", null,
+         CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalFunctionNameInBooleanExpressionDepth1
+  public void testGlobalFunctionNameInBooleanExpressionDepth1() {
+    test("function a() {} a.c = 1; if (a) x(a.c);",
+         "function a() {} var a$c = 1; if (a) x(a$c);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalFunctionNameInBooleanExpressionDepth2
+  public void testGlobalFunctionNameInBooleanExpressionDepth2() {
+    test("var a = {b: function(){}}; a.b.c = 1; if (a.b) x(a.b.c);",
+         "var a$b = function(){}; var a$b$c = 1; if (a$b) x(a$b$c);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForObjectDepth1_1
+  public void testAliasCreatedForObjectDepth1_1() {
+    
+    
+    testSame("var a = {b: 0}; var c = a; c.b = 1; a.b == c.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForObjectDepth1_2
+  public void testAliasCreatedForObjectDepth1_2() {
+    testSame("var a = {b: 0}; f(a); a.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForObjectDepth1_3
+  public void testAliasCreatedForObjectDepth1_3() {
+    testSame("var a = {b: 0}; new f(a); a.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForObjectDepth2_1
+  public void testAliasCreatedForObjectDepth2_1() {
+    test("var a = {}; a.b = {c: 0}; var d = a.b; a.b.c == d.c;",
+         "var a$b = {c: 0}; var d = a$b; a$b.c == d.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForObjectDepth2_2
+  public void testAliasCreatedForObjectDepth2_2() {
+    test("var a = {}; a.b = {c: 0}; for (var p in a.b) { e(a.b[p]); }",
+         "var a$b = {c: 0}; for (var p in a$b) { e(a$b[p]); }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth1_1
+  public void testAliasCreatedForEnumDepth1_1() {
+    
+    
+    test(" var a = {b: 0}; var c = a; c.b = 1; a.b != c.b;",
+         "var a$b = 0; var a = {b: a$b}; var c = a; c.b = 1; a$b != c.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth1_2
+  public void testAliasCreatedForEnumDepth1_2() {
+    test(" var a = {b: 0}; f(a); a.b;",
+         "var a$b = 0; var a = {b: a$b}; f(a); a$b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth1_3
+  public void testAliasCreatedForEnumDepth1_3() {
+    test(" var a = {b: 0}; new f(a); a.b;",
+         "var a$b = 0; var a = {b: a$b}; new f(a); a$b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth1_4
+  public void testAliasCreatedForEnumDepth1_4() {
+    test(" var a = {b: 0}; for (var p in a) { f(a[p]); }",
+         "var a$b = 0; var a = {b: a$b}; for (var p in a) { f(a[p]); }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth2_1
+  public void testAliasCreatedForEnumDepth2_1() {
+    test("var a = {};  a.b = {c: 0};" +
+         "var d = a.b; d.c = 1; a.b.c != d.c;",
+         "var a$b$c = 0; var a$b = {c: a$b$c};" +
+         "var d = a$b; d.c = 1; a$b$c != d.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth2_2
+  public void testAliasCreatedForEnumDepth2_2() {
+    test("var a = {};  a.b = {c: 0};" +
+         "for (var p in a.b) { f(a.b[p]); }",
+         "var a$b$c = 0; var a$b = {c: a$b$c};" +
+         "for (var p in a$b) { f(a$b[p]); }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForEnumDepth2_3
+  public void testAliasCreatedForEnumDepth2_3() {
+    test("var a = {}; var d = a;  a.b = {c: 0};" +
+         "for (var p in a.b) { f(a.b[p]); }",
+         "var a = {}; var d = a; var a$b$c = 0; var a$b = {c: a$b$c};" +
+         "for (var p in a$b) { f(a$b[p]); }",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testMisusedEnumTag
+  public void testMisusedEnumTag() {
+    testSame("var a = {}; var d = a; a.b = function() {};" +
+             " a.b.c = 0; a.b.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testMisusedConstructorTag
+  public void testMisusedConstructorTag() {
+    testSame("var a = {}; var d = a; a.b = function() {};" +
+             " a.b.c = 0; a.b.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForFunctionDepth1_1
+  public void testAliasCreatedForFunctionDepth1_1() {
+    
+    
+    
+    
+    
+    
+    test("var a = function(){}; a.b = 1; var c = a; c.b = 2; a.b != c.b;",
+         "var a = function(){}; var a$b = 1; var c = a; c.b = 2; a$b != c.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForFunctionDepth1_2
+  public void testAliasCreatedForFunctionDepth1_2() {
+    test("var a = function(){}; a.b = 1; f(a); a.b;",
+         "var a = function(){}; var a$b = 1; f(a); a$b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForFunctionDepth1_3
+  public void testAliasCreatedForFunctionDepth1_3() {
+    test("var a = function(){}; a.b = 1; new f(a); a.b;",
+         "var a = function(){}; var a$b = 1; new f(a); a$b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForFunctionDepth2
+  public void testAliasCreatedForFunctionDepth2() {
+    test("var a = {}; a.b = function() {}; a.b.c = 1; var d = a.b;" +
+         "a.b.c != d.c;",
+         "var a$b = function() {}; var a$b$c = 1; var d = a$b;" +
+         "a$b$c != d.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForClassDepth1_1
+  public void testAliasCreatedForClassDepth1_1() {
+    
+    
+    test("var a = {};  a.b = function(){};" +
+         "var c = a; c.b = 0; a.b != c.b;",
+         "var a = {}; var a$b = function(){};" +
+         "var c = a; c.b = 0; a$b != c.b;", null,
+         CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForClassDepth1_2
+  public void testAliasCreatedForClassDepth1_2() {
+    test("var a = {};  a.b = function(){}; f(a); a.b;",
+         "var a = {}; var a$b = function(){}; f(a); a$b;",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForClassDepth1_3
+  public void testAliasCreatedForClassDepth1_3() {
+    test("var a = {};  a.b = function(){}; new f(a); a.b;",
+         "var a = {}; var a$b = function(){}; new f(a); a$b;",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForClassDepth2_1
+  public void testAliasCreatedForClassDepth2_1() {
+    test("var a = {}; a.b = {};  a.b.c = function(){};" +
+         "var d = a.b; a.b.c != d.c;",
+         "var a$b = {}; var a$b$c = function(){};" +
+         "var d = a$b; a$b$c != d.c;",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForClassDepth2_2
+  public void testAliasCreatedForClassDepth2_2() {
+    test("var a = {}; a.b = {};  a.b.c = function(){};" +
+         "f(a.b); a.b.c;",
+         "var a$b = {}; var a$b$c = function(){}; f(a$b); a$b$c;",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAliasCreatedForClassDepth2_3
+  public void testAliasCreatedForClassDepth2_3() {
+    test("var a = {}; a.b = {};  a.b.c = function(){};" +
+         "new f(a.b); a.b.c;",
+         "var a$b = {}; var a$b$c = function(){}; new f(a$b); a$b$c;",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNestedObjLit
+  public void testNestedObjLit() {
+    test("var a = {}; a.b = {f: 0, c: {d: 1}}; var e = a.b.c.d",
+         "var a$b$f = 0; var a$b$c$d = 1; var e = a$b$c$d;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitDeclarationUsedInSameVarList
+  public void testObjLitDeclarationUsedInSameVarList() {
+    
+    
+    test("var a = {b: {}, c: {}}; var d = a.b; var e = a.c;",
+         "var a$b = {}; var a$c = {}; var d = a$b; var e = a$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPropGetInsideAnObjLit
+  public void testPropGetInsideAnObjLit() {
+    test("var x = {}; x.y = 1; var a = {}; a.b = {c: x.y}",
+         "var x$y = 1; var a$b$c = x$y;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitWithQuotedKeyThatDoesNotGetRead
+  public void testObjLitWithQuotedKeyThatDoesNotGetRead() {
+    test("var a = {}; a.b = {c: 0, 'd': 1}; var e = a.b.c;",
+         "var a$b$c = 0; var a$b$d = 1; var e = a$b$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitWithQuotedKeyThatGetsRead
+  public void testObjLitWithQuotedKeyThatGetsRead() {
+    test("var a = {}; a.b = {c: 0, 'd': 1}; var e = a.b['d'];",
+         "var a$b = {c: 0, 'd': 1}; var e = a$b['d'];");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionWithQuotedPropertyThatDoesNotGetRead
+  public void testFunctionWithQuotedPropertyThatDoesNotGetRead() {
+    test("var a = {}; a.b = function() {}; a.b['d'] = 1;",
+         "var a$b = function() {}; a$b['d'] = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionWithQuotedPropertyThatGetsRead
+  public void testFunctionWithQuotedPropertyThatGetsRead() {
+    test("var a = {}; a.b = function() {}; a.b['d'] = 1; f(a.b['d']);",
+         "var a$b = function() {}; a$b['d'] = 1; f(a$b['d']);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignedToMultipleNames1
+  public void testObjLitAssignedToMultipleNames1() {
+    
+    testSame("var a = b = {c: 0, d: 1}; var e = a.c; var f = b.d;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignedToMultipleNames2
+  public void testObjLitAssignedToMultipleNames2() {
+    testSame("a = b = {c: 0, d: 1}; var e = a.c; var f = b.d;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitRedefinedInGlobalScope
+  public void testObjLitRedefinedInGlobalScope() {
+    testSame("a = {b: 0}; a = {c: 1}; var d = a.b; var e = a.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitRedefinedInLocalScope
+  public void testObjLitRedefinedInLocalScope() {
+    test("var a = {}; a.b = {c: 0}; function d() { a.b = {c: 1}; } e(a.b.c);",
+         "var a$b = {c: 0}; function d() { a$b = {c: 1}; } e(a$b.c);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignedInTernaryExpression1
+  public void testObjLitAssignedInTernaryExpression1() {
+    testSame("a = x ? {b: 0} : d; var c = a.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitAssignedInTernaryExpression2
+  public void testObjLitAssignedInTernaryExpression2() {
+    testSame("a = x ? {b: 0} : {b: 1}; var c = a.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalVarSetToObjLitConditionally1
+  public void testGlobalVarSetToObjLitConditionally1() {
+    testSame("var a; if (x) a = {b: 0}; var c = x ? a.b : 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalVarSetToObjLitConditionally1b
+  public void testGlobalVarSetToObjLitConditionally1b() {
+    test("if (x) var a = {b: 0}; var c = x ? a.b : 0;",
+         "if (x) var a$b = 0; var c = x ? a$b : 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalVarSetToObjLitConditionally2
+  public void testGlobalVarSetToObjLitConditionally2() {
+    test("if (x) var a = {b: 0}; var c = a.b; var d = a.c;",
+         "if (x){ var a$b = 0; var a = {}; }var c = a$b; var d = a.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalVarSetToObjLitConditionally3
+  public void testGlobalVarSetToObjLitConditionally3() {
+    testSame("var a; if (x) a = {b: 0}; else a = {b: 1}; var c = a.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjectPropertySetToObjLitConditionally
+  public void testObjectPropertySetToObjLitConditionally() {
+    test("var a = {}; if (x) a.b = {c: 0}; var d = a.b ? a.b.c : 0;",
+         "if (x){ var a$b$c = 0; var a$b = {} } var d = a$b ? a$b$c : 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionPropertySetToObjLitConditionally
+  public void testFunctionPropertySetToObjLitConditionally() {
+    test("function a() {} if (x) a.b = {c: 0}; var d = a.b ? a.b.c : 0;",
+         "function a() {} if (x){ var a$b$c = 0; var a$b = {} }" +
+         "var d = a$b ? a$b$c : 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPrototypePropertySetToAnObjectLiteral
+  public void testPrototypePropertySetToAnObjectLiteral() {
+    test("var a = {b: function(){}}; a.b.prototype.c = {d: 0};",
+         "var a$b = function(){}; a$b.prototype.c = {d: 0};");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjectPropertyResetInLocalScope
+  public void testObjectPropertyResetInLocalScope() {
+    test("var z = {}; z.a = 0; function f() {z.a = 5; return z.a}",
+         "var z$a = 0; function f() {z$a = 5; return z$a}");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionPropertyResetInLocalScope
+  public void testFunctionPropertyResetInLocalScope() {
+    test("function z() {} z.a = 0; function f() {z.a = 5; return z.a}",
+         "function z() {} var z$a = 0; function f() {z$a = 5; return z$a}");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNamespaceResetInGlobalScope1
+  public void testNamespaceResetInGlobalScope1() {
+    test("var a = {}; a.b = function() {}; a = {};",
+         "var a = {}; var a$b = function() {}; a = {};",
+         null, CollapseProperties.NAMESPACE_REDEFINED_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNamespaceResetInGlobalScope2
+  public void testNamespaceResetInGlobalScope2() {
+    test("var a = {}; a = {}; a.b = function() {};",
+         "var a = {}; a = {}; var a$b = function() {};",
+         null, CollapseProperties.NAMESPACE_REDEFINED_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNamespaceResetInLocalScope1
+  public void testNamespaceResetInLocalScope1() {
+    test("var a = {}; a.b = function() {};" +
+         " function f() { a = {}; }",
+         "var a = {};var a$b = function() {};" +
+         " function f() { a = {}; }",
+         null, CollapseProperties.NAMESPACE_REDEFINED_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNamespaceResetInLocalScope2
+  public void testNamespaceResetInLocalScope2() {
+    test("var a = {}; function f() { a = {}; }" +
+         " a.b = function() {};",
+         "var a = {}; function f() { a = {}; }" +
+         " var a$b = function() {};",
+         null, CollapseProperties.NAMESPACE_REDEFINED_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNamespaceDefinedInLocalScope
+  public void testNamespaceDefinedInLocalScope() {
+    test("var a = {}; (function() { a.b = {}; })();" +
+         " a.b.c = function() {};",
+         "var a$b; (function() { a$b = {}; })(); var a$b$c = function() {};");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToObjectInLocalScopeDepth1
+  public void testAddPropertyToObjectInLocalScopeDepth1() {
+    test("var a = {b: 0}; function f() { a.c = 5; return a.c; }",
+         "var a$b = 0; var a$c; function f() { a$c = 5; return a$c; }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToObjectInLocalScopeDepth2
+  public void testAddPropertyToObjectInLocalScopeDepth2() {
+    test("var a = {}; a.b = {}; (function() {a.b.c = 0;})(); x = a.b.c;",
+         "var a$b$c; (function() {a$b$c = 0;})(); x = a$b$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToFunctionInLocalScopeDepth1
+  public void testAddPropertyToFunctionInLocalScopeDepth1() {
+    test("function a() {} function f() { a.c = 5; return a.c; }",
+         "function a() {} var a$c; function f() { a$c = 5; return a$c; }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToFunctionInLocalScopeDepth2
+  public void testAddPropertyToFunctionInLocalScopeDepth2() {
+    test("var a = {}; a.b = function() {}; function f() {a.b.c = 0;}",
+         "var a$b = function() {}; var a$b$c; function f() {a$b$c = 0;}");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToUncollapsibleObjectInLocalScopeDepth1
+  public void testAddPropertyToUncollapsibleObjectInLocalScopeDepth1() {
+    testSame("var a = {}; var c = a; (function() {a.b = 0;})(); a.b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToUncollapsibleFunctionInLocalScopeDepth1
+  public void testAddPropertyToUncollapsibleFunctionInLocalScopeDepth1() {
+    test("function a() {} var c = a; (function() {a.b = 0;})(); a.b;",
+         "function a() {} var a$b; var c = a; (function() {a$b = 0;})(); a$b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToUncollapsibleObjectInLocalScopeDepth2
+  public void testAddPropertyToUncollapsibleObjectInLocalScopeDepth2() {
+    test("var a = {}; a.b = {}; var d = a.b;" +
+         "(function() {a.b.c = 0;})(); a.b.c;",
+         "var a$b = {}; var d = a$b;" +
+         "(function() {a$b.c = 0;})(); a$b.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToUncollapsibleFunctionInLocalScopeDepth2
+  public void testAddPropertyToUncollapsibleFunctionInLocalScopeDepth2() {
+    test("var a = {}; a.b = function (){}; var d = a.b;" +
+         "(function() {a.b.c = 0;})(); a.b.c;",
+         "var a$b = function (){}; var a$b$c; var d = a$b;" +
+         "(function() {a$b$c = 0;})(); a$b$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPropertyOfChildFuncOfUncollapsibleObjectDepth1
+  public void testPropertyOfChildFuncOfUncollapsibleObjectDepth1() {
+    testSame("var a = {}; var c = a; a.b = function (){}; a.b.x = 0; a.b.x;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPropertyOfChildFuncOfUncollapsibleObjectDepth2
+  public void testPropertyOfChildFuncOfUncollapsibleObjectDepth2() {
+    test("var a = {}; a.b = {}; var c = a.b;" +
+         "a.b.c = function (){}; a.b.c.x = 0; a.b.c.x;",
+         "var a$b = {}; var c = a$b;" +
+         "a$b.c = function (){}; a$b.c.x = 0; a$b.c.x;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToChildFuncOfUncollapsibleObjectInLocalScope
+  public void testAddPropertyToChildFuncOfUncollapsibleObjectInLocalScope() {
+    testSame("var a = {}; a.b = function (){}; a.b.x = 0;" +
+             "var c = a; (function() {a.b.y = 1;})(); a.b.x; a.b.y;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToChildTypeOfUncollapsibleObjectInLocalScope
+  public void testAddPropertyToChildTypeOfUncollapsibleObjectInLocalScope() {
+    test("var a = {};  a.b = function (){}; a.b.x = 0;" +
+         "var c = a; (function() {a.b.y = 1;})(); a.b.x; a.b.y;",
+         "var a = {}; var a$b = function (){}; var a$b$y; var a$b$x = 0;" +
+         "var c = a; (function() {a$b$y = 1;})(); a$b$x; a$b$y;",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testAddPropertyToChildOfUncollapsibleFunctionInLocalScope
+  public void testAddPropertyToChildOfUncollapsibleFunctionInLocalScope() {
+    test("function a() {} a.b = {x: 0}; var c = a;" +
+         "(function() {a.b.y = 0;})(); a.b.y;",
+         "function a() {} var a$b$x = 0; var a$b$y; var c = a;" +
+         "(function() {a$b$y = 0;})(); a$b$y;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testResetObjectPropertyInLocalScope
+  public void testResetObjectPropertyInLocalScope() {
+    test("var a = {b: 0}; a.c = 1; function f() { a.c = 5; }",
+         "var a$b = 0; var a$c = 1; function f() { a$c = 5; }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testResetFunctionPropertyInLocalScope
+  public void testResetFunctionPropertyInLocalScope() {
+    test("function a() {}; a.c = 1; function f() { a.c = 5; }",
+         "function a() {}; var a$c = 1; function f() { a$c = 5; }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalNameReferencedInLocalScopeBeforeDefined1
+  public void testGlobalNameReferencedInLocalScopeBeforeDefined1() {
+    
+    
+    
+    
+    test("var a = {b: 0}; function f() { a.c = 5; } a.c = 1;",
+         "var a$b = 0; function f() { a$c = 5; } var a$c = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalNameReferencedInLocalScopeBeforeDefined2
+  public void testGlobalNameReferencedInLocalScopeBeforeDefined2() {
+    test("var a = {b: 0}; function f() { return a.c; } a.c = 1;",
+         "var a$b = 0; function f() { return a$c; } var a$c = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testTwiceDefinedGlobalNameDepth1_1
+  public void testTwiceDefinedGlobalNameDepth1_1() {
+    testSame("var a = {}; function f() { a.b(); }" +
+             "a = function() {}; a.b = function() {};");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testTwiceDefinedGlobalNameDepth1_2
+  public void testTwiceDefinedGlobalNameDepth1_2() {
+    testSame("var a = {};  a = function() {};" +
+             "a.b = {}; a.b.c = 0; function f() { a.b.d = 1; }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testTwiceDefinedGlobalNameDepth2
+  public void testTwiceDefinedGlobalNameDepth2() {
+    test("var a = {}; a.b = {}; function f() { a.b.c(); }" +
+         "a.b = function() {}; a.b.c = function() {};",
+         "var a$b = {}; function f() { a$b.c(); }" +
+         "a$b = function() {}; a$b.c = function() {};");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionCallDepth1
+  public void testFunctionCallDepth1() {
+    test("var a = {}; a.b = function(){}; var c = a.b();",
+         "var a$b = function(){}; var c = a$b()");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionCallDepth2
+  public void testFunctionCallDepth2() {
+    test("var a = {}; a.b = {}; a.b.c = function(){}; a.b.c();",
+         "var a$b$c = function(){}; a$b$c();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionAlias
+  public void testFunctionAlias() {
+    test("var a = {}; a.b = {}; a.b.c = function(){}; a.b.d = a.b.c;",
+         "var a$b$c = function(){}; var a$b$d = a$b$c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testCallToRedefinedFunction
+  public void testCallToRedefinedFunction() {
+    test("var a = {}; a.b = function(){}; a.b = function(){}; a.b();",
+         "var a$b = function(){}; a$b = function(){}; a$b();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testCollapsePrototypeName
+  public void testCollapsePrototypeName() {
+    test("var a = {}; a.b = {}; a.b.c = function(){}; " +
+         "a.b.c.prototype.d = function(){}; (new a.b.c()).d();",
+         "var a$b$c = function(){}; a$b$c.prototype.d = function(){}; " +
+         "new a$b$c().d();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testReferencedPrototypeProperty
+  public void testReferencedPrototypeProperty() {
+    test("var a = {b: {}}; a.b.c = function(){}; a.b.c.prototype.d = {};" +
+         "e = a.b.c.prototype.d;",
+         "var a$b$c = function(){}; a$b$c.prototype.d = {};" +
+         "e = a$b$c.prototype.d;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testSetStaticAndPrototypePropertiesOnFunction
+  public void testSetStaticAndPrototypePropertiesOnFunction() {
+    test("var a = {}; a.b = function(){}; a.b.prototype.d = 0; a.b.c = 1;",
+         "var a$b = function(){}; a$b.prototype.d = 0; var a$b$c = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testReadUndefinedPropertyDepth1
+  public void testReadUndefinedPropertyDepth1() {
+    test("var a = {b: 0}; var c = a.d;",
+         "var a$b = 0; var a = {}; var c = a.d;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testReadUndefinedPropertyDepth2
+  public void testReadUndefinedPropertyDepth2() {
+    test("var a = {b: {c: 0}}; f(a.b.c); f(a.b.d);",
+         "var a$b$c = 0; var a$b = {}; f(a$b$c); f(a$b.d);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testCallUndefinedMethodOnObjLitDepth1
+  public void testCallUndefinedMethodOnObjLitDepth1() {
+    test("var a = {b: 0}; a.c();",
+         "var a$b = 0; var a = {}; a.c();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testCallUndefinedMethodOnObjLitDepth2
+  public void testCallUndefinedMethodOnObjLitDepth2() {
+    test("var a = {b: {}}; a.b.c = function() {}; a.b.c(); a.b.d();",
+         "var a$b = {}; var a$b$c = function() {}; a$b$c(); a$b.d();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPropertiesOfAnUndefinedVar
+  public void testPropertiesOfAnUndefinedVar() {
+    testSame("a.document = d; f(a.document.innerHTML);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPropertyOfAnObjectThatIsNeitherFunctionNorObjLit
+  public void testPropertyOfAnObjectThatIsNeitherFunctionNorObjLit() {
+    testSame("var a = window; a.document = d; f(a.document)");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testStaticFunctionReferencingThis1
+  public void testStaticFunctionReferencingThis1() {
+    
+    
+    test("var a = {}; a.b = function() {this.c}; var d = a.b;",
+         "var a$b = function() {this.c}; var d = a$b;", null, UNSAFE_THIS);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testStaticFunctionReferencingThis2
+  public void testStaticFunctionReferencingThis2() {
+    
+    
+    test("var a = {}; " +
+         "a.b = function() { return function(){ return this; }; };",
+         "var a$b = function() { return function(){ return this; }; };");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testStaticFunctionReferencingThis3
+  public void testStaticFunctionReferencingThis3() {
+    test("var a = {b: function() {this.c}};",
+         "var a$b = function() { this.c };", null, UNSAFE_THIS);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testStaticFunctionReferencingThis4
+  public void testStaticFunctionReferencingThis4() {
+    test("var a = { b: function() {this.c}};",
+         "var a$b = function() { this.c };");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPrototypeMethodReferencingThis
+  public void testPrototypeMethodReferencingThis() {
+    testSame("var A = function(){}; A.prototype = {b: function() {this.c}};");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testConstructorReferencingThis
+  public void testConstructorReferencingThis() {
+    test("var a = {}; " +
+         " a.b = function() { this.a = 3; };",
+         "var a$b = function() { this.a = 3; };");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testSafeReferenceOfThis
+  public void testSafeReferenceOfThis() {
+    test("var a = {}; " +
+         " a.b = function() { this.a = 3; };",
+         "var a$b = function() { this.a = 3; };");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGlobalFunctionReferenceOfThis
+  public void testGlobalFunctionReferenceOfThis() {
+    testSame("var a = function() { this.a = 3; };");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testFunctionGivenTwoNames
+  public void testFunctionGivenTwoNames() {
+    
+    
+    test("var f = function g() {}; f.a = 1; h(f.a);",
+         "var f = function g() {}; var f$a = 1; h(f$a);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitWithUsedNumericKey
+  public void testObjLitWithUsedNumericKey() {
+    testSame("a = {40: {}, c: {}}; var d = a[40]; var e = a.c;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitWithUnusedNumericKey
+  public void testObjLitWithUnusedNumericKey() {
+    test("var a = {40: {}, c: {}}; var e = a.c;",
+         "var a$1 = {}; var a$c = {}; var e = a$c");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitWithNonIdentifierKeys
+  public void testObjLitWithNonIdentifierKeys() {
+    testSame("a = {' ': 0, ',': 1}; var c = a[' '];");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments1
+  public void testChainedAssignments1() {
+    test("var x = {}; x.y = a = 0;",
+         "var x$y = a = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments2
+  public void testChainedAssignments2() {
+    test("var x = {}; x.y = a = b = c();",
+         "var x$y = a = b = c();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments3
+  public void testChainedAssignments3() {
+    test("var x = {y: 1}; a = b = x.y;",
+         "var x$y = 1; a = b = x$y;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments4
+  public void testChainedAssignments4() {
+    test("var x = {}; a = b = x.y;",
+         "var x = {}; a = b = x.y;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments5
+  public void testChainedAssignments5() {
+    test("var x = {}; a = x.y = 0;", "var x$y; a = x$y = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments6
+  public void testChainedAssignments6() {
+    test("var x = {}; a = x.y = b = c();",
+         "var x$y; a = x$y = b = c();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedAssignments7
+  public void testChainedAssignments7() {
+    test("var x = {}; a = x.y = {};  x.y.z = function() {};",
+         "var x$y; a = x$y = {}; var x$y$z = function() {};",
+         null, CollapseProperties.UNSAFE_NAMESPACE_WARNING);
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedVarAssignments1
+  public void testChainedVarAssignments1() {
+    test("var x = {y: 1}; var a = x.y = 0;",
+         "var x$y = 1; var a = x$y = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedVarAssignments2
+  public void testChainedVarAssignments2() {
+    test("var x = {y: 1}; var a = x.y = b = 0;",
+         "var x$y = 1; var a = x$y = b = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedVarAssignments3
+  public void testChainedVarAssignments3() {
+    test("var x = {y: {z: 1}}; var b = 0; var a = x.y.z = 1; var c = 2;",
+         "var x$y$z = 1; var b = 0; var a = x$y$z = 1; var c = 2;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedVarAssignments4
+  public void testChainedVarAssignments4() {
+    test("var x = {}; var a = b = x.y = 0;",
+         "var x$y; var a = b = x$y = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testChainedVarAssignments5
+  public void testChainedVarAssignments5() {
+    test("var x = {y: {}}; var a = b = x.y.z = 0;",
+         "var x$y$z; var a = b = x$y$z = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPeerAndSubpropertyOfUncollapsibleProperty
+  public void testPeerAndSubpropertyOfUncollapsibleProperty() {
+    test("var x = {}; var a = x.y = 0; x.w = 1; x.y.z = 2;" +
+         "b = x.w; c = x.y.z;",
+         "var x$y; var a = x$y = 0; var x$w = 1; x$y.z = 2;" +
+         "b = x$w; c = x$y.z;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testComplexAssignmentAfterInitialAssignment
+  public void testComplexAssignmentAfterInitialAssignment() {
+    test("var d = {}; d.e = {}; d.e.f = 0; a = b = d.e.f = 1;",
+         "var d$e$f = 0; a = b = d$e$f = 1;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testRenamePrefixOfUncollapsibleProperty
+  public void testRenamePrefixOfUncollapsibleProperty() {
+    test("var d = {}; d.e = {}; a = b = d.e.f = 0;",
+         "var d$e$f; a = b = d$e$f = 0;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testNewOperator
+  public void testNewOperator() {
+    
+    
+    test("var a = {}; a.b = function() {}; a.b.c = 1; var d = new a.b();",
+         "var a$b = function() {}; var a$b$c = 1; var d = new a$b();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testMethodCall
+  public void testMethodCall() {
+    test("var a = {}; a.b = function() {}; var d = a.b();",
+         "var a$b = function() {}; var d = a$b();");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testObjLitDefinedInLocalScopeIsLeftAlone
+  public void testObjLitDefinedInLocalScopeIsLeftAlone() {
+    test("var a = {}; a.b = function() {};" +
+         "a.b.prototype.f_ = function() {" +
+         "  var x = { p: '', q: '', r: ''}; var y = x.q;" +
+         "};",
+         "var a$b = function() {};" +
+         "a$b.prototype.f_ = function() {" +
+         "  var x = { p: '', q: '', r: ''}; var y = x.q;" +
+         "};");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testPropertiesOnBothSidesOfAssignment
+  public void testPropertiesOnBothSidesOfAssignment() {
+    
+    
+    
+    test("var a = {b: 0}; a.c = a.b;", "var a$b = 0; var a$c = a$b;");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testCallOnUndefinedProperty
+  public void testCallOnUndefinedProperty() {
+    
+    
+    
+    
+    test("var a = {}; a.b = function(){}; a.b.inherits(x);",
+         "var a$b = function(){}; a$b.inherits(x);");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testGetPropOnUndefinedProperty
+  public void testGetPropOnUndefinedProperty() {
+    
+    
+    
+    
+    test("var a = {b: function(){}}; a.b.prototype.c =" +
+         "function() { a.b.superClass_.c.call(this); }",
+         "var a$b = function(){}; a$b.prototype.c =" +
+         "function() { a$b.superClass_.c.call(this); }");
+  }
+
+// com.google.javascript.jscomp.CollapsePropertiesTest::testLocalAlias1
+  public void testLocalAlias1() {
+    test("var a = {b: 3}; function f() { var x = a; f(x.b); }",
+         "var a$b = 3; function f() { var x = null; f(a$b); }");
+  }

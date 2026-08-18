@@ -1,0 +1,44 @@
+private void visitFunction(NodeTraversal t, Node n) {
+      FunctionType funType = (FunctionType) n.getJSType();
+      Node block = n.getLastChild();
+      Node paramName = NodeUtil.getFnParameters(n).getFirstChild();
+      Node insertionPoint = null;
+
+      // To satisfy normalization constraints, the type checking must be
+      // added after any inner function declarations.
+      // Find the last consecutive function declaration at the start of the block.
+      for (Node child = block.getFirstChild(); child != null; child = child.getNext()) {
+        if (NodeUtil.isFunctionDeclaration(child)) {
+          insertionPoint = child;
+        } else {
+          break;
+        }
+      }
+
+      for (Node paramType : funType.getParameters()) {
+        // Can this ever happen?
+        if (paramName == null) {
+          return;
+        }
+
+        Node checkNode = createCheckTypeCallNode(
+            paramType.getJSType(), paramName.cloneTree());
+
+        if (checkNode == null) {
+          // We don't know how to check this parameter type.
+          paramName = paramName.getNext();
+          continue;
+        }
+
+        checkNode = new Node(Token.EXPR_RESULT, checkNode);
+        if (insertionPoint == null) {
+          block.addChildToFront(checkNode);
+        } else {
+          block.addChildAfter(checkNode, insertionPoint);
+        }
+
+        compiler.reportCodeChange();
+        paramName = paramName.getNext();
+        insertionPoint = checkNode;
+      }
+    }

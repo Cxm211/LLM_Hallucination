@@ -1,0 +1,110 @@
+        public Object setValue(Object value) {
+            if (canRemove == false) {
+                throw new IllegalStateException(AbstractHashedMap.SETVALUE_INVALID);
+            }
+            Object old = getValue();
+            switch (nextIndex) {
+                case 3: 
+                    parent.value3 = value;
+                case 2:
+                    parent.value2 = value;
+                case 1:
+                    parent.value1 = value;
+            }
+            return old;
+        }
+
+        public Object setValue(Object value) {
+            if (canRemove == false) {
+                throw new IllegalStateException(AbstractHashedMap.SETVALUE_INVALID);
+            }
+            Object old = getValue();
+            switch (nextIndex) {
+                case 3: 
+                    parent.value3 = value;
+                case 2:
+                    parent.value2 = value;
+                case 1:
+                    parent.value1 = value;
+            }
+            return old;
+        }
+
+// trigger testcase
+public void testEntryIteratorSetValue2() throws Exception {
+        Flat3Map map = new Flat3Map();
+        map.put(ONE, TEN);
+        map.put(TWO, TWENTY);
+        map.put(THREE, THIRTY);
+        
+        Iterator it = map.entrySet().iterator();
+        it.next();
+        Map.Entry entry = (Map.Entry) it.next();
+        entry.setValue("NewValue");
+        assertEquals(3, map.size());
+        assertEquals(true, map.containsKey(ONE));
+        assertEquals(true, map.containsKey(TWO));
+        assertEquals(true, map.containsKey(THREE));
+        assertEquals(TEN, map.get(ONE));
+        assertEquals("NewValue", map.get(TWO));
+        assertEquals(THIRTY, map.get(THREE));
+    }
+
+public void testEntryIteratorSetValue3() throws Exception {
+        Flat3Map map = new Flat3Map();
+        map.put(ONE, TEN);
+        map.put(TWO, TWENTY);
+        map.put(THREE, THIRTY);
+        
+        Iterator it = map.entrySet().iterator();
+        it.next();
+        it.next();
+        Map.Entry entry = (Map.Entry) it.next();
+        entry.setValue("NewValue");
+        assertEquals(3, map.size());
+        assertEquals(true, map.containsKey(ONE));
+        assertEquals(true, map.containsKey(TWO));
+        assertEquals(true, map.containsKey(THREE));
+        assertEquals(TEN, map.get(ONE));
+        assertEquals(TWENTY, map.get(TWO));
+        assertEquals("NewValue", map.get(THREE));
+    }
+
+public void testMapIteratorSetValue2() throws Exception {
+        Flat3Map map = new Flat3Map();
+        map.put(ONE, TEN);
+        map.put(TWO, TWENTY);
+        map.put(THREE, THIRTY);
+        
+        MapIterator it = map.mapIterator();
+        it.next();
+        it.next();
+        it.setValue("NewValue");
+        assertEquals(3, map.size());
+        assertEquals(true, map.containsKey(ONE));
+        assertEquals(true, map.containsKey(TWO));
+        assertEquals(true, map.containsKey(THREE));
+        assertEquals(TEN, map.get(ONE));
+        assertEquals("NewValue", map.get(TWO));
+        assertEquals(THIRTY, map.get(THREE));
+    }
+
+public void testMapIteratorSetValue3() throws Exception {
+        Flat3Map map = new Flat3Map();
+        map.put(ONE, TEN);
+        map.put(TWO, TWENTY);
+        map.put(THREE, THIRTY);
+        
+        MapIterator it = map.mapIterator();
+        it.next();
+        it.next();
+        it.next();
+        it.setValue("NewValue");
+        assertEquals(3, map.size());
+        assertEquals(true, map.containsKey(ONE));
+        assertEquals(true, map.containsKey(TWO));
+        assertEquals(true, map.containsKey(THREE));
+        assertEquals(TEN, map.get(ONE));
+        assertEquals(TWENTY, map.get(TWO));
+        assertEquals("NewValue", map.get(THREE));
+    }

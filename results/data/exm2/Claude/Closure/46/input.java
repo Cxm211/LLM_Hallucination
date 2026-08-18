@@ -1,0 +1,71 @@
+  public JSType getLeastSupertype(JSType that) {
+    if (!that.isRecordType()) {
+      return super.getLeastSupertype(that);
+    }
+    RecordTypeBuilder builder = new RecordTypeBuilder(registry);
+    for (String property : properties.keySet()) {
+      if (that.toMaybeRecordType().hasProperty(property) &&
+          that.toMaybeRecordType().getPropertyType(property).isEquivalentTo(
+              getPropertyType(property))) {
+        builder.addProperty(property, getPropertyType(property),
+            getPropertyNode(property));
+      }
+    }
+    return builder.build();
+  }
+
+// trigger testcase
+public void testRecordTypeLeastSuperType2() {
+    RecordTypeBuilder builder = new RecordTypeBuilder(registry);
+    builder.addProperty("e", NUMBER_TYPE, null);
+    builder.addProperty("b", STRING_TYPE, null);
+    builder.addProperty("c", STRING_TYPE, null);
+    JSType otherRecordType = builder.build();
+
+    assertTypeEquals(
+        registry.createUnionType(recordType, otherRecordType),
+        recordType.getLeastSupertype(otherRecordType));
+  }
+
+public void testRecordTypeLeastSuperType3() {
+    RecordTypeBuilder builder = new RecordTypeBuilder(registry);
+    builder.addProperty("d", NUMBER_TYPE, null);
+    builder.addProperty("e", STRING_TYPE, null);
+    builder.addProperty("f", STRING_TYPE, null);
+    JSType otherRecordType = builder.build();
+
+    assertTypeEquals(
+        registry.createUnionType(recordType, otherRecordType),
+        recordType.getLeastSupertype(otherRecordType));
+  }
+
+public void testSupAndInf() {
+    JSType recordA = new RecordTypeBuilder(registry)
+        .addProperty("a", NUMBER_TYPE, null)
+        .addProperty("b", NUMBER_TYPE, null)
+        .build();
+    JSType recordC = new RecordTypeBuilder(registry)
+        .addProperty("b", NUMBER_TYPE, null)
+        .addProperty("c", NUMBER_TYPE, null)
+        .build();
+    ProxyObjectType proxyRecordA = new ProxyObjectType(registry, recordA);
+    ProxyObjectType proxyRecordC = new ProxyObjectType(registry, recordC);
+
+    JSType aInfC = new RecordTypeBuilder(registry)
+        .addProperty("a", NUMBER_TYPE, null)
+        .addProperty("b", NUMBER_TYPE, null)
+        .addProperty("c", NUMBER_TYPE, null)
+        .build();
+
+    JSType aSupC = registry.createUnionType(recordA, recordC);
+
+    Asserts.assertTypeEquals(
+        aInfC, recordA.getGreatestSubtype(recordC));
+    Asserts.assertTypeEquals(
+        aSupC, recordA.getLeastSupertype(recordC));
+
+    Asserts.assertTypeEquals(
+        aInfC, proxyRecordA.getGreatestSubtype(proxyRecordC));
+    Asserts.assertTypeEquals(
+        aSupC, proxyRecordA.getLeastSupertype(proxyRecordC));
+  }

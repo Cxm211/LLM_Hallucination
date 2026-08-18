@@ -1,0 +1,55 @@
+// buggy function
+    public boolean hasAttr(String attributeKey) {
+        Validate.notNull(attributeKey);
+
+        return attributes.hasKey(attributeKey);
+    }
+
+// trigger testcase
+// org/jsoup/nodes/NodeTest.java::handlesAbsPrefix
+@Test public void handlesAbsPrefix() {
+        Document doc = Jsoup.parse("<a href=/foo>Hello</a>", "http://jsoup.org/");
+        Element a = doc.select("a").first();
+        assertEquals("/foo", a.attr("href"));
+        assertEquals("http://jsoup.org/foo", a.attr("abs:href"));
+        assertTrue(a.hasAttr("abs:href"));
+    }
+
+// org/jsoup/nodes/NodeTest.java::handlesAbsPrefixOnHasAttr
+@Test public void handlesAbsPrefixOnHasAttr() {
+        // 1: no abs url; 2: has abs url
+        Document doc = Jsoup.parse("<a id=1 href='/foo'>One</a> <a id=2 href='http://jsoup.org/'>Two</a>");
+        Element one = doc.select("#1").first();
+        Element two = doc.select("#2").first();
+
+        assertFalse(one.hasAttr("abs:href"));
+        assertTrue(one.hasAttr("href"));
+        assertEquals("", one.absUrl("href"));
+
+        assertTrue(two.hasAttr("abs:href"));
+        assertTrue(two.hasAttr("href"));
+        assertEquals("http://jsoup.org/", two.absUrl("href"));
+    }
+
+// org/jsoup/select/ElementsTest.java::absAttr
+@Test public void absAttr() {
+        Document doc = Jsoup.parse("<a id=1 href='/foo'>One</a> <a id=2 href='http://jsoup.org'>Two</a>");
+        Elements one = doc.select("#1");
+        Elements two = doc.select("#2");
+        Elements both = doc.select("a");
+
+        assertEquals("", one.attr("abs:href"));
+        assertEquals("http://jsoup.org", two.attr("abs:href"));
+        assertEquals("http://jsoup.org", both.attr("abs:href"));
+    }
+
+// org/jsoup/select/ElementsTest.java::hasAbsAttr
+@Test public void hasAbsAttr() {
+        Document doc = Jsoup.parse("<a id=1 href='/foo'>One</a> <a id=2 href='http://jsoup.org'>Two</a>");
+        Elements one = doc.select("#1");
+        Elements two = doc.select("#2");
+        Elements both = doc.select("a");
+        assertFalse(one.hasAttr("abs:href"));
+        assertTrue(two.hasAttr("abs:href"));
+        assertTrue(both.hasAttr("abs:href")); // hits on #2
+    }

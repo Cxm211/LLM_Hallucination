@@ -1,0 +1,16 @@
+private Integer getBasicRow(final int col) {
+        Integer row = null;
+        for (int i = getNumObjectiveFunctions(); i < getHeight(); i++) {
+            double entry = getEntry(i, col);
+            if (MathUtils.equals(entry, 1.0, epsilon)) {
+                if (row == null) {
+                    row = i;
+                } else {
+                    return null;
+                }
+            } else if (!MathUtils.equals(entry, 0.0, epsilon)) {
+                return null;
+            }
+        }
+        return row;
+    }

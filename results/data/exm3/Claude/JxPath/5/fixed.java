@@ -1,0 +1,33 @@
+// ===== FIXED org.apache.commons.jxpath.ri.model.NodePointer :: compareNodePointers(NodePointer, int, NodePointer, int) [lines 642-673] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/JxPath/JxPath-5-fixed/src/java/org/apache/commons/jxpath/ri/model/NodePointer.java =====
+    private int compareNodePointers(
+        NodePointer p1,
+        int depth1,
+        NodePointer p2,
+        int depth2) 
+    {
+        if (depth1 < depth2) {
+            int r = compareNodePointers(p1, depth1, p2.parent, depth2 - 1);
+            return r == 0 ? -1 : r;
+        }
+        if (depth1 > depth2) {
+            int r = compareNodePointers(p1.parent, depth1 - 1, p2, depth2);
+            return r == 0 ? 1 : r;
+        }
+        if (p1 == null && p2 == null) {
+            return 0;
+        }
+
+        if (p1 != null && p1.equals(p2)) {
+            return 0;
+        }
+
+        if (depth1 == 1) {
+            return 0;
+        }
+        int r = compareNodePointers(p1.parent, depth1 - 1, p2.parent, depth2 - 1);
+        if (r != 0) {
+            return r;
+        }
+
+        return p1.parent.compareChildNodePointers(p1, p2);
+    }

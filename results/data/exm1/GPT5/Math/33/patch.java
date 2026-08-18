@@ -1,0 +1,32 @@
+protected void dropPhase1Objective() {
+        if (getNumObjectiveFunctions() == 1) {
+            return;
+        }
+
+        List<Integer> columnsToDrop = new ArrayList<Integer>();
+        // Drop the Phase 1 objective column
+        columnsToDrop.add(0);
+
+        // Drop all artificial variable columns
+        for (int i = 0; i < getNumArtificialVariables(); i++) {
+            int col = i + getArtificialVariableOffset();
+            columnsToDrop.add(col);
+        }
+
+        double[][] matrix = new double[getHeight() - 1][getWidth() - columnsToDrop.size()];
+        for (int i = 1; i < getHeight(); i++) {
+            int col = 0;
+            for (int j = 0; j < getWidth(); j++) {
+                if (!columnsToDrop.contains(j)) {
+                    matrix[i - 1][col++] = tableau.getEntry(i, j);
+                }
+            }
+        }
+
+        for (int i = columnsToDrop.size() - 1; i >= 0; i--) {
+            columnLabels.remove((int) columnsToDrop.get(i));
+        }
+
+        this.tableau = new Array2DRowRealMatrix(matrix);
+        this.numArtificialVariables = 0;
+    }

@@ -1,0 +1,4 @@
+private void processSingleHyphen(String hyphen)
+{
+    tokens.add(hyphen);
+}

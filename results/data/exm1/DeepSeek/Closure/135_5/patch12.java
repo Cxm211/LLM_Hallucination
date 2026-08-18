@@ -1,0 +1,1 @@
+        replaceReferencesToThis(child, name);

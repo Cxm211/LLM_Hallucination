@@ -1,0 +1,23 @@
+private CpioArchiveEntry readOldBinaryEntry(final boolean swapHalfWord)
+            throws IOException {
+        CpioArchiveEntry ret = new CpioArchiveEntry(FORMAT_OLD_BINARY);
+
+        ret.setDevice(readBinaryLong(2, swapHalfWord));
+        ret.setInode(readBinaryLong(2, swapHalfWord));
+        final long mode = readBinaryLong(2, swapHalfWord);
+        if (mode != 0){
+            ret.setMode(mode);
+        }
+        ret.setUID(readBinaryLong(2, swapHalfWord));
+        ret.setGID(readBinaryLong(2, swapHalfWord));
+        ret.setNumberOfLinks(readBinaryLong(2, swapHalfWord));
+        ret.setRemoteDevice(readBinaryLong(2, swapHalfWord));
+        ret.setTime(readBinaryLong(4, swapHalfWord));
+        long namesize = readBinaryLong(2, swapHalfWord);
+        ret.setSize(readBinaryLong(4, swapHalfWord));
+        final String name = readCString((int) namesize);
+        ret.setName(name);
+        skip(ret.getHeaderPadCount());
+
+        return ret;
+    }

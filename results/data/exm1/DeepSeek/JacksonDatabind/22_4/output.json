@@ -1,0 +1,387 @@
+We need to identify which test methods actually trigger the bug in the provided source code. The source code includes several buggy functions: `buildContainerSerializer`, `buildCollectionSerializer`, `buildMapSerializer`, `buildArraySerializer`, and `_createSerializer2`. The bug is likely related to a logic error in one of these methods. We need to trace through test methods to find which ones cause failures due to the bug.
+
+Let's analyze the buggy code. The most suspicious part is in `buildContainerSerializer` where there is a loop for custom serializers that incorrectly updates the loop variable. Specifically, the `for` loops for custom serializers in both the MapLike and CollectionLike sections have the loop variable `ser` used after the loop condition check but the loop's body includes a check `if (ser != null)` that will never be true during the first iteration because `ser` is initialized to null before the loop. However, more critically, the loops appear to be syntactically incorrect: the `if (ser != null)` block is inside the loop but after the `ser = serializers.find...` line, and then there's a `break;` that is only inside the `if`. But the loop continues even if found? Actually the code is:
+
+for (Serializers serializers : customSerializers()) { // (1) Custom
+    MapLikeType mlType = (MapLikeType) type;
+    ser = serializers.findMapLikeSerializer(...)
+    if (ser != null) {
+        if (_factoryConfig.hasSerializerModifiers()) { ... }
+        return ser;
+    }
+}
+return null;
+
+This seems okay. But the bug might be elsewhere. Look at the condition in `buildContainerSerializer`:
+
+if (!staticTyping && type.useStaticType()) {
+    if (!type.isContainerType() || type.getContentType().getRawClass() != Object.class) {
+        staticTyping = true;
+    }
+}
+
+This is supposed to force static typing for root value types except when the content type is Object. However, the condition `!type.isContainerType()` is odd: if the type is not a container type, it sets staticTyping = true. But then later the method checks for container type and returns null if not. This may cause issues.
+
+Also in `buildCollectionSerializer`, there is a missing `break` after the custom serializer is found? Actually the loop for custom serializers in `buildCollectionSerializer` does have a break. But in `buildMapSerializer`, the loop also has a break. So looping seems fine.
+
+The biggest candidate is the `staticTyping` logic in `_createSerializer2`. Look at the commented out code and the logic:
+
+if (!staticTyping) {
+    staticTyping = usesStaticTyping(config, beanDesc, null);
+    // [Issue#23]: Need to figure out how to force passed parameterization
+    //  to stick...
+    /*
+    if (property == null) {
+        JavaType t = origType.getContentType();
+        if (t != null && !t.hasRawClass(Object.class)) {
+            staticTyping = true;
+        }
+    }
+    */
+}
+
+But in `buildContainerSerializer`, there is an additional check that may override staticTyping based on the content type.
+
+Let's look at the test methods. Many tests involve serialization of beans with container properties. The bug likely manifests when a property has a custom serializer or is annotated, causing incorrect static typing behavior.
+
+One test that directly relates to the commented-out code in `_createSerializer2` is `testValueWithStaticType` in `TestJsonValue`. That test checks that with USE_STATIC_TYPING, the output changes. The bug might affect that.
+
+Also tests like `testCustomContentSerializer` in `TestJsonSerialize3` might be affected because they involve custom serializers on collections.
+
+But we need to determine which test methods actually expose the bug. Let's reason about the bug: The condition `!type.isContainerType() || type.getContentType().getRawClass() != Object.class` in `buildContainerSerializer` is suspicious. For non-container types, the method is called but will return null because it checks `type.isContainerType()` later. However, `buildContainerSerializer` is only called from `_createSerializer2` after checking `type.isContainerType()`. So the condition is only evaluated when the type is a container. Then `!type.isContainerType()` is false, so the second part `type.getContentType().getRawClass() != Object.class` is evaluated. If content type is not Object, staticTyping becomes true. This is intentional: force static typing if content type is not Object. That seems correct.
+
+But the bug in `buildContainerSerializer` might be in the custom serializer loops for MapLike and CollectionLike: they have a syntax error where the `for` loop body includes the `if (ser != null)` block but the loop variable `ser` is declared before the loop, and the loop increments over `serializers`. However, the `return ser;` is inside the `if` block, so if a custom serializer is found, it returns immediately. If not found, the loop continues. At the end, after the loop, it returns null. That's fine.
+
+But there is a missing `break` in the CollectionLike loop? Actually both loops have the same structure: `for (Serializers serializers : customSerializers()) { ser = serializers.find... ; if (ser != null) { ... return ser; } } return null;`. That seems okay.
+
+Now look at `buildCollectionSerializer`. In the custom serializer loop, it has `break;` after finding ser? Actually the code is:
+
+for (Serializers serializers : customSerializers()) { // (1) Custom
+    ser = serializers.findCollectionSerializer(config,
+            type, beanDesc, elementTypeSerializer, elementValueSerializer);
+    if (ser != null) {
+        break;
+    }
+}
+
+That's fine.
+
+But then after the loop, there is a large block for default serializers. However, there is a bug: after the `if (ser == null)` block, the code then applies serializer modifiers at the end. But inside the `if (ser == null)` block, there is an `else` clause that sets `ser = buildCollectionSerializer(...)`. Wait, there is a recursive call? Actually the code is:
+
+if (ser == null) {
+    // We may also want to use serialize Collections "as beans", if (and only if)
+    // this is specified with `@JsonFormat(shape=Object)`
+    JsonFormat.Value format = beanDesc.findExpectedFormat(null);
+    if (format != null && format.getShape() == JsonFormat.Shape.OBJECT) {
+        return null;
+    }
+    Class<?> raw = type.getRawClass();
+    if (EnumSet.class.isAssignableFrom(raw)) {
+        ...
+        ser = buildEnumSetSerializer(enumType);
+    } else {
+        Class<?> elementRaw = type.getContentType().getRawClass();
+        if (isIndexedList(raw)) {
+            if (elementRaw == String.class) {
+                if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {
+                    ser = IndexedStringListSerializer.instance;
+                }
+            } else {
+                ser = buildIndexedListSerializer(type.getContentType(), staticTyping,
+                    elementTypeSerializer, elementValueSerializer);
+            }
+        } else if (elementRaw == String.class) {
+            if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {
+                ser = StringCollectionSerializer.instance;
+            }
+        }
+        if (ser == null) {
+            ser = buildCollectionSerializer(type.getContentType(), staticTyping,
+                    elementTypeSerializer, elementValueSerializer);
+        }
+    }
+}
+
+Notice the last line: `ser = buildCollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer);`. This is a recursive call with the content type instead of the collection type. That is a bug! It should be `buildCollectionSerializer` with the same type? Actually the recursive call is passing `type.getContentType()` as the first argument, but `buildCollectionSerializer` expects a `CollectionType`. That seems incorrect. This would cause a ClassCastException or infinite recursion if not careful. However, `type` is a CollectionType, and `type.getContentType()` returns the element type, not a collection type. So passing the element type to `buildCollectionSerializer` which expects a CollectionType will fail. This is likely the bug.
+
+Thus, any test that uses a collection with a complex element (not String) that doesn't match the other conditions would trigger this recursive call. For example, if a collection of Integer or custom objects is serialized, it will hit that code path.
+
+Let's verify: In `buildCollectionSerializer`, if no custom serializer found, it checks for format Shape.OBJECT, then EnumSet, then if it's an indexed list and elementRaw != String, it calls `buildIndexedListSerializer`. If elementRaw == String, it uses StringCollectionSerializer. If it's not indexed list and elementRaw == String, it uses StringCollectionSerializer. If none of those (i.e., ser is still null), then it calls `buildCollectionSerializer(type.getContentType(), ...)`. That's the bug.
+
+So any test that serializes a Collection property with a non-String element type and without custom serializer will trigger this bug. For example, `testCustomContentSerializer` uses `MyObject` with a list of strings, but the element is String, so it goes to StringCollectionSerializer, not the buggy path. So it might not trigger.
+
+But `testSerializedAsListWithPropertyAnnotations2` uses `ListWrapperWithSerializer` which has a custom serializer on the list property. The custom serializer might be found before the buggy path.
+
+Test `testEmptyInclusion` includes `ListWrapper<String> list = new ListWrapper<String>();` with empty list, but the element type is String, so it will go to StringCollectionSerializer, not the bug.
+
+Test `testNonNullValueMapViaProp` involves a map.
+
+Test `testMapJsonValueKey47` involves a map.
+
+But the bug is in buildCollectionSerializer for non-String elements. However, many tests with List of non-String elements exist: for instance, `testInList` in TestJsonValue uses a list of IntExt? Actually it's a bean with a list of something; not sure.
+
+Also `testTypedLists` uses List<Issue822Interface>, each element is a bean, not String. That will hit the buggy path.
+
+Similarly `testInArray` uses array of SubType, but that goes through buildArraySerializer, not collection.
+
+`testListAsObject` uses CollectionAsPOJO which is a collection but with @JsonFormat(shape=OBJECT), so it returns null early.
+
+`testWithCollectionTypes` involves a collection of enums, etc.
+
+But we need to confirm: the buggy recursive call `buildCollectionSerializer(type.getContentType(), ...)` will throw ClassCastException because `type.getContentType()` returns a `JavaType`, not `CollectionType`. Actually the method signature expects `CollectionType`, so a ClassCastException will occur. That would cause test failures.
+
+Let's check which tests might cause that. Any test that serializes a Collection with a non-String element type and without a custom serializer and also not an indexed list (e.g., if the collection is not an ArrayList? Actually isIndexedList checks for List? It might be true for many list implementations. The condition `isIndexedList(raw)` likely returns true for List types. So for a List of non-String, it calls `buildIndexedListSerializer`. So the buggy path only triggers if the collection is not an indexed list? Actually if it is an indexed list, it goes into the `if (isIndexedList(raw))` branch. If elementRaw == String, it uses StringCollectionSerializer; else it calls `buildIndexedListSerializer`. So for indexed list with non-String, it goes to `buildIndexedListSerializer`, not the buggy call. The buggy call is only reached if `isIndexedList` is false AND `elementRaw == String` is false (because if elementRaw == String, it uses StringCollectionSerializer). So the buggy path is for collections that are not indexed lists and have non-String element types. That is rare: it would be sets or other non-list collections. For example, `HashSet<Integer>`.
+
+Let's look at tests with sets: `testEmptyInclusion` has a list, not set. `testWithCollectionTypes` has collections of strings, bools, enums. Enums are not String, but if the collection is a List? Actually it uses fields like `List<String>` etc. So it goes to indexed list and then to StringCollectionSerializer for strings, but for bools and enums? The field types: `List<String> strings`, `List<Integer> ints`, `List<Boolean> bools`, `List<ABC> enums`. For `List<Integer>`, elementRaw = Integer, not String, so it will call `buildIndexedListSerializer`. That is fine.
+
+So the buggy path is for non-List collections (like Set, Queue) with non-String elements. Are there any such tests? `testDefaultForEmptyList` uses a ListBean which has a List? Not sure.
+
+Let's scan the test methods for Set usage: `testEnumType` in TestTypeFactory uses EnumSet, but that's type testing, not serialization. `testNonDefaultByClass` uses a bean with maybe a set? Probably not.
+
+Maybe the bug is not in that recursive call but elsewhere. Let's re-examine the `buildContainerSerializer` method: there is a syntax error in the for loops for MapLike and CollectionLike: the `for` loop body does not have braces correctly? Actually the code as given:
+
+for (Serializers serializers : customSerializers()) { // (1) Custom
+    MapLikeType mlType = (MapLikeType) type;
+    ser = serializers.findMapLikeSerializer(config,
+            mlType, beanDesc, keySerializer, elementTypeSerializer, elementValueSerializer);
+if (ser != null) {
+    if (_factoryConfig.hasSerializerModifiers()) {
+        for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {
+            ser = mod.modifyMapLikeSerializer(config, mlType, beanDesc, ser);
+        }
+    }
+    return ser;
+}
+}
+
+The indentation is misleading; the `if (ser != null)` block is inside the for loop, but the braces are missing: the for loop has no opening brace after the parenthesis? Actually the code shows: `for (Serializers serializers : customSerializers()) { // (1) Custom\n    MapLikeType mlType = ...\n    ser = ...\nif (ser != null) { ... }` This is syntactically correct because the `{` after the for starts the block, and then the `if` is inside that block. So that's fine.
+
+Now, a more subtle bug: In `buildContainerSerializer`, the check for staticTyping:
+
+if (!staticTyping && type.useStaticType()) {
+    if (!type.isContainerType() || type.getContentType().getRawClass() != Object.class) {
+        staticTyping = true;
+    }
+}
+
+This sets staticTyping to true for container types if the content type is not Object. But later, at the bottom, if `elementTypeSerializer != null`, staticTyping is set to false. That seems fine.
+
+But there is another bug: In the MapLike and CollectionLike sections, after the loop, if no custom serializer found, it returns null. That means for MapLike types, if no custom serializer, it returns null, and then `_createSerializer2` will proceed to try other serializers. That might be intended, but for CollectionLike, same. However, note that for true map types, it calls `buildMapSerializer` directly. For true collection types, it calls `buildCollectionSerializer`. So the null returns are for non-true map/collection types that also have no custom serializer. That might be okay.
+
+Now, the bug that is likely causing issues is in `buildCollectionSerializer`'s recursive call with wrong type. But many tests might not hit it.
+
+Let's look at the test `testCustomContentSerializer`: it creates a MyObject with a list of strings, but the custom serializer is on the class? Actually it registers a module that provides a custom serializer for the list's content type? Not sure.
+
+Maybe the bug is actually in `_createSerializer2` where the static typing logic is commented out and not properly applied. The commented code suggests that originally there was additional logic to force static typing based on property, but it was removed. This could affect serialization of root values with specific types.
+
+Consider `testValueWithStaticType`: it serializes a ValueWrapper which contains two properties with different types. With USE_STATIC_TYPING, the output should be {"a":"a"} because b is not seen due to... Actually the test expects {"a":"a"} with static typing enabled. This might be affected by the static typing logic.
+
+But the bug in the provided code is likely the recursive call. Let's check if any test actually uses a non-String non-list collection. For example, `testWithCollectionTypes` uses `List<Boolean>` but Boolean is not String, but it's a list, so it goes to `buildIndexedListSerializer`. So no.
+
+Another candidate: `testWithCollectionTypes` also uses `List<ABC>` where ABC is an enum. Same.
+
+Therefore, maybe the bug is not that. Let's look at `buildMapSerializer`. It has a similar pattern but no recursive call with wrong type.
+
+Given all these functions, the most obvious bug is in `buildCollectionSerializer` where `buildCollectionSerializer(type.getContentType(), ...)` should be `buildCollectionSerializer(type, ...)` or something else. But looking at the code flow: if `ser == null` after checking the conditions (IndexedStringListSerializer, IndexedListSerializer, StringCollectionSerializer), then it falls back to a default serialization by calling `buildCollectionSerializer` recursively with the content type. That seems intentional: if none of the other types matched, perhaps it assumes the collection is a simple collection and builds a serializer for the element type? But the method is supposed to build a serializer for the collection, not element. So it's definitely wrong. It should probably call `buildCollectionSerializer` with the same type but with some different parameters? Actually the signature has `staticTyping`, `elementTypeSerializer`, `elementValueSerializer`. The recursive call is passing `type.getContentType()` as the first argument, which is a JavaType, not a CollectionType. This will cause a ClassCastException when the method tries to cast it to CollectionType (e.g., when calling `type.getRawClass()`). That will fail at runtime.
+
+Thus, any test that leads to this branch will crash with ClassCastException. Let's see which test can lead there. The branch is reached when:
+- No custom serializer found.
+- Format shape is not OBJECT.
+- Not an EnumSet.
+- Either:
+   - isIndexedList == false AND elementRaw != String
+   - isIndexedList == true AND elementRaw != String AND elementValueSerializer is not null and not standard? Actually if elementRaw != String, it goes to buildIndexedListSerializer, not the bug. So only when isIndexedList == false and elementRaw != String.
+   - Also if isIndexedList == true but elementRaw == String and elementValueSerializer is custom, it does not set ser, so falls to bug.
+   - Also if isIndexedList == false and elementRaw == String but elementValueSerializer is custom, it does not set ser, so falls to bug.
+
+So the bug triggers for lists with custom element value serializer (non-standard) or non-list collections with non-String element types.
+
+Check test `testCustomContentSerializer`: MyObject has a list of strings, and a custom module that provides a serializer for String? Actually the test registers a `SimpleModule` with a serializer for `String` that appends "bar". Wait, the test says:
+
+MyObject object = new MyObject();
+object.list = Arrays.asList("foo");
+String json = m.writeValueAsString(object);
+assertEquals("{\"list\":[\"bar\"]}", json);
+
+So the list property has a custom content serializer that overrides the serialization of String elements. That means `elementValueSerializer` will be non-null and not standard (since it's custom). For a list of strings, isIndexedList will be true (since `myList` probably is an ArrayList). Then `elementRaw == String` is true. In the code:
+
+if (isIndexedList(raw)) {
+    if (elementRaw == String.class) {
+        // (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer))
+        if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {
+            ser = IndexedStringListSerializer.instance;
+        }
+    } else {
+        ser = buildIndexedListSerializer(...);
+    }
+} else if (elementRaw == String.class) {
+    if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {
+        ser = StringCollectionSerializer.instance;
+    }
+}
+if (ser == null) {
+    ser = buildCollectionSerializer(type.getContentType(), ...);
+}
+
+Since elementValueSerializer is custom (not standard), `ClassUtil.isJacksonStdImpl(elementValueSerializer)` returns false. So the condition fails, and ser remains null. Then the code after the if-else block checks `if (ser == null)` and calls the buggy recursive call. This will cause ClassCastException because `type.getContentType()` returns the element type (String), not a CollectionType. Therefore, test `testCustomContentSerializer` will trigger the bug.
+
+Similarly, any test with a list that has a custom element value serializer will trigger it.
+
+But also tests with non-list collections that have non-String elements: e.g., `testEmptyInclusion` uses `ListWrapper<String>`, but that is a List, and element is String, and no custom serializer, so it goes to IndexedStringListSerializer, fine.
+
+Let's check `testInList` in TestJsonValue: it serializes a bean with a list of `IntExt` objects. The list is likely `ArrayList<IntExt>`, and there is no custom content serializer. For ArrayList, isIndexedList is true. elementRaw is IntExt (not String), so it goes to `buildIndexedListSerializer`. That is fine.
+
+What about `testMapWithJsonValue`? That is a Map, not collection.
+
+So the most likely triggering test is `testCustomContentSerializer`. Also possibly other tests that have custom content serializers, but we don't see many.
+
+Let's look at test `testSerializedAsListWithPropertyAnnotations2`: It uses `ListWrapperWithSerializer` which has a custom serializer on the list property itself, not the content. The list is of strings. The custom serializer is on the property, which will be handled by the annotation introspection and likely will find a serializer from annotations before reaching buildCollectionSerializer? Actually the custom serializer on the property is a `@JsonSerialize(using=...)` annotation on the field. That is handled earlier in `_createSerializer2`? Not sure. But likely it will be found as a custom serializer for the collection type, so it will hit the custom serializer loop in `buildCollectionSerializer` and take that branch, not the default. So it should not trigger the bug.
+
+Similarly `testSerializedAsMapWithPropertyAnnotations2` is a map.
+
+Thus, the bug is most clearly triggered by `testCustomContentSerializer`.
+
+But we need to also consider other tests that might indirectly hit the bug via the static typing logic. For instance, `testValueWithStaticType` might be affected if the static typing logic is incorrect. But the bug in static typing is that the code uses `type.useStaticType()` but that might not be sufficient. However, the original issue is likely the recursive call.
+
+Let's also check `testWithCollectionTypes` which uses `List<ABC>` (enum). For `List<ABC>`, elementRaw is ABC (enum), not String. isIndexedList is true if it's an ArrayList, so it goes to `buildIndexedListSerializer`. So not triggered.
+
+Therefore, the main triggering method is `testCustomContentSerializer`.
+
+But we must also consider that the bug might be in multiple test methods if they share the same condition. Let's search for any other test that uses a list with a custom content serializer (i.e., a custom serializer on the element type via module or annotation). We see `testCustomContentSerializer` is the only one that explicitly tests custom content serializer on a list.
+
+However, there is also `testNullSerializer` which uses a Bean with a property that has a null serializer, but that's not a collection.
+
+Also `testNumbersAsString` uses `IntAsString`, `LongAsString`, `DoubleAsString`, which are beans with custom serializers on properties, but those are not collections.
+
+Thus, only `testCustomContentSerializer` seems to directly trigger the bug.
+
+But we should also consider that the bug may be exposed by other tests if the custom serializer on content is not explicitly set but derived from annotations. For example, a property annotated with `@JsonSerialize(contentUsing=...)` would also trigger it. The test `testCustomContentSerializer` is the only one that appears to do that.
+
+Given that, we can determine that only one test method triggers the bug. But let's also check `testSerializedAsListWithPropertyAnnotations2` again: It uses a custom serializer on the list itself (using=ListSerializer.class). That serializer will be found before the buggy path, so it won't trigger.
+
+Thus, the trigger method is: "com.fasterxml.jackson.databind.ser.TestJsonSerialize3::testCustomContentSerializer".
+
+But wait, the test class names: `TestJsonSerialize3` is not fully shown in the method list? In the provided test list, we have "com.fasterxml.jackson.databind.ser.TestJsonSerialize3::testCustomContentSerializer". Yes.
+
+Now we need to produce the fix. The bug is in `buildCollectionSerializer` where it recursively calls itself with the content type instead of the collection type. The fix should change that line to use the collection type correctly. However, we must preserve the intended logic. What should be the fallback? If no custom serializer and no default serializer (for the collection), it probably should use a generic collection serializer. The correct call would be something like `buildCollectionSerializer(type, staticTyping, elementTypeSerializer, elementValueSerializer)`? But that would cause infinite recursion because we are already inside `buildCollectionSerializer`. The original intent might have been to call a different method, like `buildCollectionSerializer` on the same type but with different parameters? Actually the method is designed to build a serializer for the collection; if none of the special cases matched, it should use a default collection serializer. The code currently attempts to recursively call itself, but that's wrong. Looking at the similar logic in `buildMapSerializer`, there is no such recursive call; instead it directly constructs a `MapSerializer`. Similarly, here after the if-else, it should construct a default collection serializer. The fix should replace the recursive call with a call to construct a default serializer, e.g., `new CollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer)` or something like that. But to be minimal, we can change the line to call the correct method, perhaps `buildCollectionSerializer` with the same type? But that would cause infinite recursion. Actually the method signature `buildCollectionSerializer` is used recursively in other places? The method is called from `buildContainerSerializer` for true collection types. Inside this method, after the custom serializer check, it attempts to construct a default serializer. The buggy line is the last resort: if ser is still null, it tries to build a serializer for the collection's content type, which is nonsense. It should instead build a default serializer for the collection. The correct action is to use a `CollectionSerializer` (or `StringCollectionSerializer` if strings, but that's already handled). So we need to replace that line with a proper default.
+
+Looking at the similar pattern in `buildMapSerializer`, after the if block, if ser is null, it directly constructs `MapSerializer`. So we should do similar: construct a default `CollectionSerializer` object.
+
+Thus, the minimal fix is to change the line:
+
+ser = buildCollectionSerializer(type.getContentType(), staticTyping,
+        elementTypeSerializer, elementValueSerializer);
+
+to something like:
+
+ser = new CollectionSerializer(type.getContentType(), staticTyping,
+        elementTypeSerializer, elementValueSerializer);
+
+Or perhaps use `constructCollectionSerializer` if such method exists. But we need to know the exact API. Since we are only to provide the corrected function, we can use the available constructors. However, we should check if `CollectionSerializer` exists. In Jackson, `CollectionSerializer` is not a standard class? Actually there is `CollectionSerializer` in `com.fasterxml.jackson.databind.ser.std`. But the method might be calling a different builder. Looking at the code, there is also `buildCollectionSerializer` with different signatures: one takes `JavaType content` and staticTyping etc. Actually there are two `buildCollectionSerializer` methods: one takes `CollectionType` and one takes `JavaType`? Let's examine the imports and other occurrences. In the same file, there is a call to `buildCollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer)` inside this method itself, which is the buggy line. There is also a call in `buildContainerSerializer` to `buildCollectionSerializer(config, (CollectionType) clt, beanDesc, staticTyping, elementTypeSerializer, elementValueSerializer)` with full parameters. So the method with `JavaType` as first parameter is the same method? Actually the method signature is:
+
+protected JsonSerializer<?> buildCollectionSerializer(SerializationConfig config,
+        CollectionType type, BeanDescription beanDesc, boolean staticTyping,
+        TypeSerializer elementTypeSerializer, JsonSerializer<Object> elementValueSerializer)
+
+So it expects `CollectionType`. The buggy call passes `type.getContentType()` which is a `JavaType`, not `CollectionType`. So it's a type mismatch that will cause ClassCastException at runtime. The fix should be to pass the proper `CollectionType` (i.e., `type` itself) with the same parameters? But that would cause recursion. So maybe the intended call was to a different method that builds a serializer for the element type, not the collection. Actually the comment says "Fall through to default serializer", but then it recursively calls itself with the content type. That seems like a mistake; it should probably call a method that builds a serializer for the collection as a whole. The simplest fix is to replace that line with a call to construct a new `CollectionSerializer` directly.
+
+Given the constraints, we need to output fixed code. We'll modify that line to use `new CollectionSerializer` (assuming the class exists). But to be safe, we can see if there is a `construct` method or similar. Since we don't have the full context, we can change it to call a different builder method that takes `JavaType`? Looking at the code, there is `buildCollectionSerializer` also defined with a `JavaType` parameter? Not in the given source. But there is `buildIndexedListSerializer`, `buildEnumSetSerializer`, etc. The missing piece is a default collection serializer.
+
+Alternatively, we can simply remove the recursive call and let it fall through to the end, but then ser remains null, and the method will try to apply serializer modifiers on null, causing NPE.
+
+A better fix is to use the same pattern as in `buildMapSerializer`: after the if-else, if ser is null, create a default `CollectionSerializer`. Since the Jackson library has a `CollectionSerializer` class, we can use it.
+
+But to be minimal, we can change the line to:
+
+ser = new CollectionSerializer(type.getContentType(), staticTyping,
+        elementTypeSerializer, elementValueSerializer);
+
+However, we need to ensure that the import for `CollectionSerializer` is present. Since we are only modifying the function body, it's acceptable.
+
+Another approach: Change the recursive call to call the correct overload that builds a serializer for the collection type? But that would cause infinite recursion. So the intended fix is to create a default collection serializer.
+
+Let's look at the Jackson source code for `CollectionSerializer`. It is `com.fasterxml.jackson.databind.ser.std.CollectionSerializer`. It has a constructor:
+
+public CollectionSerializer(JavaType elemType, boolean staticTyping, TypeSerializer vts, JsonSerializer<Object> valueSerializer)
+
+Yes, that matches the parameters. So we can use that.
+
+Thus, the fix is to replace `ser = buildCollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer);` with `ser = new CollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer);`
+
+But note: `type.getContentType()` is the JavaType of the element, which is correct for constructing a CollectionSerializer.
+
+Now we also need to consider if any other functions have bugs. Let's check `buildContainerSerializer` for possible issues. The loops for custom serializers might have missing breaks? But they have returns. However, there is a subtle bug: the loop variable `ser` is not reset after the break? Not needed.
+
+Also in `buildContainerSerializer`, the condition for static typing:
+
+if (!staticTyping && type.useStaticType()) {
+    if (!type.isContainerType() || type.getContentType().getRawClass() != Object.class) {
+        staticTyping = true;
+    }
+}
+
+This might be too aggressive for non-container types, but it's only reached when type is container because `buildContainerSerializer` is only called for container types. However, note that `_createSerializer2` calls `buildContainerSerializer` only after checking `type.isContainerType()`. So it's fine.
+
+But what about the case where `type.useStaticType()` returns true but the type is not a container? It will never happen in this context.
+
+Another potential bug: In `_createSerializer2`, there is a commented block that was supposed to handle forcing static typing based on property. That might be the actual bug for some tests. But the given code already has that logic commented out. So it's not a bug in the provided code; it's missing functionality that might be needed. However, the task says the source is buggy, meaning it has an error that causes tests to fail. The commented code is not part of the bug, it's a missing feature. So we focus on the bug that is present.
+
+Thus, the primary fix is the recursive call in `buildCollectionSerializer`.
+
+But we should also check if there are any other bugs. For completeness, let's examine `buildMapSerializer`. It has a similar pattern but no such recursive call. However, there is a commented out block for EnumMap, but that's not buggy.
+
+Also, `buildArraySerializer` seems fine.
+
+Now, we need to output the fixed code. Since the bug is only in `buildCollectionSerializer`, we provide the corrected version. The other functions are unchanged.
+
+But the instruction says: "Provide the full corrected implementation of all input functions. fixed_code must include every function from the input, in the same order, regardless of whether it was modified by you." So we need to include all five functions in the output, with the fixed one modified.
+
+Thus, we will output:
+
+{
+  "trigger_method": ["com.fasterxml.jackson.databind.ser.TestJsonSerialize3::testCustomContentSerializer"],
+  "fixed_code": [
+    "protected JsonSerializer<?> buildContainerSerializer(SerializerProvider prov, ...) { ... unchanged ... }",
+    "protected JsonSerializer<?> buildCollectionSerializer(SerializationConfig config, CollectionType type, BeanDescription beanDesc, boolean staticTyping, TypeSerializer elementTypeSerializer, JsonSerializer<Object> elementValueSerializer) throws JsonMappingException { ... fixed version ... }",
+    "protected JsonSerializer<?> buildMapSerializer(...) { ... unchanged ... }",
+    "protected JsonSerializer<?> buildArraySerializer(...) { ... unchanged ... }",
+    "protected JsonSerializer<?> _createSerializer2(...) { ... unchanged ... }"
+  ]
+}
+
+But we need to ensure the fixed code is correct. Let's write the full fixed function for `buildCollectionSerializer`. We'll keep everything the same except change the recursive call.
+
+Original buggy line 40 (approximately): `ser = buildCollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer);`
+
+Fix: `ser = new CollectionSerializer(type.getContentType(), staticTyping, elementTypeSerializer, elementValueSerializer);`
+
+We should also add import for `CollectionSerializer`? But the fixed code is just the function body, we assume imports are present globally. The file likely already imports `CollectionSerializer` because it's used elsewhere? Actually not in the given code, but it's standard. We'll include the fully qualified class name? To be safe, we can use the short name assuming it's imported. The original code uses `IndexedStringListSerializer`, `StringCollectionSerializer`, etc., which are also from the same package. So `CollectionSerializer` should be fine.
+
+Now, let's ensure we produce the JSON correctly. We need to escape the code as a JSON string. We'll provide the full function definitions exactly as they should appear in the fixed file.
+
+We'll copy the original functions and only modify the one line in `buildCollectionSerializer`.
+
+Let's write the functions:
+
+1. buildContainerSerializer: same as original.
+2. buildCollectionSerializer: change line 40.
+3. buildMapSerializer: same.
+4. buildArraySerializer: same.
+5. _createSerializer2: same.
+
+We'll output them as escaped JSON strings.
+
+Also, note that the test method path is "com.fasterxml.jackson.databind.ser.TestJsonSerialize3::testCustomContentSerializer". Ensure correct format.
+
+Now produce final answer.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.ser.TestJsonSerialize3::testCustomContentSerializer"
+  ],
+  "fixed_code": [
+    "protected JsonSerializer<?> buildContainerSerializer(SerializerProvider prov,\n            JavaType type, BeanDescription beanDesc, boolean staticTyping)\n        throws JsonMappingException\n    {\n        final SerializationConfig config = prov.getConfig();\n\n        /* [databind#23], 15-Mar-2013, tatu: must force static handling of root value type,\n         *   with just one important exception: if value type is \"untyped\", let's\n         *   leave it as is; no clean way to make it work.\n         */\n        if (!staticTyping && type.useStaticType()) {\n            if (!type.isContainerType() || type.getContentType().getRawClass() != Object.class) {\n                staticTyping = true;\n            }\n        }\n        \n        // Let's see what we can learn about element/content/value type, type serializer for it:\n        JavaType elementType = type.getContentType();\n        TypeSerializer elementTypeSerializer = createTypeSerializer(config,\n                elementType);\n\n        // if elements have type serializer, can not force static typing:\n        if (elementTypeSerializer != null) {\n            staticTyping = false;\n        }\n        JsonSerializer<Object> elementValueSerializer = _findContentSerializer(prov,\n                beanDesc.getClassInfo());\n        if (type.isMapLikeType()) { // implements java.util.Map\n            MapLikeType mlt = (MapLikeType) type;\n            /* 29-Sep-2012, tatu: This is actually too early to (try to) find\n             *  key serializer from property annotations, and can lead to caching\n             *  issues (see [databind#75]). Instead, must be done from 'createContextual()' call.\n             *  But we do need to check class annotations.\n             */\n            JsonSerializer<Object> keySerializer = _findKeySerializer(prov, beanDesc.getClassInfo());\n            if (mlt.isTrueMapType()) {\n                return buildMapSerializer(config, (MapType) mlt, beanDesc, staticTyping,\n                        keySerializer, elementTypeSerializer, elementValueSerializer);\n            }\n            // With Map-like, just 2 options: (1) Custom, (2) Annotations\n            JsonSerializer<?> ser = null;\n            for (Serializers serializers : customSerializers()) { // (1) Custom\n                MapLikeType mlType = (MapLikeType) type;\n                ser = serializers.findMapLikeSerializer(config,\n                        mlType, beanDesc, keySerializer, elementTypeSerializer, elementValueSerializer);\n            if (ser != null) {\n                if (_factoryConfig.hasSerializerModifiers()) {\n                    for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {\n                        ser = mod.modifyMapLikeSerializer(config, mlType, beanDesc, ser);\n                    }\n                    }\n                    return ser;\n                }\n            }\n            return null;\n        }\n        if (type.isCollectionLikeType()) {\n            CollectionLikeType clt = (CollectionLikeType) type;\n            if (clt.isTrueCollectionType()) {\n                return buildCollectionSerializer(config,  (CollectionType) clt, beanDesc, staticTyping,\n                        elementTypeSerializer, elementValueSerializer);\n            }\n            // With Map-like, just 2 options: (1) Custom, (2) Annotations\n            JsonSerializer<?> ser = null;\n            CollectionLikeType clType = (CollectionLikeType) type;\n            for (Serializers serializers : customSerializers()) { // (1) Custom\n                ser = serializers.findCollectionLikeSerializer(config,\n                        clType, beanDesc, elementTypeSerializer, elementValueSerializer);\n            if (ser != null) {\n                if (_factoryConfig.hasSerializerModifiers()) {\n                    for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {\n                        ser = mod.modifyCollectionLikeSerializer(config, clType, beanDesc, ser);\n                        }\n                    }\n                    return ser;\n                }\n            }\n            return null;\n        }\n        if (type.isArrayType()) {\n            return buildArraySerializer(config, (ArrayType) type, beanDesc, staticTyping,\n                    elementTypeSerializer, elementValueSerializer);\n        }\n        return null;\n    }",
+    "protected JsonSerializer<?> buildCollectionSerializer(SerializationConfig config,\n            CollectionType type, BeanDescription beanDesc, boolean staticTyping,\n            TypeSerializer elementTypeSerializer, JsonSerializer<Object> elementValueSerializer) \n        throws JsonMappingException\n    {\n        JsonSerializer<?> ser = null;\n        // Order of lookups:\n        // 1. Custom serializers\n        // 2. Annotations (@JsonValue, @JsonDeserialize)\n        // 3. Defaults\n        for (Serializers serializers : customSerializers()) { // (1) Custom\n            ser = serializers.findCollectionSerializer(config,\n                    type, beanDesc, elementTypeSerializer, elementValueSerializer);\n            if (ser != null) {\n                break;\n            }\n        }\n\n        if (ser == null) {\n                // We may also want to use serialize Collections \"as beans\", if (and only if)\n                // this is specified with `@JsonFormat(shape=Object)`\n                JsonFormat.Value format = beanDesc.findExpectedFormat(null);\n                if (format != null && format.getShape() == JsonFormat.Shape.OBJECT) {\n                    return null;\n                }\n                Class<?> raw = type.getRawClass();\n                if (EnumSet.class.isAssignableFrom(raw)) {\n                    // this may or may not be available (Class doesn't; type of field/method does)\n                    JavaType enumType = type.getContentType();\n                    // and even if nominally there is something, only use if it really is enum\n                    if (!enumType.isEnumType()) {\n                        enumType = null;\n                    }\n                    ser = buildEnumSetSerializer(enumType);\n                } else {\n                    Class<?> elementRaw = type.getContentType().getRawClass();\n                    if (isIndexedList(raw)) {\n                        if (elementRaw == String.class) {\n                            // [JACKSON-829] Must NOT use if we have custom serializer\n                            if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {\n                                ser = IndexedStringListSerializer.instance;\n                            }\n                        } else {\n                            ser = buildIndexedListSerializer(type.getContentType(), staticTyping,\n                                elementTypeSerializer, elementValueSerializer);\n                        }\n                    } else if (elementRaw == String.class) {\n                        // [JACKSON-829] Must NOT use if we have custom serializer\n                        if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {\n                            ser = StringCollectionSerializer.instance;\n                        }\n                    }\n                    if (ser == null) {\n                        ser = new CollectionSerializer(type.getContentType(), staticTyping,\n                                elementTypeSerializer, elementValueSerializer);\n                }\n            }\n        }\n        // [databind#120]: Allow post-processing\n        if (_factoryConfig.hasSerializerModifiers()) {\n            for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {\n                ser = mod.modifyCollectionSerializer(config, type, beanDesc, ser);\n            }\n        }\n        return ser;\n    }",
+    "protected JsonSerializer<?> buildMapSerializer(SerializationConfig config,\n            MapType type, BeanDescription beanDesc,\n            boolean staticTyping, JsonSerializer<Object> keySerializer,\n            TypeSerializer elementTypeSerializer, JsonSerializer<Object> elementValueSerializer)\n        throws JsonMappingException\n    {\n        JsonSerializer<?> ser = null;\n\n        // Order of lookups:\n        // 1. Custom serializers\n        // 2. Annotations (@JsonValue, @JsonDeserialize)\n        // 3. Defaults\n        \n        for (Serializers serializers : customSerializers()) { // (1) Custom\n            ser = serializers.findMapSerializer(config, type, beanDesc,\n                    keySerializer, elementTypeSerializer, elementValueSerializer);\n            if (ser != null) { break; }\n        }\n        if (ser == null) {\n                // 08-Nov-2014, tatu: As per [databind#601], better just use default Map serializer\n                /*\n                if (EnumMap.class.isAssignableFrom(type.getRawClass())\n                        && ((keySerializer == null) || ClassUtil.isJacksonStdImpl(keySerializer))) {\n                    JavaType keyType = type.getKeyType();\n                    // Need to find key enum values...\n                    EnumValues enums = null;\n                    if (keyType.isEnumType()) { // non-enum if we got it as type erased class (from instance)\n                        @SuppressWarnings(\"unchecked\")\n                        Class<Enum<?>> enumClass = (Class<Enum<?>>) keyType.getRawClass();\n                        enums = EnumValues.construct(config, enumClass);\n                    }\n                    ser = new EnumMapSerializer(type.getContentType(), staticTyping, enums,\n                        elementTypeSerializer, elementValueSerializer);\n                } else {\n                */\n                Object filterId = findFilterId(config, beanDesc);\n                AnnotationIntrospector ai = config.getAnnotationIntrospector();\n                MapSerializer mapSer = MapSerializer.construct(ai.findPropertiesToIgnore(beanDesc.getClassInfo(), true),\n                        type, staticTyping, elementTypeSerializer,\n                        keySerializer, elementValueSerializer, filterId);\n                Object suppressableValue = findSuppressableContentValue(config,\n                        type.getContentType(), beanDesc);\n                if (suppressableValue != null) {\n                    mapSer = mapSer.withContentInclusion(suppressableValue);\n                }\n                ser = mapSer;\n            }\n        // [databind#120]: Allow post-processing\n        if (_factoryConfig.hasSerializerModifiers()) {\n            for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {\n                ser = mod.modifyMapSerializer(config, type, beanDesc, ser);\n            }\n        }\n        return ser;\n    }",
+    "protected JsonSerializer<?> buildArraySerializer(SerializationConfig config,\n            ArrayType type, BeanDescription beanDesc,\n            boolean staticTyping,\n            TypeSerializer elementTypeSerializer, JsonSerializer<Object> elementValueSerializer)\n        throws JsonMappingException\n    {\n        // 25-Jun-2015, tatu: Note that unlike with Collection(Like) and Map(Like) types, array\n        //   types can not be annotated (in theory I guess we could have mix-ins but... ?)\n        //   so we need not do primary annotation lookup here.\n        //   So all we need is (1) Custom, (2) Default array serializers\n        JsonSerializer<?> ser = null;\n\n        for (Serializers serializers : customSerializers()) { // (1) Custom\n             ser = serializers.findArraySerializer(config,\n                     type, beanDesc, elementTypeSerializer, elementValueSerializer);\n             if (ser != null) {\n                 break;\n             }\n        }\n        \n        if (ser == null) {\n             Class<?> raw = type.getRawClass();\n             // Important: do NOT use standard serializers if non-standard element value serializer specified\n             if (elementValueSerializer == null || ClassUtil.isJacksonStdImpl(elementValueSerializer)) {\n                 if (String[].class == raw) {\n                     ser = StringArraySerializer.instance;\n                 } else {\n                     // other standard types?\n                     ser = StdArraySerializers.findStandardImpl(raw);\n                 }\n             }\n             if (ser == null) {\n                 ser = new ObjectArraySerializer(type.getContentType(), staticTyping, elementTypeSerializer,\n                         elementValueSerializer);\n             }\n         }\n         // [databind#120]: Allow post-processing\n         if (_factoryConfig.hasSerializerModifiers()) {\n             for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {\n                 ser = mod.modifyArraySerializer(config, type, beanDesc, ser);\n             }\n         }\n         return ser;\n    }",
+    "protected JsonSerializer<?> _createSerializer2(SerializerProvider prov,\n            JavaType type, BeanDescription beanDesc, boolean staticTyping)\n        throws JsonMappingException\n    {\n        JsonSerializer<?> ser = findSerializerByAnnotations(prov, type, beanDesc);\n        if (ser != null) {\n            return ser;\n        }\n        final SerializationConfig config = prov.getConfig();\n        \n        // Container types differ from non-container types\n        // (note: called method checks for module-provided serializers)\n        if (type.isContainerType()) {\n            if (!staticTyping) {\n                staticTyping = usesStaticTyping(config, beanDesc, null);\n                // [Issue#23]: Need to figure out how to force passed parameterization\n                //  to stick...\n                /*\n                if (property == null) {\n                    JavaType t = origType.getContentType();\n                    if (t != null && !t.hasRawClass(Object.class)) {\n                        staticTyping = true;\n                    }\n                }\n                */\n            }\n            // 03-Aug-2012, tatu: As per [Issue#40], may require POJO serializer...\n            ser =  buildContainerSerializer(prov, type, beanDesc, staticTyping);\n            // Will return right away, since called method does post-processing:\n            if (ser != null) {\n                return ser;\n            }\n        } else {\n            // Modules may provide serializers of POJO types:\n            for (Serializers serializers : customSerializers()) {\n                ser = serializers.findSerializer(config, type, beanDesc);\n                if (ser != null) {\n                    break;\n                }\n            }\n            // 25-Jun-2015, tatu: Then JsonSerializable, @JsonValue etc. NOTE! Prior to 2.6,\n            //    this call was BEFORE custom serializer lookup, which was wrong.\n        }\n        \n        if (ser == null) {\n            // Otherwise, we will check \"primary types\"; both marker types that\n            // indicate specific handling (JsonSerializable), or main types that have\n            // precedence over container types\n            ser = findSerializerByLookup(type, config, beanDesc, staticTyping);\n            if (ser == null) {\n                ser = findSerializerByPrimaryType(prov, type, beanDesc, staticTyping);\n                if (ser == null) {\n                    // And this is where this class comes in: if type is not a\n                    // known \"primary JDK type\", perhaps it's a bean? We can still\n                    // get a null, if we can't find a single suitable bean property.\n                    ser = findBeanSerializer(prov, type, beanDesc);\n                    // Finally: maybe we can still deal with it as an implementation of some basic JDK interface?\n                    if (ser == null) {\n                        ser = findSerializerByAddonType(config, type, beanDesc, staticTyping);\n                        // 18-Sep-2014, tatu: Actually, as per [jackson-databind#539], need to get\n                        //   'unknown' serializer assigned earlier, here, so that it gets properly\n                        //   post-processed\n                        if (ser == null) {\n                            ser = prov.getUnknownTypeSerializer(beanDesc.getBeanClass());\n                        }\n                    }\n                }\n            }\n        }\n        if (ser != null) {\n            // [databind#120]: Allow post-processing\n            if (_factoryConfig.hasSerializerModifiers()) {\n                for (BeanSerializerModifier mod : _factoryConfig.serializerModifiers()) {\n                    ser = mod.modifySerializer(config, beanDesc, ser);\n                }\n            }\n        }\n        return ser;\n    }"
+  ]
+}

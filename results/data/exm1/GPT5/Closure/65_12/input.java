@@ -1,0 +1,974 @@
+// buggy code
+  static String strEscape(String s, char quote,
+                          String doublequoteEscape,
+                          String singlequoteEscape,
+                          String backslashEscape,
+                          CharsetEncoder outputCharsetEncoder) {
+    StringBuilder sb = new StringBuilder(s.length() + 2);
+    sb.append(quote);
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      switch (c) {
+        case '\0': sb.append("\\0"); break;
+        case '\n': sb.append("\\n"); break;
+        case '\r': sb.append("\\r"); break;
+        case '\t': sb.append("\\t"); break;
+        case '\\': sb.append(backslashEscape); break;
+        case '\"': sb.append(doublequoteEscape); break;
+        case '\'': sb.append(singlequoteEscape); break;
+        case '>':                       // Break --> into --\> or ]]> into ]]\>
+          if (i >= 2 &&
+              ((s.charAt(i - 1) == '-' && s.charAt(i - 2) == '-') ||
+               (s.charAt(i - 1) == ']' && s.charAt(i - 2) == ']'))) {
+            sb.append("\\>");
+          } else {
+            sb.append(c);
+          }
+          break;
+        case '<':
+          // Break </script into <\/script
+          final String END_SCRIPT = "/script";
+
+          // Break <!-- into <\!--
+          final String START_COMMENT = "!--";
+
+          if (s.regionMatches(true, i + 1, END_SCRIPT, 0,
+                              END_SCRIPT.length())) {
+            sb.append("<\\");
+          } else if (s.regionMatches(false, i + 1, START_COMMENT, 0,
+                                     START_COMMENT.length())) {
+            sb.append("<\\");
+          } else {
+            sb.append(c);
+          }
+          break;
+        default:
+          // If we're given an outputCharsetEncoder, then check if the
+          //  character can be represented in this character set.
+          if (outputCharsetEncoder != null) {
+            if (outputCharsetEncoder.canEncode(c)) {
+              sb.append(c);
+            } else {
+              // Unicode-escape the character.
+              appendHexJavaScriptRepresentation(sb, c);
+            }
+          } else {
+            // No charsetEncoder provided - pass straight latin characters
+            // through, and escape the rest.  Doing the explicit character
+            // check is measurably faster than using the CharsetEncoder.
+            if (c > 0x1f && c < 0x7f) {
+              sb.append(c);
+            } else {
+              // Other characters can be misinterpreted by some js parsers,
+              // or perhaps mangled by proxies along the way,
+              // so we play it safe and unicode escape them.
+              appendHexJavaScriptRepresentation(sb, c);
+            }
+          }
+      }
+    }
+    sb.append(quote);
+    return sb.toString();
+  }
+
+// relevant test
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testRemoveDo
+  public void testRemoveDo() {
+    test("do { print(1); break } while(1)", "do { print(1); break } while(1)");
+    test("while(1) { break; do { print(1); break } while(1) }",
+         "while(1) { break; do {} while(1) }");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testRemoveUselessLiteralValueStatements
+  public void testRemoveUselessLiteralValueStatements() {
+    test("true;", "");
+    test("'hi';", "");
+    test("if (x) 1;", "");
+    test("while (x) 1;", "while (x);");
+    test("do 1; while (x);", "do ; while (x);");
+    test("for (;;) 1;", "for (;;);");
+    test("switch(x){case 1:true;case 2:'hi';default:true}",
+         "switch(x){case 1:case 2:default:}");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testConditionalDeadCode
+  public void testConditionalDeadCode() {
+    test("function f() { if (1) return 5; else return 5; x = 1}",
+        "function f() { if (1) return 5; else return 5; }");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testSwitchCase
+  public void testSwitchCase() {
+    test("function f() { switch(x) { default: return 5; foo()}}",
+         "function f() { switch(x) { default: return 5;}}");
+    test("function f() { switch(x) { default: return; case 1: foo(); bar()}}",
+         "function f() { switch(x) { default: return; case 1: foo(); bar()}}");
+    test("function f() { switch(x) { default: return; case 1: return 5;bar()}}",
+         "function f() { switch(x) { default: return; case 1: return 5;}}");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testTryCatchFinally
+  public void testTryCatchFinally() {
+    testSame("try {foo()} catch (e) {bar()}");
+    testSame("try { try {foo()} catch (e) {bar()}} catch (x) {bar()}");
+    test("try {var x = 1} catch (e) {e()}", "try {var x = 1} finally {}");
+    test("try {var x = 1} catch (e) {e()} finally {x()}",
+        " try {var x = 1}                 finally {x()}");
+    test("try {var x = 1} catch (e) {e()} finally {}",
+        "try {var x = 1} finally {}");
+    testSame("try {var x = 1} finally {x()}");
+    testSame("try {var x = 1} finally {}");
+    test("function f() {return; try{var x = 1}catch(e){} }",
+         "function f() {var x;}");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testRemovalRequiresRedeclaration
+  public void testRemovalRequiresRedeclaration() {
+    test("while(1) { break; var x = 1}", "var x; while(1) { break } ");
+    test("while(1) { break; var x=1; var y=1}",
+        "var y; var x; while(1) { break } ");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testAssignPropertyOnCreatedObject
+  public void testAssignPropertyOnCreatedObject() {
+    testSame("this.foo = 3;");
+    testSame("a.foo = 3;");
+    testSame("bar().foo = 3;");
+    testSame("({}).foo = bar();");
+    testSame("(new X()).foo = 3;");
+
+    test("({}).foo = 3;", "");
+    test("(function() {}).prototype.toString = function(){};", "");
+    test("(function() {}).prototype['toString'] = function(){};", "");
+    test("(function() {}).prototype[f] = function(){};", "");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testUselessUnconditionalReturn
+  public void testUselessUnconditionalReturn() {
+    test("function foo() { return }", " function foo() { }");
+    test("function foo() { return; return; x=1 }", "function foo() { }");
+    test("function foo() { return; return; var x=1}", "function foo() {var x}");
+    test("function foo() { return; function bar() {} }",
+         "function foo() {         function bar() {} }" );
+    testSame("function foo() { return 5 }");
+
+    test("function f() {switch (a) { case 'a': return}}",
+         "function f() {switch (a) { case 'a': }}");
+    testSame("function f() {switch (a) { case 'a': case foo(): }}");
+    testSame("function f() {switch (a) {" +
+             " default: return; case 'a': alert(1)}}");
+    testSame("function f() {switch (a) {" +
+             " case 'a': return; default: alert(1)}}");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testUnlessUnconditionalContinue
+  public void testUnlessUnconditionalContinue() {
+    test("for(;1;) {continue}", " for(;1;) {}");
+    test("for(;0;) {continue}", " for(;0;) {}");
+
+    testSame("X: for(;1;) { for(;1;) { if (x()) {continue X} x = 1}}");
+    test("for(;1;) { X: for(;1;) { if (x()) {continue X} }}",
+         "for(;1;) { X: for(;1;) { if (x()) {}}}");
+
+    test("do { continue } while(1);", "do {  } while(1);");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testUnlessUnconditonalBreak
+  public void testUnlessUnconditonalBreak() {
+    test("switch (a) { case 'a': break }", "switch (a) { case 'a': }");
+    test("switch (a) { case 'a': break; case foo(): }",
+         "switch (a) { case 'a':        case foo(): }");
+    test("switch (a) { default: break; case 'a': }",
+         "switch (a) { default:        case 'a': }");
+
+    testSame("switch (a) { case 'a': alert(a); break; default: alert(a); }");
+    testSame("switch (a) { default: alert(a); break; case 'a': alert(a); }");
+
+    test("X: {switch (a) { case 'a': break X}}",
+         "X: {switch (a) { case 'a': }}");
+
+    testSame("X: {switch (a) { case 'a': if (a()) {break X}  a = 1}}");
+    test("X: {switch (a) { case 'a': if (a()) {break X}}}",
+         "X: {switch (a) { case 'a': if (a()) {}}}");
+
+    test("X: {switch (a) { case 'a': if (a()) {break X}}}",
+         "X: {switch (a) { case 'a': if (a()) {}}}");
+
+    testSame("do { break } while(1);");
+    testSame("for(;1;) { break }");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testCascadedRemovalOfUnlessUnconditonalJumps
+  public void testCascadedRemovalOfUnlessUnconditonalJumps() {
+    test("switch (a) { case 'a': break; case 'b': break; case 'c': break }",
+         "switch (a) { case 'a': break; case 'b': case 'c': }");
+    
+    test("switch (a) { case 'a': break; case 'b': case 'c': }",
+         "switch (a) { case 'a': case 'b': case 'c': }");
+
+    test("function foo() {" +
+      "  switch (a) { case 'a':return; case 'b':return; case 'c':return }}",
+      "function foo() { switch (a) { case 'a':return; case 'b': case 'c': }}");
+    test("function foo() {" +
+      "  switch (a) { case 'a':return; case 'b': case 'c': }}",
+      "function foo() { switch (a) { case 'a': case 'b': case 'c': }}");
+
+    testSame("function foo() {" +
+             "switch (a) { case 'a':return 2; case 'b':return 1}}");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue311
+  public void testIssue311() {
+    test("function a(b) {\n" +
+         "  switch (b.v) {\n" +
+         "    case 'SWITCH':\n" +
+         "      if (b.i >= 0) {\n" +
+         "        return b.o;\n" +
+         "      } else {\n" +
+         "        return;\n" +
+         "      }\n" +
+         "      break;\n" +
+         "  }\n" +
+         "}",
+         "function a(b) {\n" +
+         "  switch (b.v) {\n" +
+         "    case 'SWITCH':\n" +
+         "      if (b.i >= 0) {\n" +
+         "        return b.o;\n" +
+         "      } else {\n" +
+         "      }\n" +
+         "  }\n" +
+         "}");
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue4177428a
+  public void testIssue4177428a() {
+    test(
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "      break a\n" +  
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" + 
+        "};",
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" +  
+        "};"
+        );
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue4177428b
+  public void testIssue4177428b() {
+    test(
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "      break a\n" +  
+        "    }\n" +
+        "    } finally {\n" +
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" + 
+        "};",
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "      break a\n" +  
+        "    }\n" +
+        "    } finally {\n" +
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" +  
+        "};"
+        );
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue4177428c
+  public void testIssue4177428c() {
+    test(
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "    } finally {\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "      break a\n" +  
+        "    }\n" +
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" + 
+        "};",
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "    } finally {\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "    }\n" +
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" +  
+        "};"
+        );
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue4177428_continue
+  public void testIssue4177428_continue() {
+    test(
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: do {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "      continue a\n" +  
+        "    }\n" +
+        "  } while(false)\n" +
+        "  alert(action)\n" + 
+        "};",
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: do {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "    }\n" +
+        "  } while (false)\n" +
+        "  alert(action)\n" +
+        "};"
+        );
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue4177428_return
+  public void testIssue4177428_return() {
+    test(
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "      return\n" +  
+        "    }\n" +
+        "  }\n" +
+        "  alert(action)\n" + 
+        "};",
+        "f = function() {\n" +
+        "  var action;\n" +
+        "  a: {\n" +
+        "    var proto = null;\n" +
+        "    try {\n" +
+        "      proto = new Proto\n" +
+        "    } finally {\n" +
+        "      action = proto;\n" +
+        "    }\n" +
+        "  }\n" +
+        "};"
+        );
+  }
+
+// com.google.javascript.jscomp.UnreachableCodeEliminationTest::testIssue4177428_multifinally
+  public void testIssue4177428_multifinally() {
+    testSame(
+        "a: {\n" +
+        " try {\n" +
+        " try {\n" +
+        " } finally {\n" +
+        "   break a;\n" +
+        " }\n" +
+        " } finally {\n" +
+        "   x = 1;\n" +
+        " }\n" +
+        "}");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testBreak
+  public void testBreak() {
+    testSame("a: while(1) break a;");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testContinue
+  public void testContinue() {
+    testSame("a: while(1) continue a;");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testReferencedVarNotDefined
+  public void testReferencedVarNotDefined() {
+    test("x = 0;", null, VarCheck.UNDEFINED_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testReferencedVarDefined1
+  public void testReferencedVarDefined1() {
+    testSame("var x, y; x=1;");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testReferencedVarDefined2
+  public void testReferencedVarDefined2() {
+    testSame("var x; function y() {x=1;}");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testReferencedVarsExternallyDefined
+  public void testReferencedVarsExternallyDefined() {
+    testSame("var x = window; alert(x);");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMultiplyDeclaredVars1
+  public void testMultiplyDeclaredVars1() {
+    test("var x = 1; var x = 2;", null,
+         SyntacticScopeCreator.VAR_MULTIPLY_DECLARED_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMultiplyDeclaredVars2
+  public void testMultiplyDeclaredVars2() {
+    test("var y; try { y=1 } catch (x) {}" +
+         "try { y=1 } catch (x) {}",
+         "var y;try{y=1}catch(x){}try{y=1}catch(x){}");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMultiplyDeclaredVars3
+  public void testMultiplyDeclaredVars3() {
+    test("try { var x = 1; x *=2; } catch (x) {}", null,
+         SyntacticScopeCreator.VAR_MULTIPLY_DECLARED_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMultiplyDeclaredVars4
+  public void testMultiplyDeclaredVars4() {
+    testSame("x;", "var x = 1; var x = 2;",
+         SyntacticScopeCreator.VAR_MULTIPLY_DECLARED_ERROR, true);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testVarReferenceInExterns
+  public void testVarReferenceInExterns() {
+    testSame("asdf;", "var asdf;",
+        VarCheck.NAME_REFERENCE_IN_EXTERNS_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testCallInExterns
+  public void testCallInExterns() {
+    testSame("yz();", "function yz() {}",
+        VarCheck.NAME_REFERENCE_IN_EXTERNS_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testPropReferenceInExterns1
+  public void testPropReferenceInExterns1() {
+    testSame("asdf.foo;", "var asdf;",
+        VarCheck.UNDEFINED_EXTERN_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testPropReferenceInExterns2
+  public void testPropReferenceInExterns2() {
+    testSame("asdf.foo;", "",
+        VarCheck.UNDEFINED_VAR_ERROR, true);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testPropReferenceInExterns3
+  public void testPropReferenceInExterns3() {
+    testSame("asdf.foo;", "var asdf;",
+        VarCheck.UNDEFINED_EXTERN_VAR_ERROR);
+
+    externValidationErrorLevel = CheckLevel.ERROR;
+    test(
+        "asdf.foo;", "var asdf;", "",
+         VarCheck.UNDEFINED_EXTERN_VAR_ERROR, null);
+
+    externValidationErrorLevel = CheckLevel.OFF;
+    test("asdf.foo;", "var asdf;", "var asdf;", null, null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testVarInWithBlock
+  public void testVarInWithBlock() {
+    test("var a = {b:5}; with (a){b;}", null, VarCheck.UNDEFINED_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testInvalidFunctionDecl1
+  public void testInvalidFunctionDecl1() {
+    
+    super.enableAstValidation(false);
+
+    final CompilerTestCase testcase = this;
+
+    
+    testSetupPass = new CompilerPass() {
+
+      void visit(Node n) {
+        if (n.getType() == Token.NAME
+            && !n.getString().isEmpty()
+            && n.getParent().getType() == Token.FUNCTION) {
+          n.setString("");
+          testcase.getLastCompiler().reportCodeChange();
+        }
+        for (Node c : n.children()) {
+          visit(c);
+        }
+      }
+
+      @Override
+      public void process(Node externs, Node root) {
+        visit(root);
+      }
+    };
+
+    test("function f() {};", null, VarCheck.INVALID_FUNCTION_DECL);
+    test("if (true) { function f(){}; }", null, VarCheck.INVALID_FUNCTION_DECL);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testValidFunctionExpr
+  public void testValidFunctionExpr() {
+    testSame("(function() {});");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testRecursiveFunction
+  public void testRecursiveFunction() {
+    testSame("(function a() { return a(); })();");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testRecursiveFunction2
+  public void testRecursiveFunction2() {
+    testSame("var a = 3; (function a() { return a(); })();");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testLegalVarReferenceBetweenModules
+  public void testLegalVarReferenceBetweenModules() {
+    testDependentModules("var x = 10;", "var y = x++;", null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMissingModuleDependencyDefault
+  public void testMissingModuleDependencyDefault() {
+    testIndependentModules("var x = 10;", "var y = x++;",
+                           null, VarCheck.MISSING_MODULE_DEP_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testViolatedModuleDependencyDefault
+  public void testViolatedModuleDependencyDefault() {
+    testDependentModules("var y = x++;", "var x = 10;",
+                         VarCheck.VIOLATED_MODULE_DEP_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMissingModuleDependencySkipNonStrict
+  public void testMissingModuleDependencySkipNonStrict() {
+    sanityCheck = true;
+    testIndependentModules("var x = 10;", "var y = x++;",
+                           null, null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testViolatedModuleDependencySkipNonStrict
+  public void testViolatedModuleDependencySkipNonStrict() {
+    sanityCheck = true;
+    testDependentModules("var y = x++;", "var x = 10;",
+                         null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testMissingModuleDependencySkipNonStrictPromoted
+  public void testMissingModuleDependencySkipNonStrictPromoted() {
+    sanityCheck = true;
+    strictModuleDepErrorLevel = CheckLevel.ERROR;
+    testIndependentModules("var x = 10;", "var y = x++;",
+        VarCheck.STRICT_MODULE_DEP_ERROR, null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testViolatedModuleDependencyNonStrictPromoted
+  public void testViolatedModuleDependencyNonStrictPromoted() {
+    sanityCheck = true;
+    strictModuleDepErrorLevel = CheckLevel.ERROR;
+    testDependentModules("var y = x++;", "var x = 10;",
+        VarCheck.STRICT_MODULE_DEP_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testDependentStrictModuleDependencyCheck
+  public void testDependentStrictModuleDependencyCheck() {
+    strictModuleDepErrorLevel = CheckLevel.ERROR;
+    testDependentModules("var f = function() {return new B();};",
+        "var B = function() {}",
+        VarCheck.STRICT_MODULE_DEP_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testIndependentStrictModuleDependencyCheck
+  public void testIndependentStrictModuleDependencyCheck() {
+    strictModuleDepErrorLevel = CheckLevel.ERROR;
+    testIndependentModules("var f = function() {return new B();};",
+        "var B = function() {}",
+        VarCheck.STRICT_MODULE_DEP_ERROR, null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testStarStrictModuleDependencyCheck
+  public void testStarStrictModuleDependencyCheck() {
+    strictModuleDepErrorLevel = CheckLevel.WARNING;
+    testSame(createModuleStar("function a() {}", "function b() { a(); c(); }",
+        "function c() { a(); }"),
+        VarCheck.STRICT_MODULE_DEP_ERROR);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testForwardVarReferenceInLocalScope1
+  public void testForwardVarReferenceInLocalScope1() {
+    testDependentModules("var x = 10; function a() {y++;}",
+                         "var y = 11; a();", null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testForwardVarReferenceInLocalScope2
+  public void testForwardVarReferenceInLocalScope2() {
+    
+    
+    testDependentModules("var x = 10; function a() {y++;} a();",
+                         "var y = 11;", null);
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testSimple
+  public void testSimple() {
+    checkSynthesizedExtern("x", "var x;");
+    checkSynthesizedExtern("var x", "");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testSimpleSanityCheck
+  public void testSimpleSanityCheck() {
+    sanityCheck = true;
+    try {
+      checkSynthesizedExtern("x", "");
+    } catch (RuntimeException e) {
+      assertTrue(e.getMessage().indexOf("Unexpected variable x") != -1);
+    }
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testParameter
+  public void testParameter() {
+    checkSynthesizedExtern("function f(x){}", "");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testLocalVar
+  public void testLocalVar() {
+    checkSynthesizedExtern("function f(){x}", "var x");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testTwoLocalVars
+  public void testTwoLocalVars() {
+    checkSynthesizedExtern("function f(){x}function g() {x}", "var x");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testInnerFunctionLocalVar
+  public void testInnerFunctionLocalVar() {
+    checkSynthesizedExtern("function f(){function g() {x}}", "var x");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testNoCreateVarsForLabels
+  public void testNoCreateVarsForLabels() {
+    checkSynthesizedExtern("x:var y", "");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testVariableInNormalCodeUsedInExterns1
+  public void testVariableInNormalCodeUsedInExterns1() {
+    checkSynthesizedExtern(
+        "x.foo;", "var x;", "var x; x.foo;");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testVariableInNormalCodeUsedInExterns2
+  public void testVariableInNormalCodeUsedInExterns2() {
+    checkSynthesizedExtern(
+        "x;", "var x;", "var x; x;");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testVariableInNormalCodeUsedInExterns3
+  public void testVariableInNormalCodeUsedInExterns3() {
+    checkSynthesizedExtern(
+        "x.foo;", "function x() {}", "var x; x.foo; ");
+  }
+
+// com.google.javascript.jscomp.VarCheckTest::testVariableInNormalCodeUsedInExterns4
+  public void testVariableInNormalCodeUsedInExterns4() {
+    checkSynthesizedExtern(
+        "x;", "function x() {}", "var x; x; ");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testCorrectCode
+  public void testCorrectCode() {
+    assertNoWarning("function foo(d) { (function() { d.foo(); }); d.bar(); } ");
+    assertNoWarning("function foo() { bar(); } function bar() { foo(); } ");
+    assertNoWarning("function f(d) { d = 3; }");
+    assertNoWarning(VARIABLE_RUN);
+    assertNoWarning("function f() { " + VARIABLE_RUN + "}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testCorrectShadowing
+  public void testCorrectShadowing() {
+    assertNoWarning(VARIABLE_RUN + "function f() { " + VARIABLE_RUN + "}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testCorrectRedeclare
+  public void testCorrectRedeclare() {
+    assertNoWarning(
+        "function f() { if (1) { var a = 2; } else { var a = 3; } }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testCorrectRecursion
+  public void testCorrectRecursion() {
+    assertNoWarning("function f() { var x = function() { x(); }; }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testCorrectCatch
+  public void testCorrectCatch() {
+    assertNoWarning("function f() { try { var x = 2; } catch (x) {} }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testRedeclare
+  public void testRedeclare() {
+    
+    assertRedeclare("function f() { var a = 2; var a = 3; }");
+    assertRedeclare("function f(a) { var a = 2; }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testEarlyReference
+  public void testEarlyReference() {
+    assertUndeclared("function f() { a = 2; var a = 3; }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testCorrectEarlyReference
+  public void testCorrectEarlyReference() {
+    assertNoWarning("var goog = goog || {}");
+    assertNoWarning("function f() { a = 2; } var a = 2;");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testUnreferencedBleedingFunction
+  public void testUnreferencedBleedingFunction() {
+    assertNoWarning("var x = function y() {}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testReferencedBleedingFunction
+  public void testReferencedBleedingFunction() {
+    assertNoWarning("var x = function y() { return y(); }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testDoubleDeclaration
+  public void testDoubleDeclaration() {
+    assertRedeclare("function x(y) { if (true) { var y; } }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testDoubleDeclaration2
+  public void testDoubleDeclaration2() {
+    assertRedeclare("function x() { var y; if (true) { var y; } }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testHoistedFunction1
+  public void testHoistedFunction1() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("f(); function f() {}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testHoistedFunction2
+  public void testHoistedFunction2() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("function g() { f(); function f() {} }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction
+  public void testNonHoistedFunction() {
+    enableAmbiguousFunctionCheck = true;
+    assertUndeclared("if (true) { f(); function f() {} }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction2
+  public void testNonHoistedFunction2() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("if (false) { function f() {} f(); }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction3
+  public void testNonHoistedFunction3() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("function g() { if (false) { function f() {} f(); }}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction4
+  public void testNonHoistedFunction4() {
+    enableAmbiguousFunctionCheck = true;
+    assertAmbiguous("if (false) { function f() {} }  f();");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction5
+  public void testNonHoistedFunction5() {
+    enableAmbiguousFunctionCheck = true;
+    assertAmbiguous("function g() { if (false) { function f() {} }  f(); }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction6
+  public void testNonHoistedFunction6() {
+    enableAmbiguousFunctionCheck = true;
+    assertUndeclared("if (false) { f(); function f() {} }");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedFunction7
+  public void testNonHoistedFunction7() {
+    enableAmbiguousFunctionCheck = true;
+    assertUndeclared("function g() { if (false) { f(); function f() {} }}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedRecursiveFunction1
+  public void testNonHoistedRecursiveFunction1() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("if (false) { function f() { f(); }}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedRecursiveFunction2
+  public void testNonHoistedRecursiveFunction2() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("function g() { if (false) { function f() { f(); }}}");
+  }
+
+// com.google.javascript.jscomp.VariableReferenceCheckTest::testNonHoistedRecursiveFunction3
+  public void testNonHoistedRecursiveFunction3() {
+    enableAmbiguousFunctionCheck = true;
+    assertNoWarning("function g() { if (false) { function f() { f(); g(); }}}");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testNoWarnShadowGlobal
+  public void testNoWarnShadowGlobal() {
+    
+    
+    assertNoError("", "var x; function foo() { var x } ");
+    assertNoError("var x", "function foo() { var x } ");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testWarnShadowLocal1
+  public void testWarnShadowLocal1() {
+    assertError("", "function a(){ var x; function b() { var x = 1; } }");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testWarnShadowLocal2
+  public void testWarnShadowLocal2() {
+    assertError("",
+                "function a(){" +
+                "   var x;" +
+                "  function b() {" +
+                "    var x = 1;" +
+                "  }" +
+                "}");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testUseShadowGlobals1
+  public void testUseShadowGlobals1() {
+    assertNoError("", " var x; function foo() { x = 1 } ");
+    assertNoError("", "function a() { var x; function b() { x = 1; } }");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testNoShadowAnnotation
+  public void testNoShadowAnnotation() {
+    assertError("",
+                " var x; function a() { var x } ");
+
+    assertError("",
+                " var x; function a() {function b(){var x}} ");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testNoShadowAnnotationInExterns1
+  public void testNoShadowAnnotationInExterns1() {
+    assertError(" var x",
+                "function a() { var x } ");
+  }
+
+// com.google.javascript.jscomp.VariableShadowDeclarationCheckTest::testNoShadowAnnotationInExterns2
+  public void testNoShadowAnnotationInExterns2() {
+    assertError(" var x",
+                "function a() {function b(){var x}} ");
+  }
+
+// com.google.javascript.jscomp.VariableVisibilityAnalysisTest::testCapturedVariables
+  public void testCapturedVariables() {
+    String source =
+        "global:var global;\n" +
+        "function Outer() {\n" +
+        "  captured:var captured;\n" +
+        "  notcaptured:var notCaptured;\n" +
+        "  function Inner() {\n" +
+        "    alert(captured);" +
+        "   }\n" +
+        "}\n";
+
+    analyze(source);
+
+    assertIsCapturedLocal("captured");
+    assertIsUncapturedLocal("notcaptured");
+  }
+
+// com.google.javascript.jscomp.VariableVisibilityAnalysisTest::testGlobals
+  public void testGlobals() {
+    String source =
+      "global:var global;";
+
+    analyze(source);
+
+    assertIsGlobal("global");
+  }
+
+// com.google.javascript.jscomp.VariableVisibilityAnalysisTest::testParameters
+  public void testParameters() {
+    String source =
+      "function A(a,b,c) {\n" +
+      "}\n";
+
+    analyze(source);
+
+    assertIsParameter("a");
+    assertIsParameter("b");
+    assertIsParameter("c");
+  }
+
+// com.google.javascript.jscomp.VariableVisibilityAnalysisTest::testFunctions
+  public void testFunctions() {
+    String source =
+        "function global() {\n" +
+        "  function inner() {\n" +
+        "  }\n" +
+        "  function innerCaptured() {\n" +
+        "    (function(){innerCaptured()})()\n" +
+        "  }\n" +
+        "}\n";
+
+    analyze(source);
+
+    assertFunctionHasVisibility("global",
+        VariableVisibility.GLOBAL);
+
+    assertFunctionHasVisibility("inner",
+        VariableVisibility.LOCAL);
+
+    assertFunctionHasVisibility("innerCaptured",
+        VariableVisibility.CAPTURED_LOCAL);
+  }

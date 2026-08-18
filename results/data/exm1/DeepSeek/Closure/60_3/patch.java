@@ -1,0 +1,37 @@
+static TernaryValue getImpureBooleanValue(Node n) {
+    switch (n.getType()) {
+      case Token.ASSIGN:
+      case Token.COMMA:
+        return getImpureBooleanValue(n.getLastChild());
+      case Token.NOT:
+        TernaryValue value = getImpureBooleanValue(n.getLastChild());
+        return value.not();
+      case Token.AND: {
+        TernaryValue lhs = getImpureBooleanValue(n.getFirstChild());
+        TernaryValue rhs = getImpureBooleanValue(n.getLastChild());
+        return lhs.and(rhs);
+      }
+      case Token.OR:  {
+        TernaryValue lhs = getImpureBooleanValue(n.getFirstChild());
+        TernaryValue rhs = getImpureBooleanValue(n.getLastChild());
+        return lhs.or(rhs);
+      }
+      case Token.HOOK:  {
+        TernaryValue trueValue = getImpureBooleanValue(
+            n.getFirstChild().getNext());
+        TernaryValue falseValue = getImpureBooleanValue(n.getLastChild());
+        if (trueValue.equals(falseValue)) {
+          return trueValue;
+        } else {
+          return TernaryValue.UNKNOWN;
+        }
+      }
+      case Token.ARRAYLIT:
+      case Token.OBJECTLIT:
+        return TernaryValue.TRUE;
+
+
+      default:
+        return getPureBooleanValue(n);
+    }
+  }

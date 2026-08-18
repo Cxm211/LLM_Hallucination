@@ -1,0 +1,27 @@
+private static Collection<Definition> getCallableDefinitions(
+      DefinitionProvider definitionProvider, Node name) {
+      List<Definition> result = Lists.newArrayList();
+
+      if (!NodeUtil.isGetProp(name) && !NodeUtil.isName(name)) {
+        return null;
+      }
+      Collection<Definition> decls =
+          definitionProvider.getDefinitionsReferencedAt(name);
+      if (decls == null) {
+        return null;
+      }
+
+      for (Definition current : decls) {
+        Node rValue = current.getRValue();
+        if ((rValue != null) && NodeUtil.isFunction(rValue)) {
+          result.add(current);
+        } else {
+          return null;
+        }
+      }
+
+      if (result.isEmpty()) {
+        return null;
+      }
+      return result;
+  }

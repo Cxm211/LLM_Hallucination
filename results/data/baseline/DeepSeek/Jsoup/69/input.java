@@ -1,0 +1,6 @@
+// buggy code
+    public FormElement addElement(Element element) {
+        elements.add(element);
+        return this;
+    }
+

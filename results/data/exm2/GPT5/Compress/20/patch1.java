@@ -1,0 +1,29 @@
+private CpioArchiveEntry readOldAsciiEntry() throws IOException {
+        CpioArchiveEntry ret = new CpioArchiveEntry(FORMAT_OLD_ASCII);
+
+        ret.setDevice(readAsciiLong(6, 8));
+        ret.setInode(readAsciiLong(6, 8));
+        final long mode = readAsciiLong(6, 8);
+        if (mode != 0) {
+            ret.setMode(mode);
+        }
+        ret.setUID(readAsciiLong(6, 8));
+        ret.setGID(readAsciiLong(6, 8));
+        ret.setNumberOfLinks(readAsciiLong(6, 8));
+        ret.setRemoteDevice(readAsciiLong(6, 8));
+        ret.setTime(readAsciiLong(11, 8));
+        long namesize = readAsciiLong(6, 8));
+        ret.setSize(readAsciiLong(11, 8));
+        final String name = readCString((int) namesize);
+        ret.setName(name);
+        String cmpName = name;
+        int nul = cmpName.indexOf('\0');
+        if (nul != -1) {
+            cmpName = cmpName.substring(0, nul);
+        }
+        if (mode == 0 && !cmpName.equals(CPIO_TRAILER)){
+            throw new IOException("Mode 0 only allowed in the trailer. Found entry: "+ name + " Occured at byte: " + getBytesRead());
+        }
+
+        return ret;
+    }

@@ -1,0 +1,44 @@
+private boolean testAttr(Attr attr) {
+        String nodePrefix = DOMNodePointer.getPrefix(attr);
+        String nodeLocalName = DOMNodePointer.getLocalName(attr);
+
+        if (nodePrefix != null && nodePrefix.equals("xmlns")) {
+            return false;
+        }
+
+        if (nodePrefix == null && nodeLocalName.equals("xmlns")) {
+            return false;
+        }
+
+        String testLocalName = name.getName();
+        String testPrefix = name.getPrefix();
+
+        if ("*".equals(testLocalName)) {
+            if (testPrefix == null) {
+                // Wildcard attribute name without a prefix matches any attribute
+                return true;
+            }
+            String testNS = parent.getNamespaceURI(testPrefix);
+            String nodeNS = null;
+            if (nodePrefix != null) {
+                nodeNS = parent.getNamespaceURI(nodePrefix);
+            }
+            return equalStrings(testNS, nodeNS);
+        }
+
+        if (testLocalName.equals(nodeLocalName)) {
+            if (equalStrings(testPrefix, nodePrefix)) {
+                return true;
+            }
+            String testNS = null;
+            if (testPrefix != null) {
+                testNS = parent.getNamespaceURI(testPrefix);
+            }
+            String nodeNS = null;
+            if (nodePrefix != null) {
+                nodeNS = parent.getNamespaceURI(nodePrefix);
+            }
+            return equalStrings(testNS, nodeNS);
+        }
+        return false;
+    }

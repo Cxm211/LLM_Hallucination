@@ -1,0 +1,42 @@
+// buggy function
+    private RealMatrix squareRoot(RealMatrix m) {
+            final EigenDecomposition dec = new EigenDecomposition(m);
+            return dec.getSquareRoot();
+    }
+
+    public Weight(double[] weight) {
+        final int dim = weight.length;
+        weightMatrix = org.apache.commons.math3.linear.MatrixUtils.createRealMatrix(dim, dim);
+        for (int i = 0; i < dim; i++) {
+            weightMatrix.setEntry(i, i, weight[i]);
+        }
+    }
+
+// trigger testcase
+// org/apache/commons/math3/fitting/PolynomialFitterTest.java::testLargeSample
+@Test
+    public void testLargeSample() {
+        Random randomizer = new Random(0x5551480dca5b369bl);
+        double maxError = 0;
+        for (int degree = 0; degree < 10; ++degree) {
+            PolynomialFunction p = buildRandomPolynomial(degree, randomizer);
+
+            PolynomialFitter fitter = new PolynomialFitter(new LevenbergMarquardtOptimizer());
+            for (int i = 0; i < 40000; ++i) {
+                double x = -1.0 + i / 20000.0;
+                fitter.addObservedPoint(1.0, x,
+                                        p.value(x) + 0.1 * randomizer.nextGaussian());
+            }
+
+            final double[] init = new double[degree + 1];
+            PolynomialFunction fitted = new PolynomialFunction(fitter.fit(init));
+
+            for (double x = -1.0; x < 1.0; x += 0.01) {
+                double error = FastMath.abs(p.value(x) - fitted.value(x)) /
+                              (1.0 + FastMath.abs(p.value(x)));
+                maxError = FastMath.max(maxError, error);
+                Assert.assertTrue(FastMath.abs(error) < 0.01);
+            }
+        }
+        Assert.assertTrue(maxError > 0.001);
+    }

@@ -1,0 +1,3 @@
+public List subList(int fromIndex, int toIndex) {
+    return new SetUniqueList(super.subList(fromIndex, toIndex), new HashSet(super.subList(fromIndex, toIndex)));
+}

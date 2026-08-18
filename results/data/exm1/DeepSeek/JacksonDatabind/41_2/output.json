@@ -1,0 +1,159 @@
+We are given a buggy source code (two functions) and a large set of testcases. We need to determine which testcases actually expose the bug, and then produce the minimal correct fix. The buggy functions are:
+
+```
+public JavaType constructType(Type type, Class<?> contextClass) {
+    return constructType(type, constructType(contextClass));
+}
+
+public JavaType constructType(Type type, JavaType contextType) {
+    return _fromAny(null, type, contextType.getBindings());
+}
+```
+
+The issue: In `constructType(Type type, Class<?> contextClass)`, it calls `constructType(contextClass)` to get a JavaType for the context class, then passes that as the contextType. But in the second overload, it uses `contextType.getBindings()` – which returns the type bindings of the context type. If the contextClass is a simple class with no generic parameters, `getBindings()` returns an empty TypeBindings, which is fine. However, if the contextClass itself is a generic type (e.g., `List<String>`) then the `constructType(contextClass)` will treat it as a raw type (since we are passing a Class object, not a parameterized Type), and the resulting JavaType will have no type parameters, so its bindings will also be empty. That might be okay.
+
+But the real bug might be something else: In the second overload, `_fromAny(null, type, contextType.getBindings())` passes `contextType.getBindings()`. This is used for resolving type variables. If `contextType` is a JavaType that was constructed from a Class (raw), its bindings are empty. But if we are resolving a type that depends on generic parameters from the contextClass, we need those bindings. Since we constructed the contextType from the class directly, we lose any generic information. The proper way would be to use the TypeFactory's resolution, which typically takes a Type and a Bindings.
+
+But the bug might be that `constructType(Type type, Class<?> contextClass)` should instead call `constructType(type, TypeFactory.defaultInstance().constructType(contextClass))`, which is what it does. But maybe the issue is that `_fromAny` expects a TypeBindings, but `contextType.getBindings()` might be null? Typically, for a JavaType built from a Class, `getBindings()` returns an empty TypeBindings, not null. But in some cases it could be null? Let's check the code in Jackson.
+
+We need to see which testcases trigger this bug. Since the bug is in `constructType` methods, it affects type resolution. Testcases that involve type construction may fail. Looking at the testcases, many are about serialization/deserialization, filters, etc. But the bug is in type resolution, which might affect things like `MapperFeature.USE_STATIC_TYPING`, or when using `TypeFactory.constructType` with a contextClass.
+
+One testcase that stands out is `testDeprecatedTypeResolution` in `DeprecatedTypeHandling1102Test`. It calls:
+```java
+JavaType t = tf.constructType(Point.class, getClass());
+JavaType t2 = tf.constructType(Point.class, (Class<?>) null);
+JavaType ctxt = tf.constructType(getClass());
+JavaType t3 = tf.constructType(Point.class, ctxt);
+```
+This directly uses `constructType` with a class context. If there is a bug, this test might fail because it expects correct behavior. But looking at the test, it just checks the raw class, which is fine even if bindings are empty. It may pass.
+
+Another testcase: `testSimplePOJOType` and `testPOJOSubType` use `SimpleType.construct` and then read value with that type. They don't use `constructType` with contextClass directly.
+
+What about testcases in `TestPolymorphicWithDefaultImpl`? They use `MAPPER.readerFor(Inter.class).readValue(...)` which might call type construction.
+
+But the bug is specifically in the two methods. The testcases that actually call these methods are likely those that involve type resolution with a context class. However, many testcases use `ObjectMapper` methods that internally call `TypeFactory.constructType` with a context class. For example, `mapper.constructType(SomeClass.class)` is called in many tests? Not directly.
+
+Let's look at the testcases that use `MAPPER.constructType` or `TypeFactory.constructType`. The test `testClassDesc` does:
+```java
+BeanDescription beanDesc = MAPPER.getDeserializationConfig().introspect(MAPPER.constructType(DocumentedBean.class));
+```
+This calls `ObjectMapper.constructType(Class<?>)` which is a wrapper that likely calls `TypeFactory.defaultInstance().constructType(type)`. Not the buggy ones.
+
+The buggy methods are `TypeFactory.constructType(Type, Class<?>)` and `TypeFactory.constructType(Type, JavaType)`. So tests that directly use TypeFactory with these signatures might trigger the bug.
+
+From the test list, `testDeprecatedTypeResolution` uses `tf.constructType(Point.class, getClass())` and `tf.constructType(Point.class, ctxt)`. So it calls both signatures. If there is a bug, this test might fail.
+
+Also `testIssue506WithDate` and `testIssue506WithNumber` might use type resolution? They are in `TestTypedDeserialization`. But they use ObjectMapper, not direct type factory.
+
+But the bug could be very subtle: In `constructType(Type, JavaType)`, it calls `_fromAny(null, type, contextType.getBindings())`. The `_fromAny` method expects a `TypeBindings` object. If `contextType.getBindings()` returns a TypeBindings that is for a raw type, it's empty. That might be fine. But what if `contextType` is `null`? In the first overload, `constructType(contextClass)` could return null if the class is null? It says `constructType(Type type)`, which should handle null? Possibly returns `null`. Then `contextType.getBindings()` would throw NPE. But in `testDeprecatedTypeResolution`, it calls `tf.constructType(Point.class, (Class<?>) null)`. That will call the first overload with `contextClass = null`. Then it will call `constructType(null)` which might return null, and then `contextType.getBindings()` will throw NullPointerException. That would cause a failure. Let's check the Jackson source: `TypeFactory.constructType(Type)` typically returns null if type is null? Actually, in Jackson, `constructType` with null type might return `null`. But I'm not sure. Let's see the buggy code: `constructType(type, contextType)` where `contextType` is the result of `constructType(contextClass)`. If `contextClass` is null, `constructType(null)` might return null. Then `contextType.getBindings()` will throw NPE. So the test `testDeprecatedTypeResolution` that calls `tf.constructType(Point.class, (Class<?>) null)` should definitely fail with NPE.
+
+Let's verify: The test method:
+```java
+JavaType t2 = tf.constructType(Point.class, (Class<?>) null);
+```
+If this throws NPE, the test fails. So that test is likely a trigger.
+
+Now, the fix: We need to handle the case where `contextType` is null in the first overload. Possibly, we should pass `null` as `JavaType` or handle null contextType in the second overload. Looking at typical Jackson code, the method `constructType(Type type, Class<?> contextClass)` should pass `null` to `_fromAny` if contextClass is null? Actually, looking at the second overload, it uses `contextType.getBindings()`. If `contextType` is null, we need to avoid that. A common fix is to check if `contextType == null` and then call `_fromAny` with an empty TypeBindings? Or better, in the first overload, if `contextClass` is null, we should call `constructType(type)` directly without context. So we can fix the first overload to handle null:
+
+```java
+public JavaType constructType(Type type, Class<?> contextClass) {
+    if (contextClass == null) {
+        return constructType(type);
+    }
+    return constructType(type, constructType(contextClass));
+}
+```
+
+But also, consider that `constructType(contextClass)` might return null if contextClass is something else? It shouldn't if contextClass is not null. So the fix is minimal.
+
+Now, are there other testcases that trigger the bug? Possibly test `testDeprecatedTypeResolution` is the only one that calls with null contextClass. Other testcases might call with a non-null contextClass, and the bug might not cause visible failure because the bindings from a raw class are empty, and the type resolution still works. But we need to check if any test fails due to incorrect bindings. For example, if a test uses a generic context type like `List<String>`, but the `constructType` will treat it as raw `List`, losing type parameters. That could cause issues later. But do any tests directly use `TypeFactory.constructType` with a parameterized type as context? Probably not; they use `ObjectMapper` methods.
+
+Let's look at `testJackson430`: it uses `om.setSerializerFactory(new CustomJsonSerializerFactory())` but not direct type construction.
+
+Maybe `testWithType` in TestJSONP uses `JavaType type = m.constructType(Base.class);` which uses `constructType(Class<?>)` not the buggy ones.
+
+So the most obvious trigger is `testDeprecatedTypeResolution` because of the null contextClass call.
+
+However, we should also consider that the bug could be that the second overload does not correctly handle the bindings when the contextType itself has generic parameters. But since we are passing a class, not a parameterized type, it's fine. The only clear failing case is null contextClass.
+
+Thus, the trigger method is likely `testDeprecatedTypeResolution` (full path: `com.fasterxml.jackson.databind.interop.DeprecatedTypeHandling1102Test::testDeprecatedTypeResolution`).
+
+Additionally, the test `testIssue506WithDate` and `testIssue506WithNumber` might also trigger? They are in `TestTypedDeserialization`, but they use `ObjectMapper` normal flow, not directly the buggy methods. Unlikely.
+
+So I'll set the trigger_method to include that one.
+
+Now, the fixed code: We need to provide the corrected implementations of both functions. The fix is to add null check:
+
+```java
+    public JavaType constructType(Type type, Class<?> contextClass) {
+        if (contextClass == null) {
+            return constructType(type);
+        }
+        return constructType(type, constructType(contextClass));
+    }
+
+    public JavaType constructType(Type type, JavaType contextType) {
+        return _fromAny(null, type, contextType.getBindings());
+    }
+```
+
+But note: Actually, the second overload also has a potential issue if `contextType` is null. It could be called directly. But since we only call it from the first overload after null check, it's safe. However, if someone else calls `constructType(type, (JavaType) null)`, it would still throw NPE. But we are only fixing the given buggy functions, and the bug report might be based on the test. So minimal fix is the null check in the first overload.
+
+But wait: The test `testDeprecatedTypeResolution` also calls `tf.constructType(Point.class, ctxt)` where `ctxt` is a non-null JavaType. That should work fine.
+
+Thus, the fixed code will be:
+
+```
+    public JavaType constructType(Type type, Class<?> contextClass) {
+        if (contextClass == null) {
+            return constructType(type);
+        }
+        return constructType(type, constructType(contextClass));
+    }
+
+    public JavaType constructType(Type type, JavaType contextType) {
+        return _fromAny(null, type, contextType.getBindings());
+    }
+```
+
+Now, we need to produce the JSON output with the trigger method and fixed code. Since there might be multiple triggers? I'll analyze further: Are there any other testcases that call `constructType` with a null contextClass? Possibly none. So I'll include only `testDeprecatedTypeResolution`.
+
+But let's also consider test `testSimplePOJOType` and similar: they use `SimpleType.construct` which is different. Not triggered.
+
+Thus, the JSON output:
+
+```
+{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.interop.DeprecatedTypeHandling1102Test::testDeprecatedTypeResolution"
+  ],
+  "fixed_code": [
+    "    public JavaType constructType(Type type, Class<?> contextClass) {\n        if (contextClass == null) {\n            return constructType(type);\n        }\n        return constructType(type, constructType(contextClass));\n    }",
+    "    public JavaType constructType(Type type, JavaType contextType) {\n        return _fromAny(null, type, contextType.getBindings());\n    }"
+  ]
+}
+```
+
+We must ensure the fixed_code includes both functions as they appear in the input, in the same order. The input had:
+
+```
+    public JavaType constructType(Type type, Class<?> contextClass) {
+        return constructType(type, constructType(contextClass));
+    }
+
+    public JavaType constructType(Type type, JavaType contextType) {
+        return _fromAny(null, type, contextType.getBindings());
+    }
+```
+
+So we output exactly those with the fix.
+
+I'll output the JSON.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.interop.DeprecatedTypeHandling1102Test::testDeprecatedTypeResolution"
+  ],
+  "fixed_code": [
+    "    public JavaType constructType(Type type, Class<?> contextClass) {\n        if (contextClass == null) {\n            return constructType(type);\n        }\n        return constructType(type, constructType(contextClass));\n    }",
+    "    public JavaType constructType(Type type, JavaType contextType) {\n        return _fromAny(null, type, contextType.getBindings());\n    }"
+  ]
+}

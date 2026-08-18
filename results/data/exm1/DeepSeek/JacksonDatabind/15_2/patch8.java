@@ -1,0 +1,1 @@
+public void acceptJsonFormatVisitor(JsonFormatVisitorWrapper visitor, JavaType typeHint) throws JsonMappingException { if (_delegateSerializer == null) { return; } _delegateSerializer.acceptJsonFormatVisitor(visitor, typeHint); }

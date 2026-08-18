@@ -1,0 +1,31 @@
+protected int findWrapPos(String text, int width, int startPos)
+    {
+        int pos;
+
+        if (((pos = text.indexOf('\n', startPos)) != -1 && pos <= startPos + width)
+                || ((pos = text.indexOf('\t', startPos)) != -1 && pos <= startPos + width))
+        {
+            return pos + 1;
+        }
+        else if (startPos + width >= text.length())
+        {
+            return -1;
+        }
+
+        pos = startPos + width;
+
+        char c;
+
+        while ((pos >= startPos) && ((c = text.charAt(pos)) != ' ')
+                && (c != '\n') && (c != '\r'))
+        {
+            --pos;
+        }
+
+        if (pos > startPos)
+        {
+            return pos;
+        }
+
+        return startPos + width;
+    }

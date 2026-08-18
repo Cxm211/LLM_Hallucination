@@ -1,0 +1,39 @@
+    Node processFunctionNode(FunctionNode functionNode) {
+      Name name = functionNode.getFunctionName();
+      Boolean isUnnamedFunction = false;
+      if (name == null) {
+        name = new Name();
+        name.setIdentifier("");
+        isUnnamedFunction = true;
+      }
+      Node node = newNode(Token.FUNCTION);
+      Node newName = transform(name);
+      if (isUnnamedFunction) {
+        // Old Rhino tagged the empty name node with the line number of the
+        // declaration.
+        newName.setLineno(functionNode.getLineno());
+        // Use the position of the 'function' keyword, not the left paren.
+        newName.setCharno(position2charno(functionNode.getAbsolutePosition()));
+      }
+
+      node.addChildToBack(newName);
+      Node lp = newNode(Token.LP);
+      Name fnName = functionNode.getFunctionName();
+      if (fnName != null) {
+        lp.setLineno(fnName.getLineno());
+      } else {
+        lp.setLineno(functionNode.getLineno());
+      }
+      int lparenCharno = functionNode.getLp() +
+          functionNode.getAbsolutePosition();
+      lp.setCharno(position2charno(lparenCharno));
+      for (AstNode param : functionNode.getParams()) {
+        lp.addChildToBack(transform(param));
+      }
+      node.addChildToBack(lp);
+
+      Node bodyNode = transform(functionNode.getBody());
+      parseDirectives(bodyNode);
+      node.addChildToBack(bodyNode);
+     return node;
+    }

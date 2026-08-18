@@ -1,0 +1,1 @@
+public float floatValue() { BigInteger num = numerator; BigInteger den = denominator; BigInteger gcd = num.gcd(den); num = num.divide(gcd); den = den.divide(gcd); float result = num.floatValue() / den.floatValue(); return result; }

@@ -1,0 +1,464 @@
+We need to analyze the buggy code. The code provided seems to be a mix of multiple classes, but the main focus is likely the `ProcessProperties` class (or similar) in the context of RenameProperties. The test cases are from `RenamePropertiesTest`, `SourceMapTest`, `SpecializeModuleTest`, `SymbolTableTest`, etc.
+
+The user asks: "Produce the minimal correct fix." and "Determine which testcase methods actually expose the bug."
+
+From the given source, we see a method `isPrototypePropertyAssign` has a bug: it returns true for prototype property assignments even when the property is not string (like numeric indices 2)? Actually looking at the code:
+
+```
+private boolean isPrototypePropertyAssign(Node assign) {
+  Node n = assign.getFirstChild();
+  if (n != null && NodeUtil.isVarOrSimpleAssignLhs(n, assign)
+      && n.isGetProp()
+      && assign.getParent().isExprResult()) {
+    boolean isChainedProperty =
+        n.getFirstChild().isGetProp();
+    if (isChainedProperty) {
+      Node child = n.getFirstChild().getFirstChild().getNext();
+      if (child.isString() &&
+          child.getString().equals("prototype")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+```
+
+This method checks `child.isString()` but it never checks that the property being assigned is a string (the property name from the getprop). Actually the condition for chained property: `n.getFirstChild().isGetProp()` means the left side of the assignment is something like `Bar.prototype.foo`. Then it gets the next child of the first child's first child? Wait, `n.getFirstChild()` is the whole getprop expression (e.g., `Bar.prototype.foo`). `n.getFirstChild().getFirstChild().getNext()`: gets the first child of the first child (which is `Bar`) then getNext? Actually with AST: GETPROP node has two children: object and property. So for `Bar.prototype.foo`, the GETPROP for `Bar.prototype.foo` has children: first child is another GETPROP (for `Bar.prototype`) and second child is the string "foo". So `n.getFirstChild().isGetProp()` checks if the object part is also a GETPROP (i.e., chained). Then `n.getFirstChild().getFirstChild().getNext()`: first child of the inner GETPROP is `Bar`, next is `"prototype"`. So it checks if that is a string "prototype". That is correct for prototype property assignments.
+
+But the bug might be elsewhere. Looking at `processPrototypeParent`:
+
+```
+private void processPrototypeParent(NodeTraversal t, Node n) {
+  switch (n.getType()) {
+    case Token.GETPROP:
+     ...
+      if (dest.isString() &&
+          NodeUtil.isExprAssign(grandParent) &&
+          NodeUtil.isVarOrSimpleAssignLhs(n, parent)) {
+        String name = dest.getString();
+        ...
+      }
+      break;
+    case Token.ASSIGN:
+      Node map = n.getFirstChild().getNext();
+      if (map.isObjectLit()) {
+        for (Node key = map.getFirstChild();
+             key != null; key = key.getNext()) {
+          // May be STRING, GET, or SET,
+          String name = key.getString();
+          ...
+        }
+      }
+      break;
+  }
+}
+```
+
+Here, it uses `key.getString()` for all keys including numeric keys like `2` (which is a STRING node with string "2") but also for getters or setters? It says "May be STRING, GET, or SET". For numeric literal keys (like `2`), the key node is a STRING node with the string representation of the number. But note: object literals with numeric keys: `{2: function(){}}` in JavaScript. In the AST, the key is a STRING node with "2". So `key.getString()` returns "2". That seems fine.
+
+But there is a bug in `isPrototypePropertyAssign`? Actually the test `testPrototypePropertiesAsObjLitKeys1` uses `Bar.prototype = {2: function(){}, getA: function(){}}` and expects both to be renamed (2 stays same because it's numeric literal? Actually the expected output is `Bar.prototype = {2: function(){}, a: function(){}}` so property `2` is not renamed. That suggests that numeric literal properties in object literals assigned to prototype are not renamed. So that is fine.
+
+Now what test cases are triggering a bug? Let's examine the test methods that are in the provided list. Many tests are passing or failing? The user wants to identify which testcase methods actually expose the bug. We need to look for failing tests. Without running the code, we need to reason about possible bugs.
+
+One potential bug is in `processPrototypeParent` when handling object literal property keys that are quotes (like `'getA'`). In the `visit` method, there is condition to skip object literals that are being assigned to prototype: 
+
+```
+} else if (n.isObjectLit() &&
+    // Make sure that we're not handling object literals being
+    // assigned to a prototype, as in:
+    // Foo.prototype = {bar: 3, baz: 5};
+    !(parent.isAssign() &&
+      parent.getFirstChild().isGetProp() &&
+      parent.getFirstChild().getLastChild().getString().equals(
+          "prototype"))) {
+    // add use for each property
+}
+```
+
+This skips object literals that are assigned to prototype. That's correct, because those properties are declarations, not uses.
+
+But in `processPrototypeParent`, when processing case ASSIGN (i.e., `Foo.prototype = {...}`), it iterates over all keys and adds declarations. But it does not check whether the key is quoted or not. For example, `{'getA': function(){}}` should not be renamed because it's quoted. In the input `testMixedQuotedAndUnquotedObjLitKeys1`: `Bar = {getA: function(){}, 'getB': function(){}}`. This is not a prototype assignment, so it goes to the object literal handling in `visit` which does check `propNameNode.isQuotedString()`. So that works.
+
+But for prototype assignments with quoted keys like `Bar.prototype = {'getA': function(){}}`, the object literal is handled in `processPrototypeParent` which does not check `isQuotedString()` and will treat it as a declaration and rename it. However, the expected behavior is that quoted prototype properties should not be renamed. Look at test `testQuotedPrototypeProperty`: `Bar.prototype['getA'] = function(){};` is a prototype property assignment using bracket notation, not object literal. That is handled by the GETPROP case in `processPrototypeParent`, which does check `dest.isString()` (it is a string "getA") but does not check if it's quoted? Actually `Bar.prototype['getA']` in AST: the GETPROP for `Bar.prototype['getA']` is a GETPROP with object `Bar.prototype` and property "getA". The property node is a STRING node, but it might have a flag `isQuotedString()`? Typically, bracket notation with string literal creates a STRING node that is quoted (isQuotedString=true). Dot notation creates STRING node with isQuotedString=false. In the GETPROP case in `processPrototypeParent`, it checks `dest.isString()` but not whether it's quoted. So it will add a declaration for `'getA'` even if it's quoted, which would cause it to be renamed. But the test `testQuotedPrototypeProperty` expects it to not be renamed (testSame). So that is a bug: quoted prototype properties should not be renamed.
+
+But the test `testQuotedPrototypeProperty` is in the list, and it might be one that fails. Also `testMixedQuotedAndUnquotedObjLitKeys1` uses `Bar = {getA: function(){}, 'getB': function(){}}` (not prototype) and expects only `getA` to be renamed. That is handled correctly by the object literal handler which checks `isQuotedString`. So maybe the bug is only in prototype assignments.
+
+Another candidate: In `processPrototypeParent` case GETPROP, it does not check if the property name is quoted. But there is also the condition `dest.isString()` which is true for both dot and bracket. Should add `!dest.isQuotedString()`. Also in case ASSIGN (object literal), it should skip quoted keys.
+
+But note: test `testQuotedPrototypeProperty` uses dot notation? Actually it uses bracket: `Bar.prototype['getA'] = function(){};`. That is a GETPROP assignment. So the fix should be in `processPrototypeParent` to check quoted string.
+
+Also test `testAvoidingConflictsBetweenQuotedAndUnquotedPropertyNames` uses `Bar.prototype.foo = function(){}; Bar.prototype['a'] = 0;`. The first is unquoted, second is quoted. Expected: only first is renamed (to 'b') and second stays 'a'. In `processPrototypeParent` case GETPROP, the second will be processed as a declaration. It should not. So that test would fail.
+
+Also test `testSamePropertyNameQuotedAndUnquoted` uses `Bar.prototype.prop = function(){}; y = {'prop': 0};`. The `prop` is unquoted and should rename, but `{'prop': 0}` is not a prototype, so it's handled separately. That seems fine.
+
+But there is also the `visit` method's handling of getprop: it processes `n.isGetProp()` and adds uses for property names. It does not check quotedness for uses. However, for prototype property assignments, the getprop is the left side, not the right side. The `visit` method processes `n` as the node being visited. For `Bar.prototype.foo = function(){}`, the `n` visited would be each node. The getprop `Bar.prototype.foo` will be visited as a GETPROP node (n.isGetProp()). Then it checks if `propName.equals("prototype")`? No, it processes the parent. Actually the code:
+
+```
+if (n.isGetProp()) {
+  String propName = n.getFirstChild().getNext().getString();
+  if (propName.equals("prototype")) {
+    processPrototypeParent(t, parent);
+  } else if (compiler.getCodingConvention().isExported(propName)) {
+    addGlobalUseOfSymbol(propName, t.getModule(), PROPERTY);
+  } else {
+    addSymbolUse(propName, t.getModule(), PROPERTY);
+  }
+}
+```
+
+This does not check if the property is quoted. So even for `Bar.prototype['getA']`, the GETPROP node's property is 'getA', and it will add a use for 'getA' (since propName is not "prototype"). But that's a use, but we also should not add uses for quoted properties because they should not be renamed. But currently, uses are added for all properties, which means they will be considered in renaming, causing them to be renamed. That is another bug: quoted property uses should not be considered for renaming.
+
+But note: in the test `testQuotedPrototypeProperty`, the input is `Bar.prototype['getA'] = function(){}; bar['getA']();`. The first part is a declaration, the second is a use. The use is `bar['getA']()` which is a GETPROP with a quoted property. The `visit` method would add a use for 'getA', causing it to be renamed, but the test expects no renaming. So we need to fix both: declaration and use.
+
+Also in `processPrototypeParent` case ASSIGN (object literal), we need to skip quoted keys.
+
+So the bug is that properties accessed via bracket notation with quoted strings should not be renamed. The code does not distinguish between quoted and unquoted property accesses.
+
+Now we need to produce a minimal fix. The fix should:
+
+1. In `visit` method, when handling `n.isGetProp()`, check if the property is quoted; if so, don't add use.
+2. In `processPrototypeParent`:
+   - For GETPROP case, check if `dest.isQuotedString()` and skip if true.
+   - For ASSIGN case, iterate over keys and check `key.isQuotedString()` and skip.
+
+Also, perhaps in `visit`'s handling of object literals (the else if part), it already checks `!propNameNode.isQuotedString()`, so that's fine.
+
+Now which tests expose the bug? Any test that uses quoted property accesses or prototype assignments with quoted property names. From the list:
+
+- `testQuotedPrototypeProperty` uses `Bar.prototype['getA'] = function(){}; bar['getA']();` - should fail.
+- `testAvoidingConflictsBetweenQuotedAndUnquotedPropertyNames` uses `Bar.prototype['a'] = 0;` - should fail because `'a'` is quoted and should not be renamed, but currently might be.
+- `testAvoidingConflictsBetQuotedAndUnquotedPropertyNamesStable` similar.
+- `testIncorrectAttemptToAccessQuotedProperty` uses `Bar.prototype = {'B': 0, 'getFoo': function(){}}; bar.getFoo();` - the object literal keys are quoted ('B', 'getFoo'), they should not be renamed. The use `getFoo` is unquoted, should be renamed. Expected: "Bar.prototype = {'B': 0, 'getFoo': function(){}}; bar.a();" So the prototype object literal's quoted keys should not be renamed. This would expose the bug in `processPrototypeParent` case ASSIGN.
+- `testMixedQuotedAndUnquotedObjLitKeys1` uses `Bar = {getA: function(){}, 'getB': function(){}};` - not prototype, object literal handling checks quoted, so probably fine but might be already correct? Actually it's fine.
+- `testSetQuotedPropertyOfThis` uses `this['prop'] = 'bar';` - this is a quoted property assignment on `this`. In `visit`, it will process the getprop `this['prop']`? Actually `this['prop']` is a GETPROP with object `this` and property 'prop'. The `visit` method will add a use for `prop` (since it's not "prototype"), causing it to be renamed. But expected is no rename. So this test would also fail.
+- `testReadPropertyOfThis` uses `f(this.prop);` - this is unquoted, should rename. That is fine.
+- `testRenamePropertiesWithLeadingUnderscores` uses `Bar.prototype = {_getA: function(){}, _b: 0};` - both are unquoted, should rename. That works.
+- `testRenamePropertiesFunctionCall1` uses `foo[JSCompiler_renameProperty('myProp')]` - that's accessed via bracket with a variable? Actually `JSCompiler_renameProperty('myProp')` returns a string, so it's effectively quoted. But the handling of `JSCompiler_renameProperty` is special. Might be fine.
+- `testRemoveRenameFunctionStubs2` uses `foo[JSCompiler_renameProperty('myProp')]` similar.
+
+Thus, the test methods that expose the bug are those that involve quoted property access or quoted prototype property assignments. Let's list:
+
+- `testQuotedPrototypeProperty`: uses `Bar.prototype['getA']` and `bar['getA']()`.
+- `testAvoidingConflictsBetweenQuotedAndUnquotedPropertyNames`: uses `Bar.prototype['a'] = 0`.
+- `testAvoidingConflictsBetQuotedAndUnquotedPropertyNamesStable`: similar.
+- `testIncorrectAttemptToAccessQuotedProperty`: uses object literal with quoted keys on prototype assignment.
+- `testSetQuotedPropertyOfThis`: uses `this['prop'] = 'bar';`.
+- `testMixedQuotedAndUnquotedObjLitKeys1` and `2` are not prototype but object literal, quoted keys handled, so they might be fine but could be affected if `visit` adds use for quoted object literal properties? Actually in `visit`, the object literal handler checks `!propNameNode.isQuotedString()`, so that's fine.
+- `testGeneratePseudoNames` uses `foo['abc']=2` and expects no rename for quoted. So that test also exposes bug in `visit` because it would add a use for 'abc' and rename it, but expected is no rename. Actually the test expects `foo['abc']` to stay as `'abc'` (since quoted). So `testGeneratePseudoNames` would also fail if `visit` adds use.
+- `testReadPropertyOfThis` uses `f(this.prop);` unquoted, fine.
+- `testPropertyAddedToObject` uses `foo.prop = '';` unquoted.
+- `testPropertyAddedToFunction` uses `foo.prop = '';`
+- `testPropertyOfObjectOfUnknownType` uses `foo.prop = '';`
+- `testSetPropertyOfThis` uses `this.prop = 'bar'` unquoted.
+
+Also consider `testMixedQuotedAndUnquotedObjLitKeysStable` similar.
+
+Now we need to produce the minimal fix. We need to output the fixed code for all functions provided in the source. The source includes many functions from different classes, but the bug is likely only in `ProcessProperties` class? Actually the source given seems to be a concatenation of code from `ProcessProperties` (or `ProcessProperties` class), `RenameProperties`, `GlobalFunction`, `AssignmentProperty`, `LiteralProperty`, `NameContext`, `moveMethods`, etc. The relevant functions that need fixing are `visit` and `processPrototypeParent` (and possibly others like `addSymbolUse`? But `addSymbolUse` is called from `visit`, and it doesn't check quotedness. However, the fix should be in `visit` to not call `addSymbolUse` for quoted properties.
+
+Also note: in `processPrototypeParent`, for GETPROP case, it adds declarations. We need to skip if quoted.
+
+Thus, we need to output fixed versions of all the functions provided in the input source? The instruction says: "Provide the full corrected implementation of all input functions. fixed_code must include every function from the input, in the same order, regardless of whether it was modified by you." So we must output the entire code for each function as a string in JSON array. But the input source contains many methods from different classes, and it's not clear the exact class boundaries. Probably the source is from a single file containing multiple classes? But typically Java source files contain one public class. However, the input is labeled "buggy code" and includes many methods. Perhaps it's all methods of a single class? The first line: `private ProcessProperties() { symbolStack.push(new NameContext(globalNode)); }` suggests a constructor for ProcessProperties. Then there are many methods like `enterScope`, `exitScope`, `shouldTraverse`, `visit`, `addSymbolUse`, `isGlobalFunctionDeclaration`, `isPrototypePropertyAssign`, `processGlobalFunctionDeclaration`, `processPrototypeParent`, `traverseEdge`, `GlobalFunction`, `AssignmentProperty`, `LiteralProperty`, `NameContext`, `moveMethods`. This looks like the implementation of `ProcessProperties` (maybe inner class of `RenameProperties`). So we need to output all these methods with fixes.
+
+But careful: The test cases are in a different class `RenamePropertiesTest`, but the bug is in `ProcessProperties`. The source provided includes the methods that have the bug. We need to fix only those methods.
+
+We'll produce fixed code for:
+
+1. `ProcessProperties()` constructor (no change)
+2. `enterScope` (no change)
+3. `exitScope` (no change)
+4. `shouldTraverse` (no change)
+5. `visit` (fix - skip quoted properties)
+6. `addSymbolUse` (no change? Actually it doesn't need change if we guard at call sites)
+7. `isGlobalFunctionDeclaration` (no change)
+8. `isPrototypePropertyAssign` (no change? But it's used to identify prototype assignments, it might be fine)
+9. `processGlobalFunctionDeclaration` (no change)
+10. `processPrototypeParent` (fix - skip quoted keys)
+11. `traverseEdge` (no change)
+12. `GlobalFunction` constructor (no change)
+13. `remove` in GlobalFunction (no change)
+14. `getFunctionNode` (no change)
+15. `AssignmentProperty` constructor (no change)
+16. `remove` in AssignmentProperty (no change)
+17. `getModule` (no change)
+18. `LiteralProperty` constructor (no change)
+19. `remove` in LiteralProperty (no change)
+20. `NameContext` constructor (no change)
+21. `moveMethods` (no change)
+
+Additionally, we need to include any other methods? The input also includes `processPrototypeParent` which is fine, but we need to fix it.
+
+Let's write the fixed code.
+
+We'll assume the fixed code is the same as buggy but with additions.
+
+For `visit`:
+
+```
+if (n.isGetProp()) {
+  String propName = n.getFirstChild().getNext().getString();
+  // If the property is quoted, it should not be renamed.
+  if (n.getFirstChild().getNext().isQuotedString()) {
+    // If it's quoted, we still need to process prototype?
+    // Actually, if it's a prototype assignment like Bar.prototype['a'] = ...,
+    // we need to process it but not rename the property.
+    // However, the current code will process it as a use.
+    // We should not add use or process prototype if quoted.
+    // But we still need to handle prototype assignments to detect declarations?
+    // In the prototype case, the parent is an ASSIGN, so we go to processPrototypeParent.
+    // Actually, the above block for "prototype" checks propName.equals("prototype").
+    // If propName is "prototype", it calls processPrototypeParent regardless of quoted.
+    // That is needed because Foo.prototype = ... and Foo['prototype'] = ... 
+    // are both prototype assignments? The latter is not typical.
+    // But to be safe, we can still allow processPrototypeParent for prototype.
+    if (propName.equals("prototype")) {
+      processPrototypeParent(t, parent);
+    }
+    // Otherwise, do nothing for quoted properties.
+  } else {
+    if (propName.equals("prototype")) {
+      processPrototypeParent(t, parent);
+    } else if (compiler.getCodingConvention().isExported(propName)) {
+      addGlobalUseOfSymbol(propName, t.getModule(), PROPERTY);
+    } else {
+      addSymbolUse(propName, t.getModule(), PROPERTY);
+    }
+  }
+}
+```
+
+But note: for `Bar.prototype['a'] = 0`, the getprop's parent is the assign, and the getprop's property is 'a' (not "prototype"). So it will fall into the else branch (not "prototype") and we add a use. But we should not add a use because the property 'a' is quoted. So our code will skip adding use for quoted properties, which is correct. However, we also need to ensure that the declaration (which is handled by `processPrototypeParent` when we encounter the prototype getprop) is not added for quoted prototype. Actually the declaration is for 'a'? Wait, for `Bar.prototype['a'] = 0`, the GETPROP for `Bar.prototype['a']` is the left-hand side of assign. When we visit the node `Bar.prototype['a']`, it is itself a GETPROP with property 'a'. It will not be caught by the "prototype" block because propName is "a". So it will go to else and add use. But the declaration of property 'a' is actually not processed anywhere? Actually, the framework recognizes prototype property assignments via `isPrototypePropertyAssign` in `shouldTraverse` and pushes a name context for the property. Then in `visit`, after processing, it pops. That code path does not go through `processPrototypeParent`. Wait, from `shouldTraverse`:
+
+```
+if (isPrototypePropertyAssign(n)) {
+  symbolStack.push(new NameContext(getNameInfoForName(
+    n.getFirstChild().getLastChild().getString(), PROPERTY)));
+}
+```
+
+This pushes a NameContext for the property name. Then in `visit`, the getprop `Bar.prototype['a']` will be processed, but the else branch will add a use for 'a'. Then the property 'a' will be considered used, and renaming will occur. So we need to avoid adding use for quoted properties. That is our fix.
+
+Additionally, `isPrototypePropertyAssign` should also check for quoted? Actually it does not check; it just gets the property name from the last child of the first child? Wait, it does: `n.getFirstChild().getLastChild().getString()`. For `Bar.prototype['a']`, the first child is `Bar.prototype` (getprop), and its last child is 'a'? Actually `Bar.prototype['a']` is a GETPROP with children: object = `Bar.prototype` (GETPROP) and property = 'a' (STRING). So `n.getFirstChild().getLastChild()` returns 'a'. That's fine. But it doesn't check quoted. However, `isPrototypePropertyAssign` also checks that `n.getFirstChild().getFirstChild().isGetProp()` (chained property) and then checks `child.isString() && child.getString().equals("prototype")`. That ensures the chain is through 'prototype'. It doesn't check quotedness of the final property. So it will treat `Bar.prototype['a'] = 0` as a prototype property assign and push a name context for 'a'. Then in `visit`, it will add uses for 'a'. To prevent renaming, we should also check if the property is quoted in `isPrototypePropertyAssign` or in the code that adds uses. It's more consistent to check in the top-level code.
+
+But the simplest minimal fix is to modify the `visit` method to not add uses for quoted properties. Also modify `processPrototypeParent` to not add declarations for quoted properties. Also modify `isPrototypePropertyAssign`? Actually, if we don't add uses, the property will still have a declaration but no uses, so it might be removed? But the test expects it to remain unchanged. In the renaming process, if a property has declaration but no use, it might still be renamed because renaming uses the original name? I need to understand the renaming logic: renaming assigns new names to properties based on a map of property names. If a property is not used, it might still be renamed if it's in the set of properties to rename? The renaming pass iterates over all property names and renames them to a new name. If we exclude quoted properties from the renaming set, they will not be renamed. The standard approach is to treat quoted property accesses as not renamed. So we need to prevent their names from being added to the set of properties that will be renamed.
+
+In the code flow, `RenameProperties` collects all property names via `ProcessProperties`'s `getNameInfoForName` which creates NameInfo for each property name. If we don't add any symbol use or declaration for quoted properties, they won't appear in `allNameInfo` and thus won't be renamed. So the fix should be to not create NameInfo for quoted properties. However, currently, `addSymbolUse` and `addGlobalUseOfSymbol` call `getNameInfoForName` which creates the NameInfo if not exists. So if we avoid calling them for quoted properties, the property name won't be registered. That is good.
+
+But also the declaration handling: `processPrototypeParent` adds declarations via `getNameInfoForName(name, PROPERTY).getDeclarations().add(prop)`. If we skip for quoted, the property won't have a declaration, so it won't be in the set.
+
+Additionally, the `shouldTraverse` method pushes a NameContext for prototype property assigns. It uses `getNameInfoForName` to get the NameInfo. If we want to avoid creating NameInfo for quoted, we should skip pushing. So we need to modify `shouldTraverse` to check if the property is quoted. Or we can modify `isPrototypePropertyAssign` to return false when the property is quoted. But note: `isPrototypePropertyAssign` is used both in `shouldTraverse` and in `visit` to decide to pop. If we change it to return false for quoted, then the pop logic in `visit` will not happen, and the stack might get misaligned. So it's better to check inside `shouldTraverse` and also in the pop branch.
+
+Actually, looking at `visit`:
+
+```
+// Process prototype assignments to non-functions.
+if (isPrototypePropertyAssign(n) ||
+    isGlobalFunctionDeclaration(t, n) ||
+    n.isFunction()) {
+  symbolStack.pop();
+}
+```
+
+If we change `isPrototypePropertyAssign` to return false for quoted, then the pop won't occur for quoted prototype assigns, causing stack imbalance. So we should not change `isPrototypePropertyAssign` but add a condition in the push and pop.
+
+Better approach: In `shouldTraverse`, push only if the property is not quoted. And in `visit`, pop only if we pushed. But the pop condition is the same expression. So we need to align.
+
+Simpler: modify `isPrototypePropertyAssign` to also check that the property is not quoted. The method currently:
+
+```
+if (isChainedProperty) {
+  Node child = n.getFirstChild().getFirstChild().getNext();
+  if (child.isString() && child.getString().equals("prototype")) {
+    return true;
+  }
+}
+```
+
+We can add a check that the final property (the last child of the outermost getprop) is not quoted. For `Bar.prototype.foo`, the final property is 'foo' (unquoted). For `Bar.prototype['foo']`, the final property is 'foo' (quoted). So we should return false if that property is quoted.
+
+But we need to get to the final property. In `isPrototypePropertyAssign`, `n` is the assign node. The whole left side is `n.getFirstChild()`. That is a GETPROP representing the property access (e.g., `Bar.prototype.foo`). Its last child is the property name. So we can check `n.getFirstChild().getLastChild().isQuotedString()`. If true, return false.
+
+Similarly, in the object literal case, the check is not in `isPrototypePropertyAssign` but in `shouldTraverse`? Actually, `shouldTraverse` only pushes for the chained property assign case, not for object literal prototype assignments. The object literal case `Bar.prototype = { ... }` is handled differently: in `processPrototypeParent` case ASSIGN, and in `shouldTraverse` there is no push for that? Actually `shouldTraverse` only pushes for the chained property assign (where n is the assign), not for object literal. So for object literal prototype assignments, the object literal is visited; then in `shouldTraverse`, `isPrototypePropertyAssign(n)` is false (since n is the object literal, not assign). So no push. Then the object literal's properties are handled in `processPrototypeParent` which adds declarations. So we need to fix `processPrototypeParent` to skip quoted keys.
+
+Thus, minimal fix:
+
+1. In `isPrototypePropertyAssign`, add check `!n.getFirstChild().getLastChild().isQuotedString()` before returning true. (Also for chained property, we already have a child check; we can add the quoted check before the return true.
+
+2. In `processPrototypeParent`:
+   - For GETPROP case: add `!dest.isQuotedString()` to the condition.
+   - For ASSIGN case: check `!key.isQuotedString()` before adding declaration.
+
+3. In `visit` method's handling of getprop: add quoted check to avoid adding uses (and also avoid processing prototype when quoted? Actually the prototype processing should also be skipped for quoted? For `Bar['prototype'] = ...`, it's not a typical prototype assignment; we can still skip using quoted check for the property name. But we already fixed `isPrototypePropertyAssign` to skip if final property quoted, but `processPrototypeParent` is called only when propName equals "prototype". In the visit, when we see a getprop with property "prototype", we call `processPrototypeParent`. For `Bar['prototype'] = ...`, the property is 'prototype' but it's quoted? Actually it's a string 'prototype', but it's accessed via bracket, so it's quoted. Should we treat that as prototype assignment? Typically, no; prototype property should be accessed via dot notation. So we should also skip if quoted. So in the condition `if (propName.equals("prototype"))`, we should also check that the property is not quoted. So `if (propName.equals("prototype") && !n.getFirstChild().getNext().isQuotedString())`.
+
+Let's incorporate all.
+
+Now, we need to output the fixed code as a single string for each method? The output format expects a JSON array of strings, each string containing the full function code. Since we have many methods, we need to produce the entire class as a single string? Probably each method separately. But the instruction says "full fixed_function1 as a JSON string". It's ambiguous. However, looking at the input format, the source is provided as a single block. So we should output the entire source file with fixes as one JSON string? But the example shows multiple fixed functions? Actually the format expects fixed_code to be an array of strings, each being the full corrected implementation of each function from the input. But the input has many functions. We are to output each function separately? That would be cumbersome. More likely, they expect the fixed versions of the functions that are buggy, but the instruction says: "fixed_code must include every function from the input, in the same order, regardless of whether it was modified by you." That suggests we should output all functions exactly as they appear in the input, but with fixes applied where needed. However, the input is a concatenation of methods without class headers? It seems like a single file containing multiple methods of the same class. So we can output the entire file content as a single string in the array? But the array says "fixed_function1", "fixed_function2"... Maybe they want each method as a separate element. But the input is one block of code. To simplify, I'll output the entire fixed source as a single string in the array. That is most practical.
+
+Thus, I will produce a fixed version of the entire source code.
+
+Now, determine which testcase methods actually expose the bug. From the list, we need to include those that would fail on the buggy version and pass on the fixed version. Based on our analysis, the following tests involve quoted property accesses/prototype assignments:
+
+- `testQuotedPrototypeProperty`
+- `testAvoidingConflictsBetweenQuotedAndUnquotedPropertyNames`
+- `testAvoidingConflictsBetQuotedAndUnquotedPropertyNamesStable`
+- `testIncorrectAttemptToAccessQuotedProperty`
+- `testSetQuotedPropertyOfThis`
+- `testGeneratePseudoNames` (because `foo['abc']=2` uses quoted property)
+- `testMixedQuotedAndUnquotedObjLitKeys1`? No, that's not prototype; the object literal is handled correctly because it checks isQuotedString.
+- `testMixedQuotedAndUnquotedObjLitKeys2` same.
+- `testSetQuotedPropertyOfThis` we already have.
+- `testReadPropertyOfThis` is unquoted, fine.
+- `testPropertyAddedToObject`, `testPropertyAddedToFunction`, `testPropertyOfObjectOfUnknownType`, `testSetPropertyOfThis`, `testReadPropertyOfThis` are unquoted.
+- `testRenamePropertiesWithLeadingUnderscores` unquoted.
+- `testRenamePropertiesFunctionCall1` and `2` use `JSCompiler_renameProperty` which is special; they might be fine because the property name is passed as string argument, but the use is `foo[JSCompiler_renameProperty('myProp')]` which results in a computed property access, which is not a literal quoted string. In the AST, the property is not a STRING node; it's a CALL node. So it's not a quoted literal. Therefore, the bug does not affect those tests.
+- `testRenamePropertiesFunctionCallStable` similar.
+- `testModules` uses unquoted.
+- `testPropertyAffinity`, `testPropertyAffinityOff` use unquoted.
+- `testPrototypePropertiesStable`, `testPrototypePropertiesAsObjLitKeysStable`, etc. involve unquoted.
+- `testOverlappingOriginalAndGeneratedNames` unquoted.
+- `testRenamePropertiesWithLeadingUnderscoresStable` unquoted.
+- `testPropertyAddedToObjectStable` unquoted.
+- `testStableWithTrickyExternsChanges` uses unquoted.
+
+Also `testMixedQuotedAndUnquotedObjLitKeysStable` has quoted keys in object literal (not prototype), so it should be fine.
+
+But what about `testSamePropertyNameQuotedAndUnquoted`? It has `Bar.prototype.prop = function(){}; y = {'prop': 0};`. The first is unquoted, second is object literal with quoted? Actually `{'prop': 0}` - the key is 'prop', which is a string literal but in object literal, it's considered quoted? In JavaScript, `{'prop': 0}` and `{prop: 0}` are different? Actually, `{'prop': 0}` is quoted, but in AST, the key node might have isQuotedString true. In the test, the expected output is `Bar.prototype.a = function(){}; y = {'prop': 0};`, so the object literal's 'prop' is not renamed, which is correct. But does the bug cause it to be renamed? In `visit`, when handling object literals, it checks `propNameNode.isQuotedString()`, so it will skip 'prop' because it's quoted. So no bug for that test. So it won't fail.
+
+Thus, the triggering tests are those that use bracket property access with literal string or prototype assignment with literal bracket property. Let's list them:
+
+1. `testQuotedPrototypeProperty`
+2. `testAvoidingConflictsBetweenQuotedAndUnquotedPropertyNames`
+3. `testAvoidingConflictsBetQuotedAndUnquotedPropertyNamesStable`
+4. `testIncorrectAttemptToAccessQuotedProperty`
+5. `testSetQuotedPropertyOfThis`
+6. `testGeneratePseudoNames` (uses `foo['abc']=2`)
+
+Also, what about `testMixedQuotedAndUnquotedObjLitKeys1` and `2`? They have `Bar = {getA: function(){}, 'getB': function(){}}; bar.getA();` - the object literal is not prototype, so the `visit` handles it correctly. However, the `bar.getA()` is unquoted, so that's fine. The `'getB'` is in object literal, but the object literal handling in `visit` correctly skips quoted. So those tests should pass even in buggy version because the object literal is not on prototype. But wait, `shouldTraverse` does not push anything for object literal, so that's fine. So they are not exposed.
+
+Also `testSetQuotedPropertyOfThis` we already have.
+
+Now, let's also consider `testSamePropertyNameQuotedAndUnquoted`: it has `Bar.prototype.prop = function(){}; y = {'prop': 0};`. The prototype assignment is unquoted, so it will be renamed. The object literal 'prop' is quoted, so it should not be renamed. But does the bug cause the object literal 'prop' to be renamed? In the object literal handling in `visit`, it checks `isQuotedString()` and skips, so it's fine. So no bug.
+
+Thus, we have identified 6 tests that expose the bug.
+
+Now, we need to produce the fixed code. I will produce the entire source with the described modifications.
+
+Let's write the fixed methods.
+
+First, fix `isPrototypePropertyAssign`:
+
+```
+private boolean isPrototypePropertyAssign(Node assign) {
+  Node n = assign.getFirstChild();
+  if (n != null && NodeUtil.isVarOrSimpleAssignLhs(n, assign)
+      && n.isGetProp()
+      && assign.getParent().isExprResult()) {
+    // Check that the final property is not quoted.
+    Node propNode = n.getLastChild();
+    if (propNode.isQuotedString()) {
+      return false;
+    }
+    boolean isChainedProperty = n.getFirstChild().isGetProp();
+    if (isChainedProperty) {
+      Node child = n.getFirstChild().getFirstChild().getNext();
+      if (child.isString() && child.getString().equals("prototype")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+```
+
+But note: we added a check that the final property is not quoted. This ensures we don't treat `Bar.prototype['a']` as a prototype property assign.
+
+Second, fix `processPrototypeParent`:
+
+```
+private void processPrototypeParent(NodeTraversal t, Node n) {
+  switch (n.getType()) {
+    case Token.GETPROP:
+      Node dest = n.getFirstChild().getNext();
+      Node parent = n.getParent();
+      Node grandParent = parent.getParent();
+      // Only process if the property name is not quoted.
+      if (dest.isString() && !dest.isQuotedString() &&
+          NodeUtil.isExprAssign(grandParent) &&
+          NodeUtil.isVarOrSimpleAssignLhs(n, parent)) {
+        String name = dest.getString();
+        Property prop = new AssignmentProperty(grandParent, t.getModule());
+        getNameInfoForName(name, PROPERTY).getDeclarations().add(prop);
+      }
+      break;
+    case Token.ASSIGN:
+      Node map = n.getFirstChild().getNext();
+      if (map.isObjectLit()) {
+        for (Node key = map.getFirstChild();
+             key != null; key = key.getNext()) {
+          // Only process unquoted keys.
+          if (!key.isQuotedString()) {
+            String name = key.getString();
+            Property prop = new LiteralProperty(
+                key, key.getFirstChild(), map, n,
+                t.getModule());
+            getNameInfoForName(name, PROPERTY).getDeclarations().add(prop);
+          }
+        }
+      }
+      break;
+  }
+}
+```
+
+Third, fix `visit` method's handling of GETPROP:
+
+```
+if (n.isGetProp()) {
+  String propName = n.getFirstChild().getNext().getString();
+  Node propNode = n.getFirstChild().getNext();
+  if (propNode.isQuotedString()) {
+    // For quoted properties, only handle "prototype" assignment
+    // if it's not quoted? Actually, we should not treat quoted 'prototype' as prototype assignment.
+    // But for safety, we can skip entirely.
+    // However, we still need to process prototype if it's the construct 'Bar.prototype' but accessed via dot only.
+    // Since it's quoted, it's likely bracket access, not prototype pattern.
+    // So skip.
+  } else {
+    if (propName.equals("prototype")) {
+      processPrototypeParent(t, parent);
+    } else if (compiler.getCodingConvention().isExported(propName)) {
+      addGlobalUseOfSymbol(propName, t.getModule(), PROPERTY);
+    } else {
+      addSymbolUse(propName, t.getModule(), PROPERTY);
+    }
+  }
+}
+```
+
+But note: we need to keep the prototype processing for unquoted "prototype". Already done.
+
+Also, in the same `visit`, there is a block for object literals: already checks `isQuotedString()`, so fine.
+
+Now we also need to ensure that `isPrototypePropertyAssign` is used correctly in `visit` for pop. Since we modified it to return false for quoted, the pop will occur only for unquoted prototype assigns, which is consistent with push.
+
+One more thing: In `shouldTraverse`, there is a check `isPrototypePropertyAssign(n)`. With our modified `isPrototypePropertyAssign`, it will not push for quoted prototype property assigns, which is correct. So we don't need to change `shouldTraverse`.
+
+Now, we must output all the functions. Since the input includes many functions, we need to output the entire fixed source. I'll produce a single string containing the fixed code for all the methods that were in the buggy code, in the same order. I'll assume the order as given.
+
+Let's construct the fixed source.
+
+Note: I'll include all methods exactly as in the buggy code except the modifications.
+
+I'll now produce the output JSON.{
+  "trigger_method": [
+    "com.google.javascript.jscomp.RenamePropertiesTest::testQuotedPrototypeProperty",
+    "com.google.javascript.jscomp.RenamePropertiesTest::testAvoidingConflictsBetweenQuotedAndUnquotedPropertyNames",
+    "com.google.javascript.jscomp.RenamePropertiesTest::testAvoidingConflictsBetQuotedAndUnquotedPropertyNamesStable",
+    "com.google.javascript.jscomp.RenamePropertiesTest::testIncorrectAttemptToAccessQuotedProperty",
+    "com.google.javascript.jscomp.RenamePropertiesTest::testSetQuotedPropertyOfThis",
+    "com.google.javascript.jscomp.RenamePropertiesTest::testGeneratePseudoNames"
+  ],
+  "fixed_code": [
+    "    private ProcessProperties() {\n      symbolStack.push(new NameContext(globalNode));\n    }\n\n    public void enterScope(NodeTraversal t) {\n      symbolStack.peek().scope = t.getScope();\n    }\n\n    public void exitScope(NodeTraversal t) {\n    }\n\n    public boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {\n      // Process prototype assignments to non-functions.\n      if (isPrototypePropertyAssign(n)) {\n        symbolStack.push(new NameContext(getNameInfoForName(\n                n.getFirstChild().getLastChild().getString(), PROPERTY)));\n      } else if (isGlobalFunctionDeclaration(t, n)) {\n        String name = parent.isName() ?\n            parent.getString() /* VAR */ :\n            n.getFirstChild().getString() /* named function */;\n        symbolStack.push(new NameContext(getNameInfoForName(name, VAR)));\n      } else if (n.isFunction()) {\n        symbolStack.push(new NameContext(anonymousNode));\n      }\n      return true;\n    }\n\n    public void visit(NodeTraversal t, Node n, Node parent) {\n      if (n.isGetProp()) {\n        String propName = n.getFirstChild().getNext().getString();\n        Node propNode = n.getFirstChild().getNext();\n        if (!propNode.isQuotedString()) {\n          if (propName.equals(\"prototype\")) {\n            processPrototypeParent(t, parent);\n          } else if (compiler.getCodingConvention().isExported(propName)) {\n            addGlobalUseOfSymbol(propName, t.getModule(), PROPERTY);\n          } else {\n            addSymbolUse(propName, t.getModule(), PROPERTY);\n          }\n        }\n      } else if (n.isObjectLit() &&\n        // Make sure that we're not handling object literals being\n        // assigned to a prototype, as in:\n        // Foo.prototype = {bar: 3, baz: 5};\n          !(parent.isAssign() &&\n            parent.getFirstChild().isGetProp() &&\n            parent.getFirstChild().getLastChild().getString().equals(\n                \"prototype\"))) {\n\n        // var x = {a: 1, b: 2}\n        // should count as a use of property a and b.\n        for (Node propNameNode = n.getFirstChild(); propNameNode != null;\n             propNameNode = propNameNode.getNext()) {\n          // May be STRING, GET, or SET, but NUMBER isn't interesting.\n          if (!propNameNode.isQuotedString()) {\n            addSymbolUse(propNameNode.getString(), t.getModule(), PROPERTY);\n          }\n        }\n      } else if (n.isName()) {\n        String name = n.getString();\n\n        Var var = t.getScope().getVar(name);\n        if (var != null) {\n          // Only process global functions.\n          if (var.isGlobal()) {\n            if (var.getInitialValue() != null &&\n                var.getInitialValue().isFunction()) {\n              if (t.inGlobalScope()) {\n                if (!processGlobalFunctionDeclaration(t, n, parent,\n                        parent.getParent())) {\n                  addGlobalUseOfSymbol(name, t.getModule(), VAR);\n                }\n              } else {\n                addSymbolUse(name, t.getModule(), VAR);\n              }\n            }\n\n          // If it is not a global, it might be accessing a local of the outer\n          // scope. If that's the case the functions between the variable's\n          // declaring scope and the variable reference scope cannot be moved.\n          } else if (var.getScope() != t.getScope()){\n            for (int i = symbolStack.size() - 1; i >= 0; i--) {\n              NameContext context = symbolStack.get(i);\n              if (context.scope == var.getScope()) {\n                break;\n              }\n\n              context.name.readClosureVariables = true;\n            }\n          }\n        }\n      }\n\n      // Process prototype assignments to non-functions.\n      if (isPrototypePropertyAssign(n) ||\n          isGlobalFunctionDeclaration(t, n) ||\n          n.isFunction()) {\n        symbolStack.pop();\n      }\n    }\n\n    private void addSymbolUse(String name, JSModule module, SymbolType type) {\n      NameInfo info = getNameInfoForName(name, type);\n      NameInfo def = null;\n      // Skip all anonymous nodes. We care only about symbols with names.\n      for (int i = symbolStack.size() - 1; i >= 0; i--) {\n        def = symbolStack.get(i).name;\n        if (def != anonymousNode) {\n          break;\n        }\n      }\n      if (!def.equals(info)) {\n        symbolGraph.connect(def, module, info);\n      }\n    }\n\n    private boolean isGlobalFunctionDeclaration(NodeTraversal t, Node n) {\n      // Make sure we're either in the global scope, or the function\n      // we're looking at is the root of the current local scope.\n\n      return t.inGlobalScope() &&\n          (NodeUtil.isFunctionDeclaration(n) ||\n           n.isFunction() &&\n           n.getParent().isName());\n    }\n\n    private boolean isPrototypePropertyAssign(Node assign) {\n      Node n = assign.getFirstChild();\n      if (n != null && NodeUtil.isVarOrSimpleAssignLhs(n, assign)\n          && n.isGetProp()\n          && assign.getParent().isExprResult()) {\n        // Check that the final property is not quoted.\n        Node propNode = n.getLastChild();\n        if (propNode.isQuotedString()) {\n          return false;\n        }\n        boolean isChainedProperty =\n            n.getFirstChild().isGetProp();\n\n        if (isChainedProperty) {\n          Node child = n.getFirstChild().getFirstChild().getNext();\n\n          if (child.isString() &&\n              child.getString().equals(\"prototype\")) {\n            return true;\n          }\n        }\n      }\n\n      return false;\n    }\n\n    private boolean processGlobalFunctionDeclaration(NodeTraversal t,\n        Node nameNode, Node parent, Node gramps) {\n      Node firstChild = nameNode.getFirstChild();\n\n      if (// Check for a named FUNCTION.\n          isGlobalFunctionDeclaration(t, parent) ||\n          // Check for a VAR declaration.\n          firstChild != null &&\n          isGlobalFunctionDeclaration(t, firstChild)) {\n        String name = nameNode.getString();\n        getNameInfoForName(name, VAR).getDeclarations().add(\n            new GlobalFunction(nameNode, parent, gramps, t.getModule()));\n\n        // If the function name is exported, we should create an edge here\n        // so that it's never removed.\n        if (compiler.getCodingConvention().isExported(name) ||\n            anchorUnusedVars) {\n          addGlobalUseOfSymbol(name, t.getModule(), VAR);\n        }\n\n        return true;\n      }\n      return false;\n    }\n\n    private void processPrototypeParent(NodeTraversal t, Node n) {\n\n      switch (n.getType()) {\n        // Foo.prototype.getBar = function() { ... }\n        case Token.GETPROP:\n          Node dest = n.getFirstChild().getNext();\n          Node parent = n.getParent();\n          Node grandParent = parent.getParent();\n\n          if (dest.isString() &&\n              !dest.isQuotedString() &&\n              NodeUtil.isExprAssign(grandParent) &&\n              NodeUtil.isVarOrSimpleAssignLhs(n, parent)) {\n            String name = dest.getString();\n            Property prop = new AssignmentProperty(\n                grandParent,\n                t.getModule());\n            getNameInfoForName(name, PROPERTY).getDeclarations().add(prop);\n          }\n          break;\n\n        // Foo.prototype = { \"getBar\" : function() { ... } }\n        case Token.ASSIGN:\n          Node map = n.getFirstChild().getNext();\n          if (map.isObjectLit()) {\n            for (Node key = map.getFirstChild();\n                 key != null; key = key.getNext()) {\n              // May be STRING, GET, or SET,\n              if (!key.isQuotedString()) {\n                String name = key.getString();\n                Property prop = new LiteralProperty(\n                    key, key.getFirstChild(), map, n,\n                    t.getModule());\n                getNameInfoForName(name, PROPERTY).getDeclarations().add(prop);\n              }\n            }\n          }\n          break;\n      }\n    }\n\n    public boolean traverseEdge(NameInfo start, JSModule edge, NameInfo dest) {\n      if (start.isReferenced()) {\n        JSModule startModule = start.getDeepestCommonModuleRef();\n        if (startModule != null &&\n            moduleGraph.dependsOn(startModule, edge)) {\n          return dest.markReference(startModule);\n        } else {\n          return dest.markReference(edge);\n        }\n      }\n      return false;\n    }\n\n    GlobalFunction(Node nameNode, Node parent, Node gramps, JSModule module) {\n      Preconditions.checkState(\n          parent.isVar() ||\n          NodeUtil.isFunctionDeclaration(parent));\n      this.nameNode = nameNode;\n      this.module = module;\n    }\n\n    public void remove() {\n      Node parent = nameNode.getParent();\n      if (parent.isFunction() || parent.hasOneChild()) {\n        NodeUtil.removeChild(parent.getParent(), parent);\n      } else {\n        Preconditions.checkState(parent.isVar());\n        parent.removeChild(nameNode);\n      }\n    }\n\n    public Node getFunctionNode() {\n      Node parent = nameNode.getParent();\n\n      if (parent.isFunction()) {\n        return parent;\n      } else {\n        // we are the name of a var node, so the function is name's second child\n        return nameNode.getChildAtIndex(1);\n      }\n    }\n\n    AssignmentProperty(Node node, JSModule module) {\n      this.exprNode = node;\n      this.module = module;\n    }\n\n    public void remove() {\n      NodeUtil.removeChild(exprNode.getParent(), exprNode);\n    }\n\n    public JSModule getModule() {\n      return module;\n    }\n\n    LiteralProperty(Node key, Node value, Node map, Node assign,\n        JSModule module) {\n      this.key = key;\n      this.value = value;\n      this.map = map;\n      this.assign = assign;\n      this.module = module;\n    }\n\n    public void remove() {\n      map.removeChild(key);\n    }\n\n    NameContext(NameInfo name) {\n      this.name = name;\n    }\n\n  private void moveMethods(Collection<NameInfo> allNameInfo) {\n    boolean hasStubDeclaration = idGenerator.hasGeneratedAnyIds();\n    for (NameInfo nameInfo : allNameInfo) {\n      if (!nameInfo.isReferenced()) {\n        // The code below can't do anything with unreferenced name\n        // infos.  They should be skipped to avoid NPE since their\n        // deepestCommonModuleRef is null.\n        continue;\n      }\n\n      if (nameInfo.readsClosureVariables()) {\n        continue;\n      }\n\n      JSModule deepestCommonModuleRef = nameInfo.getDeepestCommonModuleRef();\n      if (deepestCommonModuleRef == null) {\n        compiler.report(JSError.make(NULL_COMMON_MODULE_ERROR));\n        continue;\n      }\n\n      Iterator<Symbol> declarations =\n          nameInfo.getDeclarations().descendingIterator();\n      while (declarations.hasNext()) {\n        Symbol symbol = declarations.next();\n        if (!(symbol instanceof Property)) {\n          continue;\n        }\n        Property prop = (Property) symbol;\n\n        // We should only move a property across modules if:\n        // 1) We can move it deeper in the module graph, and\n        // 2) it's a function, and\n        // 3) it is not a get or a set, and\n        // 4) the class is available in the global scope.\n        //\n        // #1 should be obvious. #2 is more subtle. It's possible\n        // to copy off of a prototype, as in the code:\n        // for (var k in Foo.prototype) {\n        //   doSomethingWith(Foo.prototype[k]);\n        // }\n        // This is a common way to implement pseudo-multiple inheritance in JS.\n        //\n        // So if we move a prototype method into a deeper module, we must\n        // replace it with a stub function so that it preserves its original\n        // behavior.\n\n        Node value = prop.getValue();\n        if (moduleGraph.dependsOn(deepestCommonModuleRef, prop.getModule()) &&\n            value.isFunction()) {\n          Node valueParent = value.getParent();\n          if (valueParent.isGetterDef()\n              || valueParent.isSetterDef()) {\n            // TODO(johnlenz): a GET or SET can't be deferred like a normal\n            // FUNCTION property definition as a mix-in would get the result\n            // of a GET instead of the function itself.\n            continue;\n          }\n          Node proto = prop.getPrototype();\n          int stubId = idGenerator.newId();\n\n          // example: JSCompiler_stubMethod(id);\n          Node stubCall = IR.call(\n              IR.name(STUB_METHOD_NAME),\n              IR.number(stubId))\n              .copyInformationFromForTree(value);\n          stubCall.putBooleanProp(Node.FREE_CALL, true);\n\n          // stub out the method in the original module\n          // A.prototype.b = JSCompiler_stubMethod(id);\n          valueParent.replaceChild(value, stubCall);\n\n          // unstub the function body in the deeper module\n          Node unstubParent = compiler.getNodeForCodeInsertion(\n              deepestCommonModuleRef);\n          Node unstubCall = IR.call(\n              IR.name(UNSTUB_METHOD_NAME),\n              IR.number(stubId),\n              value);\n          unstubCall.putBooleanProp(Node.FREE_CALL, true);\n          unstubParent.addChildToFront(\n              // A.prototype.b = JSCompiler_unstubMethod(id, body);\n              IR.exprResult(\n                  IR.assign(\n                      IR.getprop(\n                          proto.cloneTree(),\n                          IR.string(nameInfo.name)),\n                      unstubCall))\n                  .copyInformationFromForTree(value));\n\n          compiler.reportCodeChange();\n        }\n      }\n    }\n\n    if (!hasStubDeclaration && idGenerator.hasGeneratedAnyIds()) {\n      // Declare stub functions in the top-most module.\n      Node declarations = compiler.parseSyntheticCode(STUB_DECLARATIONS);\n      compiler.getNodeForCodeInsertion(null).addChildrenToFront(\n          declarations.removeChildren());\n    }\n  }\n"
+  ]
+}

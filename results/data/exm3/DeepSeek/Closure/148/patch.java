@@ -1,0 +1,59 @@
+  private Node tryFoldTypeof(Node originalTypeofNode) {
+    Preconditions.checkArgument(originalTypeofNode.getType() == Token.TYPEOF);
+
+    Node argumentNode = originalTypeofNode.getFirstChild();
+    if (argumentNode == null) {
+      return originalTypeofNode;
+    }
+    boolean isLiteral = NodeUtil.isLiteralValue(argumentNode);
+    if (!isLiteral) {
+      // Check if it's a VOID node with literal operand.
+      if (argumentNode.getType() != Token.VOID) {
+        return originalTypeofNode;
+      }
+      Node operand = argumentNode.getFirstChild();
+      if (operand == null || !NodeUtil.isLiteralValue(operand)) {
+        return originalTypeofNode;
+      }
+    }
+
+    String typeNameString = null;
+
+    switch (argumentNode.getType()) {
+      case Token.STRING:
+        typeNameString = "string";
+        break;
+      case Token.NUMBER:
+        typeNameString = "number";
+        break;
+      case Token.TRUE:
+      case Token.FALSE:
+        typeNameString = "boolean";
+        break;
+      case Token.NULL:
+      case Token.OBJECTLIT:
+      case Token.ARRAYLIT:
+        typeNameString = "object";
+        break;
+      case Token.NAME:
+        // We assume here that programs don't change the value of the
+        // keyword undefined to something other than the value undefined.
+        if ("undefined".equals(argumentNode.getString())) {
+          typeNameString = "undefined";
+        }
+        break;
+      case Token.VOID:
+        typeNameString = "undefined";
+        break;
+    }
+
+    if (typeNameString != null) {
+      Node newNode = Node.newString(typeNameString);
+      originalTypeofNode.getParent().replaceChild(originalTypeofNode, newNode);
+      reportCodeChange();
+
+      return newNode;
+    }
+
+    return originalTypeofNode;
+  }

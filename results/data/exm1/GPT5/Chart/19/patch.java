@@ -1,0 +1,13 @@
+public int getDomainAxisIndex(CategoryAxis axis) {
+        if (axis == null) {
+            throw new IllegalArgumentException("Null 'axis' argument.");
+        }
+        int result = this.domainAxes.indexOf(axis);
+        if (result < 0) {
+            Plot parent = getParent();
+            if (parent instanceof CategoryPlot) {
+                result = ((CategoryPlot) parent).getDomainAxisIndex(axis);
+            }
+        }
+        return result;
+    }

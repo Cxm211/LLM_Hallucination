@@ -1,0 +1,363 @@
+We are given a JSON mapping problem. The bug is in a single function `deserialize` from Jackson databind. Let's analyze the code:
+
+The buggy code:
+
+```java
+public T deserialize(JsonParser p, DeserializationContext ctxt) throws IOException
+{
+    // 22-Sep-2012, tatu: For 2.1, use this new method, may force coercion:
+    String text = p.getValueAsString();
+    if (text != null) { // has String representation
+        if (text.length() == 0 || (text = text.trim()).length() == 0) {
+            // 04-Feb-2013, tatu: Usually should become null; but not always
+            return _deserializeFromEmptyString();
+        }
+        Exception cause = null;
+        try {
+            // 19-May-2017, tatu: Used to require non-null result (assuming `null`
+            //    indicated error; but that seems wrong. Should be able to return
+            //    `null` as value.
+            if (_deserialize(text, ctxt) != null) {
+                return _deserialize(text, ctxt);
+            }
+        } catch (IllegalArgumentException iae) {
+            cause = iae;
+        } catch (MalformedURLException me) {
+            cause = me;
+        }
+        String msg = "not a valid textual representation";
+        if (cause != null) {
+            String m2 = cause.getMessage();
+            if (m2 != null) {
+                msg = msg + ", problem: "+m2;
+            }
+        }
+        // 05-May-2016, tatu: Unlike most usage, this seems legit, so...
+        JsonMappingException e = ctxt.weirdStringException(text, _valueClass, msg);
+        if (cause != null) {
+            e.initCause(cause);
+        }
+        throw e;
+        // nothing to do here, yet? We'll fail anyway
+    }
+    JsonToken t = p.getCurrentToken();
+    // [databind#381]
+    if (t == JsonToken.START_ARRAY) {
+        return _deserializeFromArray(p, ctxt);
+    }
+    if (t == JsonToken.VALUE_EMBEDDED_OBJECT) {
+        // Trivial cases; null to null, instance of type itself returned as is
+        Object ob = p.getEmbeddedObject();
+        if (ob == null) {
+            return null;
+        }
+        if (_valueClass.isAssignableFrom(ob.getClass())) {
+            return (T) ob;
+        }
+        return _deserializeEmbedded(ob, ctxt);
+    }
+    return (T) ctxt.handleUnexpectedToken(_valueClass, p);
+}
+```
+
+The bug: The code calls `_deserialize(text, ctxt)` twice if the first call returns non-null. The first call is inside the condition `if (_deserialize(text, ctxt) != null)`, and then again `return _deserialize(text, ctxt);`. This means `_deserialize` is called twice, which can cause side effects or performance issues. But more importantly, if the first call returns non-null, the second call might return a different value or throw an exception. In many cases, `_deserialize` might be idempotent, but this is clearly a bug: it should store the result in a variable and return it.
+
+The fix: Store the result of `_deserialize(text, ctxt)` in a local variable, check if non-null, and return that variable. Also, it's better to call only once.
+
+So the fixed code should be:
+
+```java
+Exception cause = null;
+try {
+    T result = _deserialize(text, ctxt);
+    if (result != null) {
+        return result;
+    }
+} catch ...
+```
+
+Now we need to determine which testcases trigger this bug. The bug is in the `deserialize` method, is likely generic and used for many deserializations. However, the bug only manifests when `_deserialize(text, ctxt)` returns non-null and is called twice, potentially producing different results or side effects. In many cases, it might not cause a test failure because the second call might return the same value or the test might not check for exact call count. However, we must identify tests that actually fail due to this bug. The bug might cause issues like incorrect deserialization (if the second call returns a different value) or stack overflow? The bug is that the first call's result is discarded and the second call's result is returned, but the second call might throw an exception if the parsing state is not reset. Actually, the bug is that the two calls might be different because the parsing state has advanced? No, `_deserialize` probably operates on the text string, not the parser, so it might be harmless? Let's think: The method attempts to deserialize from a string representation. `_deserialize(text, ctxt)` probably does something like `_deserializeFromString(text, ctxt)` which might involve creating a new parser from the string? Possibly it uses `p` again? Actually, `_deserialize` is likely a method that takes a String and a context and returns the deserialized value. It shouldn't consume the parser. So calling it twice with the same string should produce the same result if it's deterministic. However, there might be side effects in the context (like gathering properties) or the `_deserialize` might modify something.
+
+Given the complexity, the most reliable approach is to look at the test suite provided. The bug is known (it's issue 83_2, likely a known bug in Jackson). The fix is to store the result and return it. Many tests might pass even with this bug, but we need to identify those that actually fail. The test methods listed are many. We need to see if any of them would fail due to double call.
+
+Let's analyze the potential impact: The bug calls `_deserialize` twice. If `_deserialize` has side effects (like accumulating properties in a context), the second call might see a modified context and return a different result, or throw an exception. However, for most standard deserializations, `_deserialize` is likely a simple conversion and is idempotent. So the bug might only affect certain scenarios.
+
+Given that the bug report is about a specific issue (probably 83_2), we can look for tests that involve deserializing strings that would hit this code path. The code path is for textual representation: when `p.getValueAsString()` returns a non-null string (not empty after trim). Then it tries `_deserialize`. The bug is that if `_deserialize` returns non-null, it calls again and returns the second result. If `_deserialize` is idempotent, no failure. But if `_deserialize` is not idempotent, it could cause problems.
+
+Common cases where `_deserialize` might not be idempotent: When it modifies state in `ctxt` (like accumulating unknown properties?) But generally, `_deserialize` for standard types like numbers, strings, etc. is idempotent. For complex types, `_deserialize` might be a delegating deserializer that could have side effects.
+
+Given the many tests, it's likely that only a few tests actually expose this bug. Without running the tests, we need to reason. Since the bug is about double invocation, tests that verify exact behavior (like checking for exception messages or side effects) might catch it. But most tests just check the final deserialized value and if the second call returns the same value, they pass.
+
+Alternatively, maybe the fix is not just about double call but about the fact that `_deserialize` might return null intentionally (the comment says "Should be able to return null as value"). The original code did `if (_deserialize(text, ctxt) != null) { return _deserialize(text, ctxt); }` which means that if the first call returns non-null, it returns the second call result. If the first call returns null, it goes to the error path (which is wrong because null might be a valid value). The fix is to store the result and return it if not null, otherwise throw exception. So the bug is that if `_deserialize` returns a non-null value, the second call might be different (or the same) but the first call result is lost. Also, if `_deserialize` is supposed to return null to indicate an error, the original code misinterpreted it: it threw an exception. The fix by the comment says "Should be able to return null as value". So the bug is that if `_deserialize` returns null, it should be treated as a valid null value, not as an error. The original code would go to the error path (because the condition fails and it goes to the catch? Actually, if `_deserialize` returns null, the condition `_deserialize(text, ctxt) != null` is false, so it does not return and falls through to the error message. That is a bug: null is a valid representation for some types (like `@JsonNullable`). So the fix should be: `T result = _deserialize(text, ctxt); if (result != null) return result; ` but then what to do if null? The comment says "Should be able to return null as value", so we should return null, and not treat it as error. The original code after the try-catch block throws an exception. The fix might be to return null if `_deserialize` returns null, and not throw an exception. But the comment says "Used to require non-null result (assuming null indicated error; but that seems wrong. Should be able to return null as value." So the correct fix should be: store result, if not null return it, else return null (instead of throwing exception). However, the subsequent code that throws an exception should be removed or not executed if result is null. But we still have the case where an exception is caught from `_deserialize`, then it throws an exception. So the logic is:
+
+- If text is not null, and not empty after trim:
+  - try to deserialize.
+  - If deserialize returns non-null, return it (but due to bug it calls twice).
+  - If deserialize throws IllegalArgumentException or MalformedURLException, catch and store cause.
+  - After try-catch, prepare a message and throw a weirdStringException.
+ So if deserialize returns null, it goes to the error path (throwing exception). That is the bug: null return is treated as error.
+
+Thus, the minimal fix is:
+1. Store the result of `_deserialize`.
+2. If result is not null, return it.
+3. If result is null, return null (instead of throwing exception).
+But the existing code after the try-catch always throws an exception. So we need to modify the flow: if _deserialize returns null, we should return null (or perhaps handle it as a valid null). The comment suggests returning null. So we should add a branch: after the try-catch, if cause is still null (i.e., no exception), then we should return null (if _deserialize returned null). But currently, the code does not have that; it only throws exception. So we need to change it to: if _deserialize returns null, return null. If an exception is caught, then throw the exception.
+
+Therefore, the corrected code should be:
+
+```java
+Exception cause = null;
+T result = null;
+try {
+    result = _deserialize(text, ctxt);
+    if (result != null) {
+        return result;
+    }
+} catch (IllegalArgumentException iae) {
+    cause = iae;
+} catch (MalformedURLException me) {
+    cause = me;
+}
+if (result != null) { // not reached? Actually if no exception and result is null, we go here
+    // but we want to return null in that case
+    return result; // but we already have that above? Actually we moved the return above, so if result is null we fall through.
+}
+// If result is null and no exception, we should return null.
+if (cause == null) {
+    return null;
+}
+String msg = "not a valid textual representation";
+// ... throw exception.
+```
+
+But more elegantly:
+
+```java
+Exception cause = null;
+T result = null;
+try {
+    result = _deserialize(text, ctxt);
+    if (result != null) {
+        return result;
+    }
+} catch (IllegalArgumentException iae) {
+    cause = iae;
+} catch (MalformedURLException me) {
+    cause = me;
+}
+// if we got here, either result is null (and no exception) or cause is set
+if (result == null && cause == null) {
+    return null; // valid null value
+}
+// Otherwise, throw the exception
+String msg = "not a valid textual representation";
+if (cause != null) {
+    String m2 = cause.getMessage();
+    if (m2 != null) {
+        msg = msg + ", problem: "+m2;
+    }
+}
+JsonMappingException e = ctxt.weirdStringException(text, _valueClass, msg);
+if (cause != null) {
+    e.initCause(cause);
+}
+throw e;
+```
+
+But note the original code after try-catch always throws. So the change is to allow returning null if deserialize returns null.
+
+Given the testcases, which ones would test the behavior of null return from _deserialize? Possibly tests where the value is a String that can be deserialized to null. For example, UUID deserialization can return null? In `testWeirdStringHandling`, there is a handler that returns null for UUID: `mapper.addHandler(new WeirdStringHandler(null)); UUID result2 = mapper.readValue(quote("not a uuid!"), UUID.class); assertNull(result2);`. That test likely exercises the deserialization path. Actually, `WeirdStringHandler` is a DeserializationProblemHandler that handles unknown strings? It might be used to intercept the deserialization and return a replacement. But the bug in `deserialize` would cause that even if the handler returns a non-null value, it might be called twice? The test uses `WeirdStringHandler` for `SingleValuedEnum` and for `UUID`. For UUID, it uses a handler that returns null. In the buggy code, if `_deserialize` returns null, the code will go to the error path and throw an exception because it does not return null. So the test `testWeirdStringHandling` for UUID expects null, but with the bug it would throw an exception. Thus, that test would fail. Similarly, the test `testUnexpectedTokenHandling` might also be affected? That one uses a handler that returns Integer value 13. It might be affected if the double call causes an issue. But the core bug is the null return not being handled.
+
+Let's check the test method:
+- `testWeirdStringHandling` has two parts: first with SingleValuedEnum, second with UUID. The UUID part: `mapper = new ObjectMapper().addHandler(new WeirdStringHandler(null)); UUID result2 = mapper.readValue(quote("not a uuid!"), UUID.class); assertNull(result2);`. This code path: The parser sees a string "not a uuid!". `p.getValueAsString()` returns that string. Then it calls `_deserialize(text, ctxt)`. For UUID, the standard deserializer would try to parse and fail (throw IllegalArgumentException). But there is a handler that intercepts? Actually, `WeirdStringHandler` handles `handleWeirdStringValue`, maybe called from `ctxt.weirdStringException`. But in the flow, the buggy code catches IllegalArgumentException and MalformedURLException. The standard UUID deserializer may throw a different exception? It might throw a `JsonMappingException`? Actually, UUID deserializer might throw `IllegalArgumentException`. So it would be caught, cause set, and then a `weirdStringException` is thrown. However, before that, the code does not check for the handler. The handler is invoked via `ctxt.weirdStringException`. That method may call the handler which returns a replacement value instead of throwing an exception. In the buggy code, after constructing the `JsonMappingException`, it throws it. But if the handler is installed, `weirdStringException` might not throw but return a value? Actually, `weirdStringException` typically creates and throws an exception, but if a handler is present, it might handle it. The standard implementation: `ctxt.weirdStringException()` creates an exception and then potentially calls the problem handler, which can return a value to use instead of throwing. So the buggy code always throws, ignoring the handler. Therefore, the test with null handler would fail because it expects null but gets an exception.
+
+But the buggy code may also throw even when handler returns null. So that test might be affected.
+
+Let's examine the code flow for `testWeirdStringHandling` for UUID:
+- Input: string "not a uuid!"
+- The deserializer for UUID probably has a `_deserializeFromString` that calls `UUID.fromString()`, which throws `IllegalArgumentException`. So it's caught. Then the code constructs `weirdStringException`. Inside that method, the handler may be called. If the handler returns null, the exception is not thrown? Actually, the signature: `ctxt.weirdStringException(String value, Class<?> type, String msg)` returns `JsonMappingException`. It always creates an exception. The handler handling is done elsewhere. Wait, the handler's `handleWeirdStringValue` is called from `DeserializationContext`, but the `weirdStringException` method typically just creates an exception and throws it. However, the code in `deserialize` actually throws the exception. So the handler is never called because the exception is thrown directly. That suggests the handler mechanism works differently. Actually, the problem handlers are called in various places. In this code, they are not called. So the test `testWeirdStringHandling` might fail because the handler is not invoked. But the test is in the test suite, and it's supposed to pass after the fix? The bug fix (storing result and returning null) might not be enough to make that test pass because the handler mechanism is invoked elsewhere. Actually, looking at the test, it uses a custom handler that overrides `handleWeirdStringValue`. That handler is invoked by `ctxt.handleWeirdStringValue()`, not by `weirdStringException`. In the buggy `deserialize`, it calls `ctxt.weirdStringException(text, _valueClass, msg)`, which likely does not call the handler. So the handler is not invoked. But the test expects that the handler is invoked and returns a replacement value. That suggests that the correct deserialization path for a string that fails to parse should call `ctxt.handleWeirdStringValue()`, not throw directly. Indeed, in the fixed version, the code might call `handleWeirdStringValue` if _deserialize fails. The buggy code does not. So the test might fail.
+
+Given the complexity, we need to identify exactly which tests fail. The bug is known to be issue #83_2, but we don't have the fix description. We must rely on reasoning.
+
+A simpler approach: Many tests are for filtering, typing, etc., which may not hit this specific code path. The code path is hit when the JSON value is a string (or convertible to string) and the target type is not a simple string (since for String type, there is likely a different deserializer). It is used for deserializing from textual representation. It might be used for types like UUID, URL, Enum, etc. that have `@JsonCreator` taking a String, or for types that have a `_deserialize` method.
+
+Given the large number of tests, we can focus on those that deserialize from a string value. Many tests use `readValue` with JSON that has string values. For example, `testWeirdStringHandling`, `testUnexpectedTokenHandling`, `testWeirdNumberHandling`, etc. Also tests for Enum deserialization like `testEnumHandling`, `testSimpleEnumsInObjectArray`, etc. Any test that reads a string and expects a null result might be affected.
+
+But the bug report might specify the exact failing tests. Without that, we need to infer. The instruction says: "Determine which testcase methods actually expose the bug." So we need to list the full method paths that trigger the bug. 
+
+Given the time, let's assume that the bug is exactly the double call issue and the null return issue. Many tests may not be affected. However, the test `testWeirdStringHandling` for the UUID case expects null and would fail because the buggy code throws an exception (since _deserialize returns null? Actually, for UUID, _deserialize will throw an IllegalArgumentException, which is caught, and then it throws the weirdStringException. So the handler is not called, and the test would fail with an unexpected exception. So that test likely triggers the bug.
+
+Also, the test `testUnexpectedTokenHandling` for Integer: It reads "true" and expects Integer 13 via handler. The flow: `p.getValueAsString()` might return null? For boolean "true", `getValueAsString` might return "true"? Actually, for boolean tokens, `getValueAsString` returns "true". So text = "true". Then it calls `_deserialize(text, ctxt)`. The standard Integer deserializer would try to parse "true" and throw NumberFormatException (which is not caught; only IllegalArgumentException and MalformedURLException are caught). So it would not be caught, and the exception propagates up, not being handled. So that test might also fail because the handler is not invoked. But the test expects the handler to be invoked. So yes, that test likely fails.
+
+Similarly, `testWeirdNumberHandling` reads "3" but expects SingleValuedEnum via handler. "3" is a number token. `p.getValueAsString()` would return "3". Then _deserialize for enum would call the standard Enum deserializer which might succeed (if "3" is a valid enum name? Probably not). It might throw an exception that is caught, then throw weirdStringException. But the handler might be invoked from there? Not sure.
+
+Given the common pattern, tests that rely on problem handlers might be affected because the buggy code throws an exception without giving the handler a chance to respond.
+
+Let's check the test list for ProblemHandlerTest:
+- testWeirdKeyHandling
+- testWeirdNumberHandling
+- testWeirdStringHandling (this has two parts, one for SingleValuedEnum and one for UUID)
+- testInvalidTypeId
+- testInvalidClassAsId
+- testInvalidTypeIdFail
+- testInstantiationExceptionHandling
+- testMissingInstantiatorHandling
+- testUnexpectedTokenHandling
+
+Most of these use custom handlers to return a value on an error. In the buggy code, these handlers might not be called because the code throws an exception directly. So these tests would fail.
+
+Specifically:
+- testWeirdStringHandling: The for UUID part expects null, and for enum part expects A.
+- testWeirdNumberHandling: expects A.
+- testUnexpectedTokenHandling: expects Integer 13.
+
+All of these likely fail.
+
+Also, testInvalidTypeId and testInvalidClassAsId might also be affected as they involve type id handling, which might go through a different path but could be affected.
+
+Other tests that don't use handlers might pass.
+
+Thus, it's plausible that all tests in ProblemHandlerTest trigger the bug, except maybe testInvalidTypeIdFail which expects an exception.
+
+But we must be precise. Let's analyze `testWeirdStringHandling` for UUID:
+Input: quote("not a uuid!")
+Parser: String value "not a uuid!"
+text = "not a uuid!", not empty.
+_deserialize for UUID: probably calls UUID.fromString, throws IllegalArgumentException. So cause = iae.
+Then the code constructs weirdStringException and throws it. The handler is not called. So test fails because it expects null.
+Yes.
+
+For `testUnexpectedTokenHandling`:
+Input: "true"
+Parser: token VALUE_TRUE. getValueAsString returns "true". text = "true".
+_deserialize for Integer: tries parseInt, throws NumberFormatException. NumberFormatException is not IllegalArgumentException (it's a subclass? Actually NumberFormatException extends IllegalArgumentException. So it would be caught. Then cause set, then throws weirdStringException. Handler not called. Test expects 13, but exception thrown. So fails.
+
+For `testWeirdNumberHandling`:
+Input: "3"
+Parser: token VALUE_NUMBER_INT. getValueAsString returns "3". text = "3".
+_deserialize for SingleValuedEnum: probably fails because "3" is not a valid enum name? throws IllegalArgumentException? Then same, throws exception. Handler not called. Fails.
+
+So these three tests likely fail.
+
+For `testWeirdKeyHandling`:
+Input: JSON with string "foo" as key. The key is parsed as string, but the target map key type is Integer. In the buggy code, does it handle keys? This deserialize method is for value deserialization, not key. Possibly not.
+
+For `testInstantiationExceptionHandling`: JSON object "{}" for BustedCtor. The deserialize path for object is different; likely not hitting this code path because the token is START_OBJECT, not a string. So unaffected.
+
+`testMissingInstantiatorHandling`: similar.
+
+`testInvalidTypeId` and `testInvalidClassAsId`: these involve type id resolution, which might go through a different deserializer. Not sure.
+
+So likely only the three that involve string-to-value conversion with handlers are affected. But we also need to consider testUnexpectedTokenHandling.
+
+Let's also consider testWithEmptyStringAsNullObject1533 and testWithoutEmptyStringAsNullObject1533: These test empty string handling. The buggy code handles empty string specially: if text.length()==0 after trim, it returns _deserializeFromEmptyString(). That path is before the _deserialize call, so unaffected.
+
+Other tests that might be affected are any that deserialize from a string that is not empty and the target type's _deserialize may return null. But null return is rare.
+
+Given the above, the most likely triggering tests are:
+- com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testWeirdStringHandling (because of UUID case)
+- com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testUnexpectedTokenHandling
+- com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testWeirdNumberHandling
+
+Now, we need to output the fix. The fixed code should be the corrected deserialize method. We must output all functions from the input (only one function). So the fixed_code array will contain one string: the corrected deserialize method.
+
+Let's write the corrected code. We'll keep the structure and fix the double call and null return.
+
+Corrected version:
+
+```java
+public T deserialize(JsonParser p, DeserializationContext ctxt) throws IOException
+{
+    // 22-Sep-2012, tatu: For 2.1, use this new method, may force coercion:
+    String text = p.getValueAsString();
+    if (text != null) { // has String representation
+        if (text.length() == 0 || (text = text.trim()).length() == 0) {
+            // 04-Feb-2013, tatu: Usually should become null; but not always
+            return _deserializeFromEmptyString();
+        }
+        Exception cause = null;
+        T result = null;
+        try {
+            // 19-May-2017, tatu: Used to require non-null result (assuming `null`
+            //    indicated error; but that seems wrong. Should be able to return
+            //    `null` as value.
+            result = _deserialize(text, ctxt);
+            if (result != null) {
+                return result;
+            }
+        } catch (IllegalArgumentException iae) {
+            cause = iae;
+        } catch (MalformedURLException me) {
+            cause = me;
+        }
+        // If we got here and result is null and no exception, it's a valid null
+        if (result == null && cause == null) {
+            return null;
+        }
+        String msg = "not a valid textual representation";
+        if (cause != null) {
+            String m2 = cause.getMessage();
+            if (m2 != null) {
+                msg = msg + ", problem: "+m2;
+            }
+        }
+        // 05-May-2016, tatu: Unlike most usage, this seems legit, so...
+        JsonMappingException e = ctxt.weirdStringException(text, _valueClass, msg);
+        if (cause != null) {
+            e.initCause(cause);
+        }
+        throw e;
+        // nothing to do here, yet? We'll fail anyway
+    }
+    JsonToken t = p.getCurrentToken();
+    // [databind#381]
+    if (t == JsonToken.START_ARRAY) {
+        return _deserializeFromArray(p, ctxt);
+    }
+    if (t == JsonToken.VALUE_EMBEDDED_OBJECT) {
+        // Trivial cases; null to null, instance of type itself returned as is
+        Object ob = p.getEmbeddedObject();
+        if (ob == null) {
+            return null;
+        }
+        if (_valueClass.isAssignableFrom(ob.getClass())) {
+            return (T) ob;
+        }
+        return _deserializeEmbedded(ob, ctxt);
+    }
+    return (T) ctxt.handleUnexpectedToken(_valueClass, p);
+}
+```
+
+But note: The comment says "nothing to do here, yet? We'll fail anyway" is after throw, so that's fine.
+
+We need to ensure the code compiles with the same class context.
+
+Now, we need to output JSON:
+
+{
+  "trigger_method": [
+    "full_trigger_method_path1",
+    "full_trigger_method_path2",
+    ...
+  ],
+  "fixed_code": [
+    "full fixed_function1 as a JSON string", 
+    ...
+  ]
+}
+
+We'll use the class name as part of the method path. The test methods are given with full package and class name. For example: "com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testWeirdStringHandling". We'll list those.
+
+We must enclose the fixed code as a JSON string. That means we need to escape double quotes and newlines. We'll write the code as a single string with proper escaping.
+
+Let's construct the output.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testWeirdStringHandling",
+    "com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testUnexpectedTokenHandling",
+    "com.fasterxml.jackson.databind.filter.ProblemHandlerTest::testWeirdNumberHandling"
+  ],
+  "fixed_code": [
+    "public T deserialize(JsonParser p, DeserializationContext ctxt) throws IOException\n{\n    String text = p.getValueAsString();\n    if (text != null) {\n        if (text.length() == 0 || (text = text.trim()).length() == 0) {\n            return _deserializeFromEmptyString();\n        }\n        Exception cause = null;\n        T result = null;\n        try {\n            result = _deserialize(text, ctxt);\n            if (result != null) {\n                return result;\n            }\n        } catch (IllegalArgumentException iae) {\n            cause = iae;\n        } catch (MalformedURLException me) {\n            cause = me;\n        }\n        if (result == null && cause == null) {\n            return null;\n        }\n        String msg = \"not a valid textual representation\";\n        if (cause != null) {\n            String m2 = cause.getMessage();\n            if (m2 != null) {\n                msg = msg + \", problem: \"+m2;\n            }\n        }\n        JsonMappingException e = ctxt.weirdStringException(text, _valueClass, msg);\n        if (cause != null) {\n            e.initCause(cause);\n        }\n        throw e;\n    }\n    JsonToken t = p.getCurrentToken();\n    if (t == JsonToken.START_ARRAY) {\n        return _deserializeFromArray(p, ctxt);\n    }\n    if (t == JsonToken.VALUE_EMBEDDED_OBJECT) {\n        Object ob = p.getEmbeddedObject();\n        if (ob == null) {\n            return null;\n        }\n        if (_valueClass.isAssignableFrom(ob.getClass())) {\n            return (T) ob;\n        }\n        return _deserializeEmbedded(ob, ctxt);\n    }\n    return (T) ctxt.handleUnexpectedToken(_valueClass, p);\n}"
+  ]
+}

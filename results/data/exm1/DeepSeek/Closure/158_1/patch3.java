@@ -1,0 +1,5 @@
+CommandLineConfig setJscompOff(List<String> jscompOff) {
+  this.jscompOff.clear();
+  this.jscompOff.addAll(jscompOff);
+  return this;
+}

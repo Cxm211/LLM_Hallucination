@@ -1,0 +1,1 @@
+    if (NodeUtil.isFunction(node)) {

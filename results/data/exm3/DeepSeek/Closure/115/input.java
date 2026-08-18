@@ -1,0 +1,140 @@
+// buggy function
+  private CanInlineResult canInlineReferenceDirectly(
+      Node callNode, Node fnNode) {
+    if (!isDirectCallNodeReplacementPossible(fnNode)) {
+      return CanInlineResult.NO;
+    }
+
+    Node block = fnNode.getLastChild();
+
+    boolean hasSideEffects = false;
+    if (block.hasChildren()) {
+      Preconditions.checkState(block.hasOneChild());
+      Node stmt = block.getFirstChild();
+      if (stmt.isReturn()) {
+        hasSideEffects = NodeUtil.mayHaveSideEffects(stmt.getFirstChild(), compiler);
+      }
+    }
+    // CALL NODE: [ NAME, ARG1, ARG2, ... ]
+    Node cArg = callNode.getFirstChild().getNext();
+
+    // Functions called via 'call' and 'apply' have a this-object as
+    // the first parameter, but this is not part of the called function's
+    // parameter list.
+    if (!callNode.getFirstChild().isName()) {
+      if (NodeUtil.isFunctionObjectCall(callNode)) {
+        // TODO(johnlenz): Support replace this with a value.
+        if (cArg == null || !cArg.isThis()) {
+          return CanInlineResult.NO;
+        }
+        cArg = cArg.getNext();
+      } else {
+        // ".apply" call should be filtered before this.
+        Preconditions.checkState(!NodeUtil.isFunctionObjectApply(callNode));
+      }
+    }
+
+    // FUNCTION NODE -> LP NODE: [ ARG1, ARG2, ... ]
+    Node fnParam = NodeUtil.getFunctionParameters(fnNode).getFirstChild();
+    while (cArg != null || fnParam != null) {
+      // For each named parameter check if a mutable argument use more than one.
+      if (fnParam != null) {
+        if (cArg != null) {
+          if (hasSideEffects && NodeUtil.canBeSideEffected(cArg)) {
+            return CanInlineResult.NO;
+          }
+          // Check for arguments that are evaluated more than once.
+          // Note: Unlike block inlining, there it is not possible that a
+          // parameter reference will be in a loop.
+          if (NodeUtil.mayEffectMutableState(cArg, compiler)
+              && NodeUtil.getNameReferenceCount(
+                  block, fnParam.getString()) > 1) {
+            return CanInlineResult.NO;
+          }
+        }
+
+        // Move to the next name.
+        fnParam = fnParam.getNext();
+      }
+
+      // For every call argument check for side-effects, even if there
+      // isn't a named parameter to match.
+      if (cArg != null) {
+        if (NodeUtil.mayHaveSideEffects(cArg, compiler)) {
+          return CanInlineResult.NO;
+        }
+        cArg = cArg.getNext();
+      }
+    }
+
+    return CanInlineResult.YES;
+  }
+
+// trigger testcase
+// com/google/javascript/jscomp/InlineFunctionsTest.java::testBug4944818
+public void testBug4944818() {
+    test(
+        "var getDomServices_ = function(self) {\n" +
+        "  if (!self.domServices_) {\n" +
+        "    self.domServices_ = goog$component$DomServices.get(" +
+        "        self.appContext_);\n" +
+        "  }\n" +
+        "\n" +
+        "  return self.domServices_;\n" +
+        "};\n" +
+        "\n" +
+        "var getOwnerWin_ = function(self) {\n" +
+        "  return getDomServices_(self).getDomHelper().getWindow();\n" +
+        "};\n" +
+        "\n" +
+        "HangoutStarter.prototype.launchHangout = function() {\n" +
+        "  var self = a.b;\n" +
+        "  var myUrl = new goog.Uri(getOwnerWin_(self).location.href);\n" +
+        "};",
+        "HangoutStarter.prototype.launchHangout = function() { " +
+        "  var self$$2 = a.b;" +
+        "  var JSCompiler_temp_const$$0 = goog.Uri;" +
+        "  var JSCompiler_inline_result$$1;" +
+        "  {" +
+        "  var self$$inline_2 = self$$2;" +
+        "  if (!self$$inline_2.domServices_) {" +
+        "    self$$inline_2.domServices_ = goog$component$DomServices.get(" +
+        "        self$$inline_2.appContext_);" +
+        "  }" +
+        "  JSCompiler_inline_result$$1=self$$inline_2.domServices_;" +
+        "  }" +
+        "  var myUrl = new JSCompiler_temp_const$$0(" +
+        "      JSCompiler_inline_result$$1.getDomHelper()." +
+        "          getWindow().location.href)" +
+        "}");
+  }
+
+// com/google/javascript/jscomp/InlineFunctionsTest.java::testDoubleInlining1
+public void testDoubleInlining1() {
+    allowBlockInlining = false;
+    test("var foo = function(a) { return getWindow(a); };" +
+         "var bar = function(b) { return b; };" +
+         "foo(bar(x));",
+         "getWindow(x)");
+  }
+
+// com/google/javascript/jscomp/InlineFunctionsTest.java::testInlineFunctions6
+public void testInlineFunctions6() {
+    // more complex inlines
+    test("function BAR_FN(x, y, z) { return z(foo(x + y)) }" +
+         "alert(BAR_FN(1, 2, baz))",
+
+         "alert(baz(foo(1+2)))");
+  }
+
+// com/google/javascript/jscomp/InlineFunctionsTest.java::testNoInlineIfParametersModified8
+public void testNoInlineIfParametersModified8() {
+    // OK, object parameter modified.
+    test("function f(a){return a.x=2}f(o)", "o.x=2");
+  }
+
+// com/google/javascript/jscomp/InlineFunctionsTest.java::testNoInlineIfParametersModified9
+public void testNoInlineIfParametersModified9() {
+    // OK, array parameter modified.
+    test("function f(a){return a[2]=2}f(o)", "o[2]=2");
+  }

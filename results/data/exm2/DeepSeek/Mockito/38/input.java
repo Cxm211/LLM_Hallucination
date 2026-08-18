@@ -1,0 +1,30 @@
+    private boolean toStringEquals(Matcher m, Object arg) {
+        return StringDescription.toString(m).equals(arg.toString());
+    }
+
+// trigger testcase
+@Test
+    public void shouldWorkFineWhenGivenArgIsNull() {
+        //when
+        Integer[] suspicious = tool.getSuspiciouslyNotMatchingArgsIndexes((List) Arrays.asList(new Equals(20)), new Object[] {null});
+        
+        //then
+        assertEquals(0, suspicious.length);
+    }
+
+@Test
+    public void shouldAllowPassingNullArgument() {
+        //given
+        Fun mockFun = mock(Fun.class);
+        when(mockFun.doFun((String) anyObject())).thenReturn("value");
+
+        //when
+        mockFun.doFun(null);
+
+        //then
+        try {
+            verify(mockFun).doFun("hello");
+        } catch(AssertionError r) {
+            //it's ok, we just want to reproduce the bug
+        }
+    }

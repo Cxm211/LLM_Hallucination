@@ -1,0 +1,28 @@
+// org/apache/commons/math/ode/events/EventStateTest.java
+@Test
+public void testThreeCloseResettingEvents() {
+
+    FirstOrderDifferentialEquations equation = new FirstOrderDifferentialEquations() {
+        
+        public int getDimension() {
+            return 1;
+        }
+        
+        public void computeDerivatives(double t, double[] y, double[] yDot) {
+            yDot[0] = 1.0;
+        }
+    };
+
+    DormandPrince853Integrator integrator = new DormandPrince853Integrator(0.001, 1000, 1.0e-14, 1.0e-14);
+    integrator.addEventHandler(new ResettingEvent(5.0), 0.1, 1.0e-9, 1000);
+    integrator.addEventHandler(new ResettingEvent(5.01), 0.1, 1.0e-9, 1000);
+    integrator.addEventHandler(new ResettingEvent(5.02), 0.1, 1.0e-9, 1000);
+    integrator.setInitialStepSize(3.0);
+
+    double target = 20.0;
+    double[] y = new double[1];
+    double tEnd = integrator.integrate(equation, 0.0, y, target, y);
+    Assert.assertEquals(target, tEnd, 1.0e-10);
+    Assert.assertEquals(23.0, y[0], 1.0e-10);
+
+}

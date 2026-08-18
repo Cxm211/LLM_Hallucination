@@ -1,0 +1,15 @@
+/* Duplicate method removed to avoid signature conflict.
+        public JsonSerializer<?> createContextual(SerializerProvider prov,
+                BeanProperty property) throws JsonMappingException
+        {
+            JsonFormat.Value format = findFormatOverrides(prov, property, handledType());
+            if (format != null) {
+                switch (format.getShape()) {
+                case STRING:
+                    return ToStringSerializer.instance;
+                default:
+                }
+            }
+            return this;
+        }
+*/

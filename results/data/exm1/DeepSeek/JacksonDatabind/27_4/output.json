@@ -1,0 +1,307 @@
+We are given a buggy function `deserializeUsingPropertyBasedWithExternalTypeId` from Jackson Databind. Also a huge list of test methods. We need to determine which test methods actually expose the bug, and then provide the minimal fix for the function(s).
+
+First, we need to understand the bug. The function is part of deserialization for polymorphic types with external type id using property-based creator. The code is:
+
+```java
+protected Object deserializeUsingPropertyBasedWithExternalTypeId(JsonParser p, DeserializationContext ctxt)
+    throws IOException
+{
+    final ExternalTypeHandler ext = _externalTypeIdHandler.start();
+    final PropertyBasedCreator creator = _propertyBasedCreator;
+    PropertyValueBuffer buffer = creator.startBuilding(p, ctxt, _objectIdReader);
+
+    TokenBuffer tokens = new TokenBuffer(p);
+    tokens.writeStartObject();
+
+    JsonToken t = p.getCurrentToken();
+    for (; t == JsonToken.FIELD_NAME; t = p.nextToken()) {
+        String propName = p.getCurrentName();
+        p.nextToken(); // to point to value
+        // creator property?
+        SettableBeanProperty creatorProp = creator.findCreatorProperty(propName);
+        if (creatorProp != null) {
+            // first: let's check to see if this might be part of value with external type id:
+            // 11-Sep-2015, tatu: Important; do NOT pass buffer as last arg, but null,
+            //   since it is not the bean
+            if (ext.handlePropertyValue(p, ctxt, propName, buffer)) {
+                ;
+            } else {
+                // Last creator property to set?
+                if (buffer.assignParameter(creatorProp, _deserializeWithErrorWrapping(p, ctxt, creatorProp))) {
+                    t = p.nextToken(); // to move to following FIELD_NAME/END_OBJECT
+                    Object bean;
+                    try {
+                        bean = creator.build(ctxt, buffer);
+                    } catch (Exception e) {
+                        wrapAndThrow(e, _beanType.getRawClass(), propName, ctxt);
+                        continue; // never gets here
+                    }
+                    // if so, need to copy all remaining tokens into buffer
+                    while (t == JsonToken.FIELD_NAME) {
+                        p.nextToken(); // to skip name
+                        tokens.copyCurrentStructure(p);
+                        t = p.nextToken();
+                    }
+                    if (bean.getClass() != _beanType.getRawClass()) {
+                        // !!! 08-Jul-2011, tatu: Could theoretically support; but for now
+                        //   it's too complicated, so bail out
+                        throw ctxt.mappingException("Can not create polymorphic instances with unwrapped values");
+                    }
+                    return ext.complete(p, ctxt, bean);
+                }
+            }
+            continue;
+        }
+        // Object Id property?
+        if (buffer.readIdProperty(propName)) {
+            continue;
+        }
+        // regular property? needs buffering
+        SettableBeanProperty prop = _beanProperties.find(propName);
+        if (prop != null) {
+            buffer.bufferProperty(prop, prop.deserialize(p, ctxt));
+            continue;
+        }
+        // external type id (or property that depends on it)?
+        if (ext.handlePropertyValue(p, ctxt, propName, null)) {
+            continue;
+        }
+        /* As per [JACKSON-313], things marked as ignorable should not be
+         * passed to any setter
+         */
+        if (_ignorableProps != null && _ignorableProps.contains(propName)) {
+            handleIgnoredProperty(p, ctxt, handledType(), propName);
+            continue;
+        }
+        // "any property"?
+        if (_anySetter != null) {
+            buffer.bufferAnyProperty(_anySetter, propName, _anySetter.deserialize(p, ctxt));
+        }
+    }
+
+    // We hit END_OBJECT; resolve the pieces:
+    try {
+        return ext.complete(p, ctxt, buffer, creator);
+    } catch (Exception e) {
+        wrapInstantiationProblem(e, ctxt);
+        return null; // never gets here
+    }
+}
+```
+
+This function seems to be for deserializing beans that use an external type id (e.g., `@JsonTypeInfo` with property `externalId`). But note there is an inconsistency: In the for loop, when a creator property is found and not handled by ext, it tries to assign the parameter. If that assignment makes the buffer complete (i.e., all creator properties assigned), it then builds the bean and then copies remaining tokens. However, the copy loop uses `tokens.copyCurrentStructure(p)` where `tokens` is a TokenBuffer that has written a start object but never written an end object. The purpose of tokens is to capture the remaining properties after the creator properties are consumed. But the function never writes an end object to tokens. However, it returns `ext.complete(p, ctxt, bean)` which uses the bean directly, ignoring tokens.
+
+But maybe the bug is elsewhere. Another potential issue: In the else branch when `creatorProp != null` and `ext.handlePropertyValue` returns false, it calls `buffer.assignParameter(creatorProp, _deserializeWithErrorWrapping...)`. If that returns true, meaning all creator properties are set, then it proceeds to build the bean. However, after building, it copies remaining tokens from the parser into the tokens buffer. But note that `t` is already set to the next token after the creator property's value? Actually after `buffer.assignParameter`, there's an immediate `t = p.nextToken()` to move to the next token after the value of the creator property. Then in the while loop, it reads field names and copies their structures into tokens. But the copy loop uses `tokens.copyCurrentStructure(p)`, which will copy the entire structure (starting from the current token, which is the value after the field name?). Wait, the loop starts `while (t == JsonToken.FIELD_NAME)`, so after the first `p.nextToken()` after the creator property value, `t` is the next token which could be a FIELD_NAME or END_OBJECT. It then enters the loop: inside the loop, it does `p.nextToken(); // to skip name` to skip the field name token, then `tokens.copyCurrentStructure(p);` which copies the value (starting from the current token). Then `t = p.nextToken();` to move to the next token. So this copies each subsequent field/value pair into tokens. After the while loop, it then calls `ext.complete(p, ctxt, bean)`. But note that `ext.complete` expects to read the remaining tokens from the parser? Actually, the external type handler's `complete` method expects to finalize the bean using the remaining tokens. However, the remaining tokens have already been copied into the tokens buffer and presumably the parser is past them. The `ext.complete` probably expects to read from the parser, but the parser is now at END_OBJECT (or beyond). That might be problematic.
+
+However, the main bug might be related to the fact that after building the bean, it checks `if (bean.getClass() != _beanType.getRawClass())` which is wrong? Actually, that check is for polymorphic instances, but the error message says "Can not create polymorphic instances with unwrapped values". Not sure.
+
+We need to search for known issues with this function. Since the test methods are from various tests, we need to see which tests might actually invoke this code path. The function is about deserialization with external type id and property-based creator. So only tests that involve polymorphic deserialization with `@JsonTypeInfo` and external type id, and that use a creator (e.g., `@JsonCreator`), and that have multiple properties, might trigger it.
+
+But from the list of test methods, many are about serialization, not deserialization. Some are about deserialization of polymorphic types. For example:
+- `com.fasterxml.jackson.databind.ser.TestJsonSerialize::testStaticTypingForClass`? That's serialization.
+- `com.fasterxml.jackson.databind.struct.TestPOJOAsArrayAdvanced::testWithCreatorsOrdered` involves deserialization with creators.
+- `com.fasterxml.jackson.databind.struct.TestUnwrapped::testUnwrappedDeserializeWithCreator` involves creator and unwrapped.
+- `com.fasterxml.jackson.databind.ser.TestTypedRootValueSerialization` tests involve serialization.
+- `com.fasterxml.jackson.databind.struct.TestUnwrappedWithTypeInfo` involves external type id and unwrapped.
+
+Let's examine the test `testUnwrappedDeserializeWithCreator`:
+```java
+public void testUnwrappedDeserializeWithCreator() throws Exception
+{
+    UnwrappingWithCreator bean = MAPPER.readValue("{\"x\":1,\"y\":2,\"name\":\"Tatu\"}",
+            UnwrappingWithCreator.class);
+    assertEquals("Tatu", bean.name);
+    Location loc = bean.location;
+    assertNotNull(loc);
+    assertEquals(1, loc.x);
+    assertEquals(2, loc.y);
+}
+```
+This uses `@JsonUnwrapped` and a creator? Probably `UnwrappingWithCreator` has a constructor that takes name and Location? But does it involve external type id? Probably not.
+
+The test `testUnwrappedWithTypeInfo` tests unwrapped with type info:
+```java
+public void testDefaultUnwrappedWithTypeInfo() throws Exception
+{
+    Outer outer = new Outer();
+    outer.setP1("101");
+    Inner inner = new Inner();
+    inner.setP2("202");
+    outer.setInner(inner);
+    ObjectMapper mapper = new ObjectMapper();
+    try {
+        mapper.writeValueAsString(outer);
+        fail("Expected exception to be thrown.");
+    } catch (JsonMappingException ex) {
+        verifyException(ex, "requires use of type information");
+    }
+}
+```
+This is about serialization, not deserialization.
+
+Another test: `testPolymorphicSerdeWithDelegate` from `TestJsonValue`:
+```java
+public void testPolymorphicSerdeWithDelegate() throws Exception
+{
+    AdditionInterface adder = new AdditionInterfaceImpl(1);
+    assertEquals(2, adder.add(1));
+    String json = MAPPER.writeValueAsString(adder);
+    assertEquals("{\"boingo\":\"boopsy\",\"toAdd\":1}", json);
+    assertEquals(2, MAPPER.readValue(json, AdditionInterface.class).add(1));
+    adder = new NegatingAdditionInterface(adder);
+    assertEquals(0, adder.add(1));
+    json = MAPPER.writeValueAsString(adder);
+    // etc
+}
+```
+This uses `@JsonTypeInfo` with `use=Id.NAME`, `include=As.PROPERTY`? It might use external type id? The output shows properties without a type property, so maybe it's using `@JsonTypeInfo` with `include=As.EXTERNAL_PROPERTY`? Not sure.
+
+Given the large number of tests, we need to find which ones actually invoke the buggy function. The function is `deserializeUsingPropertyBasedWithExternalTypeId`, which is likely called during deserialization of beans that have both a creator and an external type id handler. That is not trivial to guess from the test names.
+
+Maybe the bug is in a different version of the code? The provided source is a single function. Possibly the bug is a known issue: In this function, when a creator property is found and it completes the bean, it copies remaining tokens into the TokenBuffer but then returns `ext.complete(p, ctxt, bean)` which ignores the tokens. The tokens buffer should be passed to `ext.complete` to give it the remaining properties. Normally, the external type handler expects to receive the buffered properties to set them on the bean. But here, the tokens are captured but not used. This could lead to missing properties or incorrect state.
+
+In the normal flow without early completion, when all properties are processed and we hit END_OBJECT, it calls `ext.complete(p, ctxt, buffer, creator)` with the buffer and creator, which then uses the buffered properties. But in the early completion branch, it uses `ext.complete(p, ctxt, bean)`. That method signature might be different. Let's check: `ext.complete` is overloaded? In the code, there is `ext.complete(p, ctxt, bean)` (three arguments) and `ext.complete(p, ctxt, buffer, creator)` (four arguments). The three-argument version likely expects to read the remaining tokens from the parser and set them on the bean. But the remaining tokens have already been read into the TokenBuffer. So the external type handler would not find them. This is a bug: the tokens should be passed to `ext.complete` or the `ext.complete` should be replaced with one that uses the captured tokens.
+
+Looking at the code after building the bean:
+```java
+while (t == JsonToken.FIELD_NAME) {
+    p.nextToken(); // to skip name
+    tokens.copyCurrentStructure(p);
+    t = p.nextToken();
+}
+if (bean.getClass() != _beanType.getRawClass()) {
+    throw ctxt.mappingException("Can not create polymorphic instances with unwrapped values");
+}
+return ext.complete(p, ctxt, bean);
+```
+After the while loop, `t` is the token after the last field/value (likely END_OBJECT). The parser is positioned at END_OBJECT. Then it calls `ext.complete(p, ctxt, bean)`. The `ext.complete` with three arguments probably expects to read the end token and finalize the bean. But the parser is already at END_OBJECT, so it might just return the bean. However, the external type handler might need to see the remaining properties to set them on the bean. Since they were already copied into tokens, they are lost.
+
+The correct fix would be to pass the tokens to `ext.complete` or to finish the tokens and feed them into `ext.complete`. There might be a method like `ext.complete(p, ctxt, buffer, creator)` that uses the buffer, but here we already built the bean. Possibly we need to wrap the tokens into a parser and use that as the input for the external type handler.
+
+Actually, looking at similar code in other versions of Jackson, the early-completion branch should use `ext.complete(p, ctxt, buffer, creator)` but with the tokens passed as an additional argument? Or maybe the tokens buffer should be used to serialize the remaining properties into a string and then feed that to the bean? This is complicated.
+
+Given the complexity, perhaps the bug is simpler: In the condition `if (ext.handlePropertyValue(p, ctxt, propName, buffer))` inside the creator property block, the comment says "do NOT pass buffer as last arg, but null". But currently it passes `buffer`. That might be an error: it says "Important; do NOT pass buffer as last arg, but null, since it is not the bean". So `ext.handlePropertyValue` should be called with `null` as the last argument for creator properties. But the code passes `buffer`. That could cause issues.
+
+Also, later in the for loop, when handling regular properties, it calls `ext.handlePropertyValue(p, ctxt, propName, null)`. That is correct.
+
+So the bug might be that for creator properties, `ext.handlePropertyValue` is incorrectly called with `buffer` instead of `null`. That could lead to the external type handler thinking it's being asked to buffer the property into the bean, but since the bean is not yet built, it might cause problems. Let's check the `ExternalTypeHandler.handlePropertyValue` signature: It takes `JsonParser`, `DeserializationContext`, `String propName`, and an `Object` bean (or buffer? Actually the last parameter is `Object bean` according to some versions). In the external type handler, it uses the bean to set properties. If we pass `buffer` (a PropertyValueBuffer), it might try to cast it to the bean type and fail. That could cause exceptions.
+
+Given the comment, it's clear: for creator properties, we should pass `null` because the bean is not yet created. The current code passes `buffer` which is wrong. That is likely the bug.
+
+Now we need to find which test methods trigger this code path. The code is only reached when deserializing a bean that uses external type id and has a creator. Also, the bean must have properties that are creator properties (constructor parameters). The test `testUnwrappedDeserializeWithCreator` might involve a creator, but does it use external type id? Probably not. The test `testWithCreatorsOrdered` in `TestPOJOAsArrayAdvanced` uses `@JsonFormat(shape = Shape.ARRAY)` and creator, but not external type id.
+
+Another test: `testPolymorphicSerdeWithDelegate` from `TestJsonValue` uses `@JsonTypeInfo` and a delegate? Possibly that uses external type id. The test `testUnWrappedMapWithDefaultType` from `TestKeySerializers` uses external type id but for a Map, not a bean with creator.
+
+Maybe the test `testIssue693` from `TestParentChildReferences` involves back references, not external type id.
+
+Given the large list, we need to identify tests that involve both `@JsonTypeInfo` with `include = EXTERNAL_PROPERTY` and `@JsonCreator`. Looking through the test names: `TestTypedRootValueSerialization` uses `Issue822Interface` which has `@JsonTypeInfo` with `use = Id.NAME`, but likely `include = As.PROPERTY`, not external. `TestUnwrappedWithTypeInfo` uses external type id but on a serialization test, not deserialization.
+
+Actually, the buggy function is called during deserialization. The test that probably triggers it is one that deserializes a polymorphic type with external type id. There is a test `testPolymorphicSerdeWithDelegate` which does both serialization and deserialization. Let's look at the code behind `AdditionInterface` and `NegatingAdditionInterface`. Those likely use `@JsonTypeInfo` with `use = Id.NAME` and `include = As.PROPERTY` or `As.EXTERNAL_PROPERTY`. But the test's JSON output does not show a type property; it shows properties "boingo" and "toAdd". That suggests the type information is not included in the JSON, so deserialization uses a delegate or something. Not sure.
+
+Maybe we can search for a test that specifically tests external type id with creator. Not in this list? The test `testIssue693` from `TestParentChildReferences` might involve? No.
+
+Given the ambiguity, and because the instruction says we need to output the minimal correct fix, we might assume the bug is the incorrect passing of `buffer` to `ext.handlePropertyValue` for creator properties. The fix: change `ext.handlePropertyValue(p, ctxt, propName, buffer)` to `ext.handlePropertyValue(p, ctxt, propName, null)`. That is minimal.
+
+Now we need to determine which test methods actually trigger the bug. The bug would cause an exception when the external type handler tries to process a creator property because it gets a PropertyValueBuffer instead of a bean. That would likely produce a ClassCastException or similar. Which tests would exercise that code? Possibly `testUnwrappedDeserializeWithCreator` if the unwrapping involves external type id? But it doesn't. Another possibility: `testPolymorphicSerdeWithDelegate` does deserialization of a polymorphic type with a delegate (which might be a creator). Also `testWithCreatorsOrdered` does not involve type info.
+
+Maybe there is a test like `testIssue456`? Not sure.
+
+Reviewing the function, it is from `BeanDeserializerBase` or similar. The function is called when the bean has both a creator and external type id handler. The test that would trigger it must create a bean with `@JsonTypeInfo(use=..., include=As.EXTERNAL_PROPERTY)` and `@JsonCreator`. Looking through the test list, I don't see such a test explicitly. However, `TestUnwrappedWithTypeInfo` tests serialization, not deserialization. Maybe `testUnwrappedDeserializeWithCreator` does not involve type info.
+
+Given the extensive list, I think the most likely candidate is `testPolymorphicSerdeWithDelegate` because it explicitly mentions "PolymorphicSerde" and "Delegate". Also the test does serialization and deserialization, so it might hit the bug.
+
+But we need to be sure. Let's examine the code for the relevant classes. The test is in `TestJsonValue` and uses `AdditionInterface` and `NegatingAdditionInterface`. We don't have the class definitions, but we can infer from the test name and JSON: `{"boingo":"boopsy","toAdd":1}`. That looks like a bean with properties "boingo" and "toAdd". The type info is not visible; maybe it's using `@JsonTypeInfo(use=Id.NAME, include=As.EXTERNAL_PROPERTY, property="type")` but the type property is missing? Actually the test asserts that the JSON is "{\"boingo\":\"boopsy\",\"toAdd\":1}" for both the base and the wrapper. So the type info is not serialized, meaning it might be using a different strategy.
+
+Given the uncertainty, we might output all test methods that involve polymorphic deserialization with external type id and creator. But there is no such test in the list? Wait, there is `testIssue693` from `TestParentChildReferences` which involves parent-child references, not external type id. There is `testSimpleRefs`, etc.
+
+Maybe the bug is not triggered by any test in this list? But the problem states that the test methods are all relevant, and we need to determine which ones actually expose the bug. Possibly the bug is triggered by a test that we haven't identified correctly. Let's look at the test `testDefaultUnwrappedWithTypeInfo` which expects an exception. That test is about serialization, not deserialization, so it does not call the buggy function.
+
+Another test: `testUnWrappedMapWithDefaultType` from `TestKeySerializers`:
+```java
+public void testUnWrappedMapWithDefaultType() throws Exception{
+    final ObjectMapper mapper = new ObjectMapper();
+    SimpleModule mod = new SimpleModule("test");
+    mod.addKeySerializer(ABC.class, new ABCKeySerializer());
+    mapper.registerModule(mod);
+    TypeResolverBuilder<?> typer = new ObjectMapper.DefaultTypeResolverBuilder(ObjectMapper.DefaultTyping.NON_FINAL);
+    typer = typer.init(JsonTypeInfo.Id.NAME, null);
+    typer = typer.inclusion(JsonTypeInfo.As.PROPERTY);
+    typer = typer.typeIdVisibility(true);
+    mapper.setDefaultTyping(typer);
+    Map<ABC,String> stuff = new HashMap<ABC,String>();
+    stuff.put(ABC.B, "bar");
+    String json = mapper.writerFor(new TypeReference<Map<ABC, String>>() {})
+            .writeValueAsString(stuff);
+    assertEquals("{\"@type\":\"HashMap\",\"xxxB\":\"bar\"}", json);
+}
+```
+This is serialization of a map with default typing, not deserialization.
+
+Maybe none of these tests directly call the buggy function, but the problem expects us to identify which ones would break with the bug. Since the bug is in deserialization, any test that deserializes a polymorphic type with external type id and creator might break. However, I'm not fully convinced.
+
+After careful thought, the most direct evidence is the comment in the code: "Important; do NOT pass buffer as last arg, but null". So the bug is that it passes buffer. The fix is to pass null. That is minimal.
+
+Now, which test would fail due to this? The test that would actually call this code path. Possibly `testPolymorphicSerdeWithDelegate` because it does deserialization of a polymorphic type. But let's check the test more closely: It first serializes an `AdditionInterfaceImpl` and then deserializes back. If the `AdditionInterfaceImpl` uses a creator and external type id, then deserialization would hit this code. The test does:
+```java
+String json = MAPPER.writeValueAsString(adder);
+assertEquals("{\"boingo\":\"boopsy\",\"toAdd\":1}", json);
+assertEquals(2, MAPPER.readValue(json, AdditionInterface.class).add(1));
+```
+So it deserializes from JSON. That could trigger the bug if `AdditionInterface` has a creator and uses external type id. Given the test name "PolymorphicSerdeWithDelegate", it's likely that the class uses `@JsonDeserialize(using = ...)` or something with a delegate, not necessarily a creator.
+
+Another test: `testIssue693` in `TestParentChildReferences` does:
+```java
+Parent parent = new Parent();
+parent.addChild(new Child("foo"));
+parent.addChild(new Child("bar"));
+byte[] bytes = MAPPER.writeValueAsBytes(parent);
+Parent value = MAPPER.readValue(bytes, Parent.class);
+```
+This involves serialization and deserialization, but does it involve external type id? Possibly not.
+
+I think we need to look for a test that explicitly uses `@JsonTypeInfo(include = As.EXTERNAL_PROPERTY)`. In the given list, there is `TestUnwrappedWithTypeInfo` which does use external type id, but only for serialization. There is also `testDefaultUnwrappedWithTypeInfo` and `testUnwrappedWithTypeInfoAndFeatureDisabled`. However, those are serialization tests, not deserialization.
+
+Maybe the bug is also triggered by serialization? No, the function is deserialization.
+
+Given the difficulty, perhaps the bug is not triggered by any of the listed tests. But the instruction says "Given: 1. Source: The complete functions where an error occurs. 2. Testcases: All relevant testcases." So presumably some tests do trigger the bug.
+
+Let's examine the function again: It's from `BeanDeserializerBase`. The call to this function happens when the bean has external type id and property-based creator. That is a more rare case. Possibly none of the tests in the list use that combination. But we must still provide a fix.
+
+Maybe the bug is different: In the while loop after building the bean, it copies tokens into `tokens` but never writes the end object. Then it returns `ext.complete(p, ctxt, bean)` which expects to read the remaining tokens from the parser. But the parser is already at END_OBJECT. Actually, after the while loop, `t` is END_OBJECT. The parser is at END_OBJECT. So `ext.complete` might just return the bean without processing the remaining properties. But the tokens buffer contains the remaining properties. They are lost. That would cause the deserialized bean to miss those properties. That is a real bug.
+
+The fix would be to pass the tokens to `ext.complete` or to feed them into the bean via the external type handler. Possibly the correct approach is to not copy the tokens but instead let `ext.complete` read them from the parser. But the parser has already advanced past them because the while loop consumed them. So the tokens should be used to provide the remaining properties to `ext.complete`. The method `ext.complete` might have a variant that accepts a TokenBuffer. Or we need to write the tokens to a new parser and use it.
+
+Looking at the code, there is `ext.complete(p, ctxt, bean)` and `ext.complete(p, ctxt, buffer, creator)`. The first one probably expects that the parser still has the remaining tokens. So we cannot use that after consuming them.
+
+Thus the fix might be to not consume the tokens early, or to pass the TokenBuffer to `ext.complete`. A common fix in later versions of Jackson is to use `ext.complete(p, ctxt, bean)` but pass the tokens as part of the bean? No.
+
+Actually, I found a known issue: In Jackson 2.7.x, there was a bug where `deserializeUsingPropertyBasedWithExternalTypeId` had an issue with the early completion branch not properly passing the buffered tokens to the external type handler. The fix was to use `ext.complete(p, ctxt, bean)` but also somehow incorporate the tokens. Or to change the logic to not use the tokens buffer but instead let the external type handler read from the parser. But that would require not consuming the tokens early. The while loop copies the tokens but also advances the parser. That might be intentional: the tokens are captured so that later they can be replayed. But then `ext.complete` is called with the parser, not the tokens. So the tokens are lost.
+
+Therefore, the fix might be to call `ext.complete(p, ctxt, bean)` after restoring the parser state? But the parser state is already past.
+
+Alternatively, the fix might be to not use the tokens buffer at all, and instead rely on the external type handler to consume the remaining tokens. But the code does that, except it also copies them into tokens which is pointless.
+
+Given the complexity, I'll focus on the obvious bug: the incorrect passing of `buffer` to `ext.handlePropertyValue` for creator properties. That is the most clear-cut from the comment.
+
+Now, which test would fail because of that? If `ext.handlePropertyValue` receives a `PropertyValueBuffer` instead of a bean, it might throw a ClassCastException or call methods on it incorrectly. So any test that deserializes a bean with external type id and a creator property that is not handled by the external type handler (i.e., the creator property is a real creator property, not part of the type id) would hit this. That could be many tests. But again, we need to identify specific triggers.
+
+Maybe the test `testIssue693` uses parent-child references, but those involve back references, not external type id.
+
+I think the most probable trigger is `testPolymorphicSerdeWithDelegate`. Let's check the class `AdditionInterface` and `AdditionInterfaceImpl`. We don't have the source, but from the test code, it seems they have a `@JsonTypeInfo` with some delegate. The delegate might be a creator? Possibly.
+
+Given the constraints, I will output `{"trigger_method": ["com.fasterxml.jackson.databind.ser.TestJsonValue::testPolymorphicSerdeWithDelegate"], "fixed_code": ["..."]}` and fix the line `if (ext.handlePropertyValue(p, ctxt, propName, buffer))` to `if (ext.handlePropertyValue(p, ctxt, propName, null))`. That's the minimal change.
+
+But we must also ensure that the fix is correct. Also note there might be another issue: the tokens copy and the return after building bean might still be wrong, but since we are asked for minimal fix, we only fix the identified bug.
+
+However, the instruction says: "The defect may be caused by a single function or by multiple functions working together. If multiple functions collectively cause the issue, you must fix all of them." So we only have one function.
+
+Thus, I propose the fix: change that line.
+
+Now, output JSON.{
+  "trigger_method": [
+    "com.fasterxml.jackson.databind.ser.TestJsonValue::testPolymorphicSerdeWithDelegate"
+  ],
+  "fixed_code": [
+    "    protected Object deserializeUsingPropertyBasedWithExternalTypeId(JsonParser p, DeserializationContext ctxt)\n        throws IOException\n    {\n        final ExternalTypeHandler ext = _externalTypeIdHandler.start();\n        final PropertyBasedCreator creator = _propertyBasedCreator;\n        PropertyValueBuffer buffer = creator.startBuilding(p, ctxt, _objectIdReader);\n\n        TokenBuffer tokens = new TokenBuffer(p);\n        tokens.writeStartObject();\n\n        JsonToken t = p.getCurrentToken();\n        for (; t == JsonToken.FIELD_NAME; t = p.nextToken()) {\n            String propName = p.getCurrentName();\n            p.nextToken(); // to point to value\n            // creator property?\n            SettableBeanProperty creatorProp = creator.findCreatorProperty(propName);\n            if (creatorProp != null) {\n                // first: let's check to see if this might be part of value with external type id:\n                // 11-Sep-2015, tatu: Important; do NOT pass buffer as last arg, but null,\n                //   since it is not the bean\n                if (ext.handlePropertyValue(p, ctxt, propName, null)) {\n                    ;\n                } else {\n                    // Last creator property to set?\n                    if (buffer.assignParameter(creatorProp, _deserializeWithErrorWrapping(p, ctxt, creatorProp))) {\n                        t = p.nextToken(); // to move to following FIELD_NAME/END_OBJECT\n                        Object bean;\n                        try {\n                            bean = creator.build(ctxt, buffer);\n                        } catch (Exception e) {\n                            wrapAndThrow(e, _beanType.getRawClass(), propName, ctxt);\n                            continue; // never gets here\n                        }\n                        // if so, need to copy all remaining tokens into buffer\n                        while (t == JsonToken.FIELD_NAME) {\n                            p.nextToken(); // to skip name\n                            tokens.copyCurrentStructure(p);\n                            t = p.nextToken();\n                        }\n                        if (bean.getClass() != _beanType.getRawClass()) {\n                            // !!! 08-Jul-2011, tatu: Could theoretically support; but for now\n                            //   it's too complicated, so bail out\n                            throw ctxt.mappingException(\"Can not create polymorphic instances with unwrapped values\");\n                        }\n                        return ext.complete(p, ctxt, bean);\n                    }\n                }\n                continue;\n            }\n            // Object Id property?\n            if (buffer.readIdProperty(propName)) {\n                continue;\n            }\n            // regular property? needs buffering\n            SettableBeanProperty prop = _beanProperties.find(propName);\n            if (prop != null) {\n                buffer.bufferProperty(prop, prop.deserialize(p, ctxt));\n                continue;\n            }\n            // external type id (or property that depends on it)?\n            if (ext.handlePropertyValue(p, ctxt, propName, null)) {\n                continue;\n            }\n            /* As per [JACKSON-313], things marked as ignorable should not be\n             * passed to any setter\n             */\n            if (_ignorableProps != null && _ignorableProps.contains(propName)) {\n                handleIgnoredProperty(p, ctxt, handledType(), propName);\n                continue;\n            }\n            // \"any property\"?\n            if (_anySetter != null) {\n                buffer.bufferAnyProperty(_anySetter, propName, _anySetter.deserialize(p, ctxt));\n            }\n        }\n\n        // We hit END_OBJECT; resolve the pieces:\n        try {\n            return ext.complete(p, ctxt, buffer, creator);\n        } catch (Exception e) {\n            wrapInstantiationProblem(e, ctxt);\n            return null; // never gets here\n        }\n    }"
+  ]
+}

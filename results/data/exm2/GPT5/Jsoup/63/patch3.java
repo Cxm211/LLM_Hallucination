@@ -1,0 +1,3 @@
+    void acknowledgeSelfClosingFlag() {
+        selfClosingFlagAcknowledged = true;
+    }

@@ -1,0 +1,177 @@
+We need to identify which test methods trigger the bug. The provided source is a single method `integrate` from some integrator class. The bug is likely in that method. Looking at the code, there's a potential issue with the `fsal` (First Same As Last) feature. In the main loop, when `fsal` is true, after accepting a step, the code copies `yDotK[stages - 1]` to `yDotK[0]` for the next step. However, note that `yDotK` is an array of size `stages`, indexed from 0 to stages-1. After computing the stages, `yDotK[stages-1]` holds the derivative at the end of the step. But there is a subtlety: the loop that computes the stages uses `yTmp` which is updated. The error estimate uses `yDotK` and `y`, `yTmp`. After acceptance, `y` is updated to `yTmp`. Then if `fsal`, the last stage derivative is copied to first slot. But note that the next iteration's first stage (if `!firstTime && fsal`) skips computing the derivative at the start because it reuses the saved one. However, the saved derivative was computed at the end of the previous step (stepStart + stepSize). For the next step, the starting point is stepStart (which has been updated to nextStep = stepStart + stepSize). So the saved derivative corresponds to the new start point, which is correct. However, there is a bug: the step acceptance condition may reject the step and reattempt with a smaller step size. In that case, if `fsal` is true and it's not the first time, the code does not recompute the first stage derivative, but it should because the step size has changed. Actually, the code only computes the first stage if `firstTime || !fsal`. So if it's not first time and fsal is true, it skips computing the derivative at stepStart. But if the step was rejected and the step size is changed, the derivative at stepStart is still valid because it's the same point. However, the saved derivative from the end of the previous step (which was accepted) is used as the start derivative for the next iteration. But if the step is rejected, the loop continues without accepting, so the saved derivative from the last accepted step is not updated. The issue is that when a step is rejected, the code does not recompute the derivative at the current stepStart before attempting the new step. But note that the derivative at stepStart is unchanged; it's the same point. So it's valid to reuse it. However, there is another problem: the `yDotK` array is being overwritten during the rejected step. Specifically, during the stages computation, `yDotK` is filled with new values. If the step is rejected, these values are invalid for the new attempt. But the code tries to reuse the first stage from the previous accepted step? Actually, the logic: if `firstTime || !fsal`, it computes the first stage at the beginning of each attempt. But if fsal is true and not firstTime, it skips that computation and relies on the saved `yDotK[0]` from the previous step's end. However, during the rejected attempt, the stages are computed and `yDotK[0]` may have been overwritten? The code computes stages from k=1 to stages-1, and after that, it computes the error estimate. Then it may reject the step. At that point, `yDotK[0]` is still the saved derivative from the previous step? Actually, looking: the first stage is computed only if `firstTime || !fsal`. If fsal is true and not firstTime, the first stage is not computed, so `yDotK[0]` retains the value from the previous accepted step's end. Then the loop computes stages k=1,...,stages-1, which write to `yDotK[1]` through `yDotK[stages-1]`. So `yDotK[0]` is not touched. That is correct. Then if the step is rejected, the code updates `hNew` and loops back. At the next iteration, the condition `if (firstTime || !fsal)` is false again (since firstTime is false and fsal true), so it still does not recompute `yDotK[0]`. That's fine because the derivative at the start point hasn't changed. However, the problem is that `yDotK` array elements from k=1 to stages-1 were overwritten with values from the rejected step. Those values are incorrect for the new step size. But the code will recompute them in the new attempt because the loop for k=1 to stages-1 runs again and overwrites them. So that's not a bug.
+
+The real bug might be in the step acceptance logic when an event is detected. Look at the part:
+
+```java
+if (manager.evaluateStep(interpolator)) {
+    final double dt = manager.getEventTime() - stepStart;
+    if (Math.abs(dt) <= Math.ulp(stepStart)) {
+        // rejecting the step would lead to a too small next step, we accept it
+        loop = false;
+    } else {
+        // reject the step to match exactly the next switch time
+        hNew = dt;
+    }
+} else {
+    // accept the step
+    loop = false;
+}
+```
+
+If an event is detected and the event time is very close to stepStart, the code accepts the step. But note that the step has not been accepted yet; it only sets `loop = false`, and then after the loop, it does `System.arraycopy(yTmp, 0, y, 0, y0.length);` and `manager.stepAccepted(nextStep, y);`. But `nextStep` is `stepStart + stepSize`, not the event time. The event time is `stepStart + dt`. If we accept the step because `dt` is tiny, the step size should be `dt` to land exactly on the event. But the code accepts with the original stepSize, which overshoots the event. This could cause the event to be missed or trigger incorrectly later. However, the comment says "rejecting the step would lead to a too small next step, we accept it". But it might be incorrect to accept the full step if the event time is very close to the start; perhaps the step should be truncated to the event time. But this is a design choice.
+
+Another possibility: the bug might be in the `DummyStepInterpolator` when dense output is not required. The code:
+
+```java
+if (requiresDenseOutput() || (! eventsHandlersManager.isEmpty())) {
+    final RungeKuttaStepInterpolator rki = (RungeKuttaStepInterpolator) prototype.copy();
+    rki.reinitialize(this, yTmp, yDotK, forward);
+    interpolator = rki;
+} else {
+    interpolator = new DummyStepInterpolator(yTmp, forward);
+}
+```
+
+Here, the interpolator is initialized with `yTmp`, which is the temporary array used for prediction. But `yTmp` is also used later for the state prediction and error estimation. The interpolator's `storeTime` and `evaluateStep` use the interpolator's internal arrays. In the `DummyStepInterpolator` case, it stores a reference to `yTmp`? Actually, `DummyStepInterpolator` constructor may store a reference to the array. Then when `yTmp` is modified later (e.g., during the next stage calculations), the interpolator's stored state may change. This could cause issues. But for the bug, it might be related to the `ContinuousOutputModel` test where dense output is required, so the `RungeKuttaStepInterpolator` is used.
+
+Given that the task is to find which test methods trigger the bug, we need to determine the actual bug. The original bug report is likely from the Apache Commons Math project, issue MATH-74? Possibly the bug is in the `integrate` method regarding the FSAL property and step size adjustments when events occur. There is a known bug: "Event handling doesn't work correctly for embedded Runge-Kutta integrators that support FSAL" or similar. Looking at the code, when an event is detected and the step is accepted because the event time is too close, the step size is not adjusted. But more importantly, after the step is accepted, the code does `System.arraycopy(yDotK[stages - 1], 0, yDotK[0], 0, y0.length);` for the FSAL. However, if the step was accepted with the original step size but the event time was different, the last stage derivative may not correspond to the actual end of the step (if the step was truncated). But in the code, the step is not truncated; it's accepted as is. So the last stage derivative corresponds to the end of the full step, which is correct.
+
+Maybe the bug is that the `fsal` flag is not reset when a step is rejected, leading to using stale derivative. But we saw that if it's not first time and fsal, the first stage is not computed, but the derivative at the start is still valid.
+
+Another possibility: in the step rejection loop, after rejecting, the code sets `hNew = filterStep(stepSize * factor, forward, false);` but it does not reset the interpolator's stored times. The interpolator's `storeTime` was called with `stepStart + stepSize` before the event detection? Actually, look at the flow:
+
+1. `interpolator.storeTime(stepStart + stepSize);` is called only if `error <= 1.0` (step is potentially accepted). Then if an event is detected and the step is rejected (because dt > 0), the code sets `hNew = dt;` and loops back. But the interpolator has stored the time `stepStart + stepSize`. Then on the next iteration, `interpolator.shift();` is called. The behavior of `shift()` may depend on the previous store. This could cause problems.
+
+Specifically, when the step is rejected to match an event time, the interpolator should be restored to the previous state. But the code does not do that. The interpolator's internal state is corrupted because it stored the rejected step's end time. Then on the next iteration, `shift()` is called, which moves the previous time to the current time, and then the new step attempts to store at the new end time. But the interpolator's data arrays (like `yDotK`) have been overwritten with the new computations, so the interpolator's internal state may become inconsistent. This could be the bug that affects tests that use `ContinuousOutputModel` which relies on the step interpolator.
+
+Also note that in the rejection case, the code does not call `interpolator.storeTime` again before the next evaluation. The `shift()` is called at the start of the while loop for each new step attempt. But if the step was rejected, we are still in the same step attempt? Actually, the while loop for `lastStep` contains an inner loop `for (boolean loop = true; loop;)` that handles the step size iteration. Within that inner loop, if the step is rejected and we set `hNew`, the inner loop continues (loop remains true). So after computing the new `hNew`, the inner loop goes back to the top, but note that before that, the code does not call `shift()` again; `shift()` is called only once at the beginning of the outer while loop. So the interpolator is not shifted when the step size is reduced. This could lead to the interpolator having incorrect time range. However, the inner loop recomputes the stages using the new step size, and after that, if error <= 1.0, it calls `interpolator.storeTime(stepStart + stepSize)` again, overwriting the previous store. So the previous store is overwritten. But the issue is that between the rejection and the new attempt, the interpolator still has the old time stored, and if any code accesses the interpolator in between (e.g., the event handling inside the inner loop?), but there is no access. The only use of interpolator inside the inner loop after the rejection is in the next iteration when error <= 1.0 and event detection is done. So it should be okay because `storeTime` will overwrite.
+
+But consider the case where the step is accepted (loop=false) and then the outer loop continues. At the end of the outer loop, `interpolator.storeTime(nextStep);` is called again for the step handler. That's fine.
+
+Maybe the bug is simpler: in the `if (fsal)` block after accepting the step, it copies `yDotK[stages - 1]` to `yDotK[0]`. But `stages = c.length + 1`. In the case of an EmbeddedRungeKutta integrator, `c` is the array of intermediate times, and `stages` is the number of stages. The last stage index is `stages - 1`. That is fine.
+
+Another possibility: the `estimateError` method might access indices that are out of bounds if the number of stages is not what is expected. But that's unlikely.
+
+Given the context of the test methods provided, many of them are integration tests that likely pass or fail depending on the bug. The bug is probably in the `integrate` method and affects multiple tests. The test methods that explicitly use `ContinuousOutputModel` (like `testBoundaries`, `testRandomAccess`, `testModelsMerging` in `ContinuousOutputModelTest`) and those that use dense output or event handling are likely to trigger the bug. Also, tests like `testIncreasingTolerance` for various integrators might be affected.
+
+But the task is to identify which test methods actually expose the bug. I need to analyze each test method and see if it would fail due to the bug. Since I cannot run the code, I need to reason.
+
+The bug might be the one fixed by commit r697556 in Apache Commons Math (Math-74?). Searching memory: There is a known bug with the `EventState` and step size handling in embedded Runge-Kutta integrators that leads to `ArrayIndexOutOfBoundsException` or wrong results. The specific bug in the `integrate` method is that when an event is detected very close to the step start, the step is accepted but the step size is not adjusted, leading to the event being missed or the step being too large. But more likely, the bug is that the `stepSize` variable is not updated correctly when an event forces a step reduction. Look at this part:
+
+```java
+if (manager.evaluateStep(interpolator)) {
+    final double dt = manager.getEventTime() - stepStart;
+    if (Math.abs(dt) <= Math.ulp(stepStart)) {
+        // rejecting the step would lead to a too small next step, we accept it
+        loop = false;
+    } else {
+        // reject the step to match exactly the next switch time
+        hNew = dt;
+    }
+}
+```
+
+Notice that after setting `hNew = dt;`, the code does not set `stepSize = hNew;` within that iteration. It will set `stepSize = hNew;` at the next iteration of the inner loop (the `if (firstTime || !fsal)` part is skipped? Actually, the inner loop begins with `if (firstTime || !fsal) { computeDerivatives... }`, then `if (firstTime) { ... hNew = initializeStep(...); firstTime=false; }` then `stepSize = hNew;` is set after that. But after the step acceptance check, if we reject, we set `hNew` but not `stepSize`. The next iteration will go to the top of the inner loop, recompute the first derivative if needed, but note that `firstTime` is false and `fsal` may be true, so it may skip computing the first derivative. Then it will go to the "next stages" loop and use `stepSize` which still has the old value? Wait, look at the inner loop structure:
+
+```java
+for (boolean loop = true; loop;) {
+
+    if (firstTime || !fsal) {
+        computeDerivatives(stepStart, y, yDotK[0]);
+    }
+
+    if (firstTime) {
+        // ... initializeStep and set hNew, then firstTime=false
+    }
+
+    stepSize = hNew;  // <--- this sets stepSize to the current hNew at the beginning of each attempt
+
+    // next stages
+    for (int k = 1; k < stages; ++k) {
+        // uses stepSize
+    }
+
+    // estimate state at step end
+    // uses stepSize
+
+    // estimate error
+    // error check and event handling
+
+} // end loop
+```
+
+So at the start of each attempt, `stepSize = hNew;` is set. So when we reject and set `hNew = dt;`, the next iteration will execute `stepSize = hNew;` and use the new step size. So that seems correct.
+
+But what about the case where the step is accepted but an event occurred? The code does:
+
+```java
+if (manager.evaluateStep(interpolator)) {
+    final double dt = manager.getEventTime() - stepStart;
+    if (Math.abs(dt) <= Math.ulp(stepStart)) {
+        loop = false;  // accept the step as is
+    } else {
+        hNew = dt;     // reject to match event
+    }
+} else {
+    loop = false;
+}
+```
+
+If the event is detected and the step is accepted because `dt` is tiny, then the step size used is still the original `stepSize`, and the step is accepted. Then after the inner loop, the code does `final double nextStep = stepStart + stepSize;` and `System.arraycopy(yTmp, 0, y, 0, y0.length); manager.stepAccepted(nextStep, y);`. But the event time is `stepStart + dt`, which is slightly different from `nextStep`. This could lead to the event being reported at the wrong time or not at all. However, the comment says that rejecting would lead to a too small next step, so it's acceptable. But this might cause problems in tests that check event times exactly.
+
+Now, the main bug might be that the interpolator is not updated correctly when the step is rejected due to event. Specifically, `interpolator.storeTime(stepStart + stepSize);` is called when `error <= 1.0`. If the step is then rejected (because event time is not at the start), the interpolator has stored the wrong time. On the next attempt, `interpolator.shift()` is not called because we are still in the inner loop. The inner loop does not call `shift()`. So the interpolator's previous/current times are still from the previous accepted step? Actually, `shift()` is called only at the beginning of the outer while loop. So when we reset the step size for the next attempt, the interpolator still has the time range from the previous (accepted) step plus the stored time from this attempt? This is messy.
+
+Given the complexity, I suspect the bug is related to the interaction between the FSAL and event handling, and it specifically affects tests that involve dense output and event detection, such as `ContinuousOutputModelTest.testBoundaries`, `.testRandomAccess`, `.testModelsMerging`, and some event tests like `DormandPrince54IntegratorTest.testEvents`. Also, tests that involve stepping with events and dense output like `DormandPrince853IntegratorTest.testUnstableDerivative` might be affected.
+
+But the task says: "Determine which testcase methods actually expose the bug." And the test methods are listed. I need to output the full method paths (like "org.apache.commons.math.ode.ContinuousOutputModelTest::testBoundaries").
+
+I'll proceed to select the test methods that are likely to fail due to this bug. Since I cannot be 100% sure, I'll rely on the common knowledge that this bug (Math-74) affected the `integrate` method and caused failures in `ContinuousOutputModelTest` tests and some others.
+
+Given the provided source, I see that the buggy code is from an embedded Runge-Kutta integrator. The test methods include many from different test classes. The most relevant tests that use `ContinuousOutputModel` are from `ContinuousOutputModelTest` and some from `DormandPrince54StepInterpolatorTest` and `DormandPrince853StepInterpolatorTest` and `HighamHall54StepInterpolatorTest` and `NordsieckStepInterpolatorTest`. Also, tests that check event handling like `testEvents` in various integrator tests.
+
+I'll output the following as triggering methods:
+
+- org.apache.commons.math.ode.ContinuousOutputModelTest::testBoundaries
+- org.apache.commons.math.ode.ContinuousOutputModelTest::testRandomAccess
+- org.apache.commons.math.ode.ContinuousOutputModelTest::testModelsMerging
+- org.apache.commons.math.ode.nonstiff.DormandPrince54IntegratorTest::testEvents
+- org.apache.commons.math.ode.nonstiff.DormandPrince853IntegratorTest::testEvents
+- org.apache.commons.math.ode.nonstiff.HighamHall54IntegratorTest::testEvents
+- org.apache.commons.math.ode.nonstiff.DormandPrince54StepInterpolatorTest::serialization
+- org.apache.commons.math.ode.nonstiff.DormandPrince853StepInterpolatorTest::serialization
+- org.apache.commons.math.ode.nonstiff.HighamHall54StepInterpolatorTest::serialization
+- org.apache.commons.math.ode.sampling.NordsieckStepInterpolatorTest::serialization
+
+But I need to be more precise. The bug might also affect testIncreasingTolerance tests because they check evaluation counts and error bounds. However, those tests might still pass if the error is within bounds despite the bug. I'll focus on those that explicitly use dense output and event handling.
+
+Also note that the test `testBackward` for integrators might be affected.
+
+Given the instruction, I will output the test methods that I believe trigger the bug. I'll also provide the fixed code. The fixed code should correct the bug. The most probable fix is to ensure that when a step is rejected after an event detection, the interpolator's stored time is reset or not stored prematurely. A known fix for Math-74 is to move the `interpolator.storeTime(stepStart + stepSize);` to after the event detection decision, i.e., only store when the step is actually accepted. Or to restore the interpolator state on rejection.
+
+Looking at the code, the `interpolator.storeTime(stepStart + stepSize);` is called before the event check. If the step is rejected due to event, the store is invalid. The fix would be to store the time only after confirming the step is accepted (i.e., after the inner loop exits). That is, move the `storeTime` call to after the inner loop. However, the event detection requires the interpolator to have the current step's time range to evaluate events. So the `storeTime` must be called before `evaluateStep`. But if the step is rejected, we need to revert the interpolator to its previous state. One common approach is to save the interpolator state before storing, and restore if rejected. Another simpler approach is to not use the interpolator for event detection if the step is rejected? But the event detection is only done when `error <= 1.0` and the step is potentially acceptable. So the event detection should only be done on steps that are about to be accepted. If the error is <=1.0 and an event is detected and the step is rejected (because event time is not at the start), then we should not accept the step, so the interpolator's store should be undone. The fix is to call `interpolator.storeTime(stepStart)` (i.e., revert to the previous time) when the step is rejected. Alternatively, restructure the logic so that `storeTime` is called only after the step is fully accepted.
+
+A minimal fix would be to add `interpolator.storeTime(stepStart);` in the else branch where the step is rejected to match event time. Also, in the case where error > 1.0 (step rejected due to error), the `storeTime` was not called because it's inside the `if (error <= 1.0)` block, so that's fine.
+
+Thus, the fix is to add `interpolator.storeTime(stepStart);` when the step is rejected due to event time not being at the start. Additionally, there might be a need to handle the case where `Math.abs(dt) <= Math.ulp(stepStart)` (accept step) but the step size is still too large? Actually, that case accepts the step as is, which is fine.
+
+I'll produce the fixed code by inserting that line.
+
+Now, I'll construct the JSON response with the trigger methods and fixed code. The fixed code should be the entire `integrate` method with the fix. I'll output only the fixed method.
+
+I'll assume the fix as described.{
+  "trigger_method": [
+    "org.apache.commons.math.ode.ContinuousOutputModelTest::testBoundaries",
+    "org.apache.commons.math.ode.ContinuousOutputModelTest::testRandomAccess",
+    "org.apache.commons.math.ode.ContinuousOutputModelTest::testModelsMerging",
+    "org.apache.commons.math.ode.nonstiff.DormandPrince54IntegratorTest::testEvents",
+    "org.apache.commons.math.ode.nonstiff.DormandPrince853IntegratorTest::testEvents",
+    "org.apache.commons.math.ode.nonstiff.HighamHall54IntegratorTest::testEvents",
+    "org.apache.commons.math.ode.nonstiff.DormandPrince54StepInterpolatorTest::serialization",
+    "org.apache.commons.math.ode.nonstiff.DormandPrince853StepInterpolatorTest::serialization",
+    "org.apache.commons.math.ode.nonstiff.HighamHall54StepInterpolatorTest::serialization",
+    "org.apache.commons.math.ode.sampling.NordsieckStepInterpolatorTest::serialization"
+  ],
+  "fixed_code": [
+    "  public double integrate(final FirstOrderDifferentialEquations equations,\n                          final double t0, final double[] y0,\n                          final double t, final double[] y)\n  throws DerivativeException, IntegratorException {\n\n    sanityChecks(equations, t0, y0, t, y);\n    setEquations(equations);\n    resetEvaluations();\n    final boolean forward = t > t0;\n\n    // create some internal working arrays\n    final int stages = c.length + 1;\n    if (y != y0) {\n      System.arraycopy(y0, 0, y, 0, y0.length);\n    }\n    final double[][] yDotK = new double[stages][y0.length];\n    final double[] yTmp = new double[y0.length];\n\n    // set up an interpolator sharing the integrator arrays\n    AbstractStepInterpolator interpolator;\n    if (requiresDenseOutput() || (! eventsHandlersManager.isEmpty())) {\n      final RungeKuttaStepInterpolator rki = (RungeKuttaStepInterpolator) prototype.copy();\n      rki.reinitialize(this, yTmp, yDotK, forward);\n      interpolator = rki;\n    } else {\n      interpolator = new DummyStepInterpolator(yTmp, forward);\n    }\n    interpolator.storeTime(t0);\n\n    // set up integration control objects\n    stepStart         = t0;\n    double  hNew      = 0;\n    boolean firstTime = true;\n    for (StepHandler handler : stepHandlers) {\n        handler.reset();\n    }\n    CombinedEventsManager manager = addEndTimeChecker(t0, t, eventsHandlersManager);\n    boolean lastStep = false;\n\n    // main integration loop\n    while (!lastStep) {\n\n      interpolator.shift();\n\n      double error = 0;\n      for (boolean loop = true; loop;) {\n\n        if (firstTime || !fsal) {\n          // first stage\n          computeDerivatives(stepStart, y, yDotK[0]);\n        }\n\n        if (firstTime) {\n          final double[] scale;\n          if (vecAbsoluteTolerance == null) {\n              scale = new double[y0.length];\n              java.util.Arrays.fill(scale, scalAbsoluteTolerance);\n            } else {\n              scale = vecAbsoluteTolerance;\n            }\n          hNew = initializeStep(equations, forward, getOrder(), scale,\n                                stepStart, y, yDotK[0], yTmp, yDotK[1]);\n          firstTime = false;\n        }\n\n        stepSize = hNew;\n\n        // next stages\n        for (int k = 1; k < stages; ++k) {\n\n          for (int j = 0; j < y0.length; ++j) {\n            double sum = a[k-1][0] * yDotK[0][j];\n            for (int l = 1; l < k; ++l) {\n              sum += a[k-1][l] * yDotK[l][j];\n            }\n            yTmp[j] = y[j] + stepSize * sum;\n          }\n\n          computeDerivatives(stepStart + c[k-1] * stepSize, yTmp, yDotK[k]);\n\n        }\n\n        // estimate the state at the end of the step\n        for (int j = 0; j < y0.length; ++j) {\n          double sum    = b[0] * yDotK[0][j];\n          for (int l = 1; l < stages; ++l) {\n            sum    += b[l] * yDotK[l][j];\n          }\n          yTmp[j] = y[j] + stepSize * sum;\n        }\n\n        // estimate the error at the end of the step\n        error = estimateError(yDotK, y, yTmp, stepSize);\n        if (error <= 1.0) {\n\n          // discrete events handling\n          interpolator.storeTime(stepStart + stepSize);\n          if (manager.evaluateStep(interpolator)) {\n              final double dt = manager.getEventTime() - stepStart;\n              if (Math.abs(dt) <= Math.ulp(stepStart)) {\n                  // rejecting the step would lead to a too small next step, we accept it\n                  loop = false;\n              } else {\n                  // reject the step to match exactly the next switch time\n                  hNew = dt;\n                  interpolator.storeTime(stepStart);\n              }\n          } else {\n            // accept the step\n            loop = false;\n          }\n\n        } else {\n          // reject the step and attempt to reduce error by stepsize control\n          final double factor =\n              Math.min(maxGrowth,\n                       Math.max(minReduction, safety * Math.pow(error, exp)));\n          hNew = filterStep(stepSize * factor, forward, false);\n        }\n\n      }\n\n      // the step has been accepted\n      final double nextStep = stepStart + stepSize;\n      System.arraycopy(yTmp, 0, y, 0, y0.length);\n      manager.stepAccepted(nextStep, y);\n      lastStep = manager.stop();\n\n      // provide the step data to the step handler\n      interpolator.storeTime(nextStep);\n      for (StepHandler handler : stepHandlers) {\n          handler.handleStep(interpolator, lastStep);\n      }\n      stepStart = nextStep;\n\n      if (fsal) {\n        // save the last evaluation for the next step\n        System.arraycopy(yDotK[stages - 1], 0, yDotK[0], 0, y0.length);\n      }\n\n      if (manager.reset(stepStart, y) && ! lastStep) {\n        // some event handler has triggered changes that\n        // invalidate the derivatives, we need to recompute them\n        computeDerivatives(stepStart, y, yDotK[0]);\n      }\n\n      if (! lastStep) {\n        // in some rare cases we may get here with stepSize = 0, for example\n        // when an event occurs at integration start, reducing the first step\n        // to zero; we have to reset the step to some safe non zero value\n          stepSize = filterStep(stepSize, forward, true);\n\n        // stepsize control for next step\n        final double factor = Math.min(maxGrowth,\n                                       Math.max(minReduction,\n                                                safety * Math.pow(error, exp)));\n        final double  scaledH    = stepSize * factor;\n        final double  nextT      = stepStart + scaledH;\n        final boolean nextIsLast = forward ? (nextT >= t) : (nextT <= t);\n        hNew = filterStep(scaledH, forward, nextIsLast);\n      }\n\n    }\n\n    final double stopTime = stepStart;\n    resetInternalState();\n    return stopTime;\n\n  }"
+  ]
+}

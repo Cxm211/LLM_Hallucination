@@ -1,0 +1,3 @@
+public <T> T mock(Class<T> classToMock, MockSettings mockSettings) {
+    return mock(classToMock, mockSettings, true);
+}

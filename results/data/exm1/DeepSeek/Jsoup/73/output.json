@@ -1,0 +1,389 @@
+We are given a Java source file with a buggy `W3CBuilder` class (inner class of `W3CDom`) and several test methods. The task is to identify which test methods actually expose the bug and produce a minimal fix.
+
+Looking at the provided code, the `W3CBuilder` class has methods `head`, `tail`, and `updateNamespaces`. The bug is likely related to namespace handling, especially in `updateNamespaces` and how namespaces are used in `head`. There's a known issue in Jsoup's W3CDom conversion that fails to properly handle default namespaces or namespace prefixes.
+
+From the test methods:
+- `simpleConversion`: Basic conversion, likely works if no namespaces.
+- `convertsGoogle`: Tests conversion of a Google page, includes checking namespace of html element (`assertEquals(null, htmlEl.getNamespaceURI())`). This might expose issues with namespace handling.
+- `convertsGoogleLocation`: Checks document location.
+- `namespacePreservation`: Extensive namespace testing with XHTML, expects correct namespaces for elements like `html`, `head`, `epub:title`, etc.
+- `handlesInvalidAttributeNames`: Tests attribute names with quotes.
+
+The bug in `head` method: When creating an element, it uses `doc.createElementNS(namespace, sourceEl.tagName())`. However, if the tag name has a prefix (like `epub:title`), the `tagName` includes the prefix. The W3C DOM expects that when using `createElementNS`, the first argument (namespace) is determined from the prefix's mapping, and the second argument should be the qualified name (including prefix). That's fine. But the problem might be in `updateNamespaces`: it extracts the prefix from the tag name using `substring(0, pos)` where `pos = el.tagName().indexOf(":")`. If there is a namespace declaration with prefix, it's added to `namespaces` map. However, the bug might be that for elements with a namespace but no explicit prefix (e.g., default namespace `xmlns="..."`), the prefix is empty string, and the namespace is stored with key `""`. Then in `head`, when getting `namespace = namespaces.get(prefix)`, for default namespace we get the correct namespace URI. But the tag name does not include a prefix, so `createElementNS(namespace, "html")` works. However, for elements with explicit prefix like `epub:title`, the prefix is "epub", and the tag name is "epub:title". That should work if the namespace mapping exists.
+
+But wait: the test `namespacePreservation` expects `epub:title` to have namespace `http://www.idpf.org/2007/ops` and nodeName `epub:title`. According to the W3C DOM, `createElementNS(namespace, qualifiedName)` produces an element with localName derived from qualifiedName (after colon) and namespace URI given. That seems correct.
+
+However, there is a known bug in Jsoup's W3CBuilder related to updating namespaces: The `updateNamespaces` method only scans the current element's attributes for namespace declarations. But namespace declarations apply to the current element and its descendants. In the `head` method, when processing child elements, the parent's namespace declarations should be inherited. Currently, the `namespaces` map is a field of the builder? It's not defined in the snippet, but presumably it's a map per builder. The bug might be that the map is cleared or not properly propagated. In this version, `updateNamespaces` adds to a map, but that map is shared across all elements. Since `updateNamespaces` is called for each element, it will add namespace declarations from each element. That could cause conflicts if the same prefix is redefined. Also, the default namespace from an ancestor should be inherited. But currently, if an element doesn't have an `xmlns` attribute, the default namespace from the document is not used. So elements like `html` might not get the correct namespace if the default namespace is inherited.
+
+In `namespacePreservation`, the root `<html xmlns="http://www.w3.org/1999/xhtml">` has a default namespace declaration. The `updateNamespaces` for the html element will add `"" -> "http://www.w3.org/1999/xhtml"`. That's fine. The head element doesn't have its own namespace, so it will inherit the default namespace from parent. But `updateNamespaces` for head will not find any namespace attributes, so it returns prefix from tag name (none). Then `head` method gets `namespace = namespaces.get("")` which should be the inherited default namespace. That seems correct. However, there is an issue: `updateNamespaces` is called for every element, and it checks all attributes. For elements that do not have any namespace attributes, it will not change the map, but it still returns the prefix from tag name. So the inherited default namespace should be in the map. So the logic appears okay.
+
+But there is another known bug: The `tail` method checks `if (source instanceof org.jsoup.nodes.Element && dest.getParentNode() instanceof Element)`. That's fine.
+
+It might be that the bug is in how `updateNamespaces` handles the default namespace when it is declared on an element: it puts it with key `""`. But for child elements without explicit namespace declaration, the prefix returned is `""` (since no colon). Then `namespaces.get("")` will retrieve the last default namespace added in the document order. That might be incorrect if there are nested default namespaces. In the presence of nested default namespace declarations, the correct behavior is to use the closest ancestor's default namespace (or the current element's if it has one). But the current implementation uses a flat map, so later declarations override earlier ones. This could cause issues in `namespacePreservation` where there are multiple default namespace changes.
+
+Let's examine the `namespacePreservation` test more closely. The file namespaces.xhtml likely has something like:
+
+```html
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>...</head>
+<body>
+  <section xmlns="urn:test">...</section>   // <x:section>? Actually test expects x:section with urn:test
+  <epub:title xmlns:epub="http://www.idpf.org/2007/ops">Check</epub:title>
+  <svg xmlns="http://www.w3.org/2000/svg">...</svg>
+  <picture xmlns="http://www.w3.org/1999/xhtml">...</picture>
+</body>
+</html>
+```
+
+But the test does: `Node epubTitle = htmlEl.getChildNodes().item(2).getChildNodes().item(3);` that's a bit complex. The main issue might be that the default namespace is not properly inherited after a redefinition.
+
+For example, suppose the document has: `<html xmlns="http://www.w3.org/1999/xhtml"><body><p xmlns="other">...</p><span>...</span></body></html>`. The `<p>` has default namespace "other". The `<span>` should inherit the default namespace of `<body>` which is "http://www.w3.org/1999/xhtml". In the current implementation, when processing `<p>`, `updateNamespaces` adds `"" -> "other"`, overriding the previous default namespace. Then when processing `<span>`, it retrieves `namespaces.get("")` which returns "other" instead of "http://www.w3.org/1999/xhtml". That is a bug. This is likely the issue that causes `namespacePreservation` to fail.
+
+Also, the test `convertsGoogle` expects `htmlEl.getNamespaceURI()` to be null. In Google's page, maybe there is no namespace declaration, so `namespaces` map will not have a default namespace. The prefix returned is "", so `namespace = namespaces.get("")` returns null, and `createElementNS(null, "html")` will set namespaceURI to null. That works. So that test might pass.
+
+But the bug is that `updateNamespaces` modifies the global `namespaces` map in a way that doesn't respect scope.
+
+Thus, the fix should involve using a stack or properly scoping namespace declarations. For a minimal fix, we can change the `namespaces` map to be per element, or we can store the default namespace in a variable that is updated only when an element has its own namespace declaration. However, the simplest fix is to not rely on a global map but to compute namespace for each element by scanning up the parent chain. But that would be more intrusive.
+
+Another known fix for this bug (Jsoup issue #1578) is to change `updateNamespaces` to store namespace declarations locally and propagate them. But we need a minimal fix.
+
+Looking at the provided code, we don't have the full class definition, but we assume `namespaces` is a `HashMap<String,String>` field of the W3CBuilder. The bug is that `updateNamespaces` puts namespace mappings into the map, which accumulates all declarations. To fix, we should clear or update only the current scope. A common fix is to use a stack of maps, or to save the current state before processing children and restore it. But since we have only `head` and `tail`, we can modify `head` to store the current map before processing an element, and revert in `tail`. But that might be complex.
+
+Alternatively, the fix could be to rename `namespaces` to something like `namespacesStack` and use a `Deque` of maps. But that changes the structure.
+
+Given the test cases, we need to identify which ones actually expose the bug. Let's trace each test with the buggy code:
+
+1. `simpleConversion`: No namespaces involved. Should pass.
+
+2. `convertsGoogle`: The Google page likely has no namespace declarations (HTML5). The `html` element's namespace will be null. The test expects null. So it should pass.
+
+3. `convertsGoogleLocation`: Just checks document URI. Should pass.
+
+4. `namespacePreservation`: This test involves multiple namespace declarations. It will likely fail because the default namespace is not correctly inherited after redefinition. For example, after processing an element with `xmlns="urn:test"`, the map has `"" -> "urn:test"`. Then later elements that should inherit the original xhtml namespace will get `urn:test` instead. So this test will fail.
+
+5. `handlesInvalidAttributeNames`: This test is about invalid attribute names (quote characters). The `copyAttributes` method (not shown) might handle them, but the test might fail due to namespace issues? Probably not. It just calls `fromJsoup`, which may throw an exception if the attribute name is invalid. The test expects to not throw? It just calls the method. Possibly it passes.
+
+Thus, only `namespacePreservation` likely triggers the bug. However, we should also consider if `convertsGoogle` might fail if there are namespace declarations? Unlikely.
+
+But let's double-check: The `convertsGoogle` test does `assertEquals(null, htmlEl.getNamespaceURI())`. In the buggy code, if the Google page has any `xmlns` attribute (unlikely), then namespace would be set and test would fail. But we assume it doesn't.
+
+Therefore, the trigger method is `namespacePreservation`.
+
+Now, we need to fix the bug. The minimal fix is to change `updateNamespaces` to update the map only for the current element and its descendants, but we need to ensure that the map is scoped. One approach: before processing a child, save the current state of the map for the keys that might be overridden, and restore when tailing. But that would require storing a copy. Alternatively, we can change the logic so that we do not rely on a global map; instead, we compute the namespace for each element by walking up the ancestors. But that might be slower.
+
+Given that the `head` and `tail` are called in a depth-first traversal, we can maintain a stack of maps. In `head`, when we encounter an element, we create a new map that starts with the parent's map (the previous map) and add any new namespace declarations from this element. Then we set `namespaces` to this new map. In `tail`, we revert to the previous map. This is a standard approach.
+
+We need to modify the `head` and `tail` methods, and perhaps add a field `Deque<Map<String,String>> nsStack`. But we are asked to produce fixed code for all functions in the input. The input includes only the W3CBuilder class? Actually the input shows the buggy code portion: it includes the W3CBuilder class (the whole class? It shows the methods and then the test cases). So we must fix the W3CBuilder class. Also, there might be other missing parts like the `namespaces` field declaration. The snippet does not show the full class declaration. But we can assume there is a `Map<String, String> namespaces` field. For a minimal fix, we can change the logic to not use a flat map but to compute namespace by scanning ancestors. However, that would require access to the parent jsoup element, which we have in `head` we have the source element. We could traverse up the jsoup tree to find the closest namespace declaration.
+
+But a simpler fix that has been used in similar issues: In `updateNamespaces`, instead of putting all declarations into a global map, we should put only the current element's declarations, and then when resolving, we need to look up the chain. But the current design uses the map as an accumulator. Perhaps the intended design is that the map should only contain the namespace declarations that are in scope at the current position. That's why we need to revert in `tail`. So we need to implement the stack approach.
+
+Let's write the fix:
+
+- Add a `Deque<Map<String, String>> nsStack` field.
+- In `head`, before processing, we create a new map that is a copy of the current top map (or if stack empty, start new), then add the namespaces from the current element, push it, and use it.
+- In `tail`, pop the stack.
+
+But we also need to keep the current `namespaces` variable accessible? We could replace it with the stack and a method to get the current map.
+
+To minimize changes, we can keep the `namespaces` map and in `head` save a copy of the map before adding new declarations, and in `tail` restore it. However, restoring the entire map would be expensive because we need to remove the added keys or replace the map. An easier way: use a stack of maps.
+
+But the input only shows part of the class; we don't see the constructor or fields. We'll need to assume the fields.
+
+Let's propose the following fix:
+
+1. Change the field `namespaces` to be a `Deque<Map<String, String>> namespaceStack`.
+2. In head, for Element, push a new map that is a copy of the current top (or empty if stack empty) and then add the current element's declarations. Then set `namespaces` (or rather the current map) to the top.
+3. In tail, pop the stack.
+
+But this changes the interface of `updateNamespaces`. We'll modify `updateNamespaces` to not use the global map but to add to the current top map. Since we have the map as argument or we access the stack.
+
+Alternatively, a simpler minimal fix: Instead of accumulating all namespace declarations into a single map, we can compute the namespace for each element by walking up the jsoup ancestry. Since we have the source element, we can traverse its parents to find the appropriate namespace. This avoids the need for a stack.
+
+In `head`, for an Element, we can compute the namespace by looking at the element's own attributes for `xmlns` or `xmlns:prefix`, and if not found, look at parent elements. This is more straightforward and doesn't require state management across `head` and `tail`. However, the `updateNamespaces` method currently returns the prefix string, which is used to look up in the map. We could change `updateNamespaces` to directly return the namespace URI by scanning ancestors. That would eliminate the map entirely.
+
+Given that the bug is about namespace scoping, this approach might be more robust.
+
+Let's design:
+
+- In `head`, for an Element, we compute the namespace URI directly by checking the element's attributes for `xmlns` (default) and if not found, traverse up the jsoup parent. Also, if the element has a prefix, we need to find the namespace declaration for that prefix, which should be on the element or an ancestor.
+
+We can implement a helper method `getNamespace(Element el)` that returns the namespace URI.
+
+But note: The element's tag may have a prefix like `epub:title`. The namespace for that prefix must be defined somewhere. According to XML namespaces, the prefix binding can be on the element itself or on an ancestor. So we can search up the hierarchy for an `xmlns:epub` attribute.
+
+For default namespace, we search for `xmlns` attribute.
+
+This eliminates the need for a global map and the `updateNamespaces` method can be simplified. However, `updateNamespaces` is used to collect namespace mappings into a map? It does both: returns the prefix and adds to map. But the map is used only in `head` to get the namespace. So we can replace that logic.
+
+Given the code snippet, we have `updateNamespaces` that returns the prefix and also adds to `namespaces`. We can keep `updateNamespaces` but change its behavior to not use the global map. Instead, we can have it compute the namespace directly, or we can still store the current declarations but scope them.
+
+Since the test `namespacePreservation` involves multiple namespaces, including default namespace changes and prefix-based namespaces, the simplest is to compute namespace by walking ancestors.
+
+Let's implement the fix:
+
+- Remove the `namespaces` map and the `updateNamespaces` method's side effect of adding to the map.
+- Instead, in `head`, for an Element, we compute the namespace by:
+   * Get the element's prefix from tag name (if any).
+   * Search for a namespace declaration for that prefix on the element itself (using `el.attributes().get("xmlns:" + prefix)` or use `xmlns` for default).
+   * If not found, traverse up the parent chain using jsoup's `parent()` method.
+   * Once found, that is the namespace URI.
+
+We need to be careful: The search should be in the jsoup tree, not the W3C DOM tree. Since we are building the W3C tree, we have the source jsoup element. So we can traverse its parents.
+
+Implementation steps:
+
+1. In `head`, remove the call to `updateNamespaces` and the subsequent map lookup.
+2. Write a new method `getNamespace(org.jsoup.nodes.Element el, String prefix)` that returns the namespace URI by scanning ancestors.
+3. Call that method to get the namespace.
+
+But we also need to handle the case where the element has no prefix: default namespace. So we need to find the default namespace for the element.
+
+Also note: The element might have its own `xmlns` attribute overriding the parent's default namespace.
+
+Thus, we implement:
+
+```java
+private String getNamespace(org.jsoup.nodes.Element el, String prefix) {
+    // search for xmlns:prefix or xmlns if prefix empty
+    String attrKey = prefix.isEmpty() ? "xmlns" : "xmlns:" + prefix;
+    // search on element and its ancestors
+    org.jsoup.nodes.Element current = el;
+    while (current != null) {
+        if (current.hasAttr(attrKey)) {
+            return current.attr(attrKey);
+        }
+        current = current.parent();
+    }
+    return null;
+}
+```
+
+Then in `head`:
+
+```java
+if (source instanceof org.jsoup.nodes.Element) {
+    org.jsoup.nodes.Element sourceEl = (org.jsoup.nodes.Element) source;
+    String prefix = updateNamespaces(sourceEl); // we can still use it to get prefix, but remove the side effects
+    // Actually updateNamespaces adds to map, we can modify it to only return prefix.
+    String prefix = getPrefix(sourceEl); // new helper
+    String namespace = getNamespace(sourceEl, prefix);
+    Element el = doc.createElementNS(namespace, sourceEl.tagName());
+    //...
+}
+```
+
+But `updateNamespaces` also adds namespace declarations to the map. We need to remove that. So we change `updateNamespaces` to just return the prefix (or we can rename it). To minimize changes, we can modify `updateNamespaces` to not use the map but to just compute namespace. However, the current `updateNamespaces` returns the prefix, which we still need. So we keep that part, but remove the map put.
+
+Simplify: `updateNamespaces` becomes a method that returns the prefix (unchanged) and does nothing else. Then we compute namespace using the new method.
+
+But note: `updateNamespaces` currently scans all attributes for namespace declarations and adds them to the map. If we remove that, we must ensure that the map is not used elsewhere. It is only used in `head` to get namespace. So we can remove the map field entirely.
+
+Thus, the fix: remove the `namespaces` map field, modify `updateNamespaces` to only return the prefix (no side effects), and add a helper to compute namespace by walking ancestors.
+
+We also need to import necessary classes.
+
+Given the provided snippet only shows methods, we assume the full class has necessary imports. We'll produce the fixed code with minimal changes.
+
+But also note: The `tail` method uses `dest.getParentNode()`. That remains unchanged.
+
+Now, which test methods expose the bug? As reasoned, `namespacePreservation` exposes the namespace scoping bug. The other tests likely pass.
+
+But we should also check if `convertsGoogle` might be affected. In Google page, there might be default namespace? Unlikely. If there is no namespace, `getPrefix` returns "", and `getNamespace` will find no `xmlns` attribute, return null. That matches expected null. So fine.
+
+`handlesInvalidAttributeNames` doesn't involve namespaces.
+
+Thus, only `namespacePreservation` triggers.
+
+Now produce the JSON output.
+
+We need to output:
+
+- trigger_method: list of full paths. The test methods are inside `org.jsoup.helper.W3CDomTest`. So the full path would be `org.jsoup.helper.W3CDomTest.namespacePreservation`.
+
+- fixed_code: list of full Java methods that are fixed. Since the source includes multiple methods (head, tail, updateNamespaces), we need to provide all three fixed methods as strings. Also, we need to include the constructor if it exists? In the input, only the methods are shown, but the constructor is `public W3CBuilder(Document doc)`. That constructor is unchanged. However, we might need to include it because we removed the map. If we removed the map, we should also modify the constructor to not initialize the map. But the input shows the constructor with just `this.doc = doc;`. If we remove the map field, the constructor remains the same. But we need to ensure all code snippets are provided. The instruction says: "fixed_code must include every function from the input, in the same order, regardless of whether it was modified by you." The input shows the W3CBuilder class? Actually, the input shows some lines starting with `public W3CBuilder(Document doc) {`, then methods. It's not a complete class but a fragment. We'll assume the input includes the complete functions to fix: the constructor, head, tail, updateNamespaces. Also, there might be other methods like `copyAttributes`, but they are not shown. We'll fix only the shown functions.
+
+Let's produce the fixed code:
+
+1. Constructor: unchanged.
+
+2. head: modified to compute namespace via ancestor walk.
+
+3. tail: unchanged (but may be adjusted if we remove global state? No need).
+
+4. updateNamespaces: simplified to only return prefix (no map side effect). Also rename to `getPrefix`? But we'll keep name to minimize diff.
+
+But we also need to remove the `namespaces` field. Since the input doesn't show field declaration, we assume it exists. In the fixed code, we should not include it. However, if we don't include the field, the code will not compile. But the output is just the methods as strings; we cannot add field declarations because we are only to output the functions. The instruction says "full corrected implementation of all input functions." That suggests we output the function bodies as they appear in the file. Since the input includes the class definition, we should output the entire class? The example output format shows `fixed_code: ["full fixed_function1 as a JSON string", "full fixed_function2 as a JSON string"]`. It seems we need to output each function separately. But the input provided is a snippet that includes the entire inner class? It starts with `public W3CBuilder(Document doc) {` and then several methods. It's not a complete class; it's the relevant methods. The test cases are separate. So we output each function as a JSON string. So we need to output the constructor, head, tail, updateNamespaces. We must keep them consistent. If we remove the `namespaces` map usage, we must also remove its declaration from the constructor? But the constructor doesn't declare it; it's a field. We cannot include field declarations in function strings. This is ambiguous.
+
+To be safe, we can assume the `namespaces` map is a field that exists. In our fix, we will not use it, but we should not remove it from the code if the original had it. However, we can modify the functions to not use it. The field will be unused, which is fine. So we can keep the constructor unchanged. The `head` and `updateNamespaces` will no longer reference the field. That is acceptable.
+
+Thus, the fixed functions:
+
+- Constructor: same.
+- head: modified to call a new helper `getNamespace` (which we can write inline) or we can compute namespace within head.
+- tail: unchanged.
+- updateNamespaces: modified to return prefix without adding to map.
+
+We can embed the ancestor walk inside `updateNamespaces`? That would change its purpose. Better to keep `updateNamespaces` as returning prefix, and move the namespace resolution to head directly. But to minimize changes, we can modify `head` to not use `namespaces` map and instead resolve namespace by walking ancestors.
+
+Let's write the fixed `head`:
+
+```java
+public void head(org.jsoup.nodes.Node source, int depth) {
+    if (source instanceof org.jsoup.nodes.Element) {
+        org.jsoup.nodes.Element sourceEl = (org.jsoup.nodes.Element) source;
+
+        String prefix = updateNamespaces(sourceEl); // Still returns prefix
+        // Determine namespace by walking ancestors
+        String namespace = null;
+        String searchKey = prefix.isEmpty() ? "xmlns" : "xmlns:" + prefix;
+        org.jsoup.nodes.Element current = sourceEl;
+        while (current != null) {
+            if (current.hasAttr(searchKey)) {
+                namespace = current.attr(searchKey);
+                break;
+            }
+            current = current.parent();
+        }
+        Element el = doc.createElementNS(namespace, sourceEl.tagName());
+        copyAttributes(sourceEl, el);
+        if (dest == null) {
+            doc.appendChild(el);
+        } else {
+            dest.appendChild(el);
+        }
+        dest = el;
+    } else if (source instanceof org.jsoup.nodes.TextNode) {
+        // ... unchanged
+    } // ... other cases unchanged
+}
+```
+
+And `updateNamespaces` becomes:
+
+```java
+private String updateNamespaces(org.jsoup.nodes.Element el) {
+    // just get the prefix from tag name
+    int pos = el.tagName().indexOf(":");
+    return pos > 0 ? el.tagName().substring(0, pos) : "";
+}
+```
+
+This removes the side effect of adding to map.
+
+Now `tail` remains unchanged.
+
+We also need to ensure that the `namespaces` field is not used anywhere else. Since we removed its usage, it's dead code but doesn't harm.
+
+Now, test: `namespacePreservation` should pass because namespace resolution now walks ancestors, correctly inheriting default namespace from the parent.
+
+Let's verify with a scenario: In `namespacePreservation`, after processing `<html xmlns="http://www.w3.org/1999/xhtml">`, the default namespace is "http://www.w3.org/1999/xhtml". When processing `<head>`, it has no xmlns, so it will look up to its parent `<html>` and find the default namespace. Good. Later, when processing `<epub:title xmlns:epub="...">`, the search for prefix "epub" will find it on the element itself. Then later when processing `<picture xmlns="http://www.w3.org/1999/xhtml">`, it declares default namespace again, overriding. That should work.
+
+Thus, the fix is minimal and correct.
+
+Now, which test methods trigger the bug? Only `namespacePreservation`. The other tests should pass with the original code, but we need to ensure they still pass with the fix. They should, as the fix only changes namespace resolution.
+
+One potential issue: In `convertsGoogle`, the html element has no namespace declaration, so `getNamespace` will return null, which is expected.
+
+Now produce JSON.
+
+We need to output the trigger method as `org.jsoup.helper.W3CDomTest.namespacePreservation`.
+
+For fixed_code, we need to output each function as a JSON string. Since the input includes the functions in order: constructor, head, tail, updateNamespaces. We'll output them as strings.
+
+We'll need to escape double quotes and newlines. We'll use proper JSON encoding.
+
+Write each function signature and body exactly as it should appear.
+
+Let's construct:
+
+Constructor:
+```
+public W3CBuilder(Document doc) {
+    this.doc = doc;
+}
+```
+
+Head:
+```
+public void head(org.jsoup.nodes.Node source, int depth) {
+    if (source instanceof org.jsoup.nodes.Element) {
+        org.jsoup.nodes.Element sourceEl = (org.jsoup.nodes.Element) source;
+
+        String prefix = updateNamespaces(sourceEl);
+        // determine namespace by walking ancestors
+        String namespace = null;
+        String searchKey = prefix.isEmpty() ? "xmlns" : "xmlns:" + prefix;
+        org.jsoup.nodes.Element current = sourceEl;
+        while (current != null) {
+            if (current.hasAttr(searchKey)) {
+                namespace = current.attr(searchKey);
+                break;
+            }
+            current = current.parent();
+        }
+        Element el = doc.createElementNS(namespace, sourceEl.tagName());
+        copyAttributes(sourceEl, el);
+        if (dest == null) {
+            doc.appendChild(el);
+        } else {
+            dest.appendChild(el);
+        }
+        dest = el;
+    } else if (source instanceof org.jsoup.nodes.TextNode) {
+        org.jsoup.nodes.TextNode sourceText = (org.jsoup.nodes.TextNode) source;
+        Text text = doc.createTextNode(sourceText.getWholeText());
+        dest.appendChild(text);
+    } else if (source instanceof org.jsoup.nodes.Comment) {
+        org.jsoup.nodes.Comment sourceComment = (org.jsoup.nodes.Comment) source;
+        Comment comment = doc.createComment(sourceComment.getData());
+        dest.appendChild(comment);
+    } else if (source instanceof org.jsoup.nodes.DataNode) {
+        org.jsoup.nodes.DataNode sourceData = (org.jsoup.nodes.DataNode) source;
+        Text node = doc.createTextNode(sourceData.getWholeData());
+        dest.appendChild(node);
+    } else {
+        // unhandled
+    }
+}
+```
+
+Tail:
+```
+public void tail(org.jsoup.nodes.Node source, int depth) {
+    if (source instanceof org.jsoup.nodes.Element && dest.getParentNode() instanceof Element) {
+        dest = (Element) dest.getParentNode();
+    }
+}
+```
+
+UpdateNamespaces:
+```
+private String updateNamespaces(org.jsoup.nodes.Element el) {
+    int pos = el.tagName().indexOf(":");
+    return pos > 0 ? el.tagName().substring(0, pos) : "";
+}
+```
+
+Note: We removed the attribute scanning loop. That's the key fix.
+
+Now we need to produce JSON with these strings.
+
+We'll use `\n` for newlines and escape quotes.
+
+Let's write the fixed_code array in order: constructor, head, tail, updateNamespaces.
+
+Also, ensure we don't include any extra whitespace.
+
+The trigger_method array should contain one element.
+
+Now final JSON.{
+  "trigger_method": [
+    "org.jsoup.helper.W3CDomTest.namespacePreservation"
+  ],
+  "fixed_code": [
+    "public W3CBuilder(Document doc) {\n            this.doc = doc;\n        }",
+    "public void head(org.jsoup.nodes.Node source, int depth) {\n            if (source instanceof org.jsoup.nodes.Element) {\n                org.jsoup.nodes.Element sourceEl = (org.jsoup.nodes.Element) source;\n\n                String prefix = updateNamespaces(sourceEl);\n                String namespace = null;\n                String searchKey = prefix.isEmpty() ? \"xmlns\" : \"xmlns:\" + prefix;\n                org.jsoup.nodes.Element current = sourceEl;\n                while (current != null) {\n                    if (current.hasAttr(searchKey)) {\n                        namespace = current.attr(searchKey);\n                        break;\n                    }\n                    current = current.parent();\n                }\n                Element el = doc.createElementNS(namespace, sourceEl.tagName());\n                copyAttributes(sourceEl, el);\n                if (dest == null) {\n                    doc.appendChild(el);\n                } else {\n                    dest.appendChild(el);\n                }\n                dest = el;\n            } else if (source instanceof org.jsoup.nodes.TextNode) {\n                org.jsoup.nodes.TextNode sourceText = (org.jsoup.nodes.TextNode) source;\n                Text text = doc.createTextNode(sourceText.getWholeText());\n                dest.appendChild(text);\n            } else if (source instanceof org.jsoup.nodes.Comment) {\n                org.jsoup.nodes.Comment sourceComment = (org.jsoup.nodes.Comment) source;\n                Comment comment = doc.createComment(sourceComment.getData());\n                dest.appendChild(comment);\n            } else if (source instanceof org.jsoup.nodes.DataNode) {\n                org.jsoup.nodes.DataNode sourceData = (org.jsoup.nodes.DataNode) source;\n                Text node = doc.createTextNode(sourceData.getWholeData());\n                dest.appendChild(node);\n            } else {\n                // unhandled\n            }\n        }",
+    "public void tail(org.jsoup.nodes.Node source, int depth) {\n            if (source instanceof org.jsoup.nodes.Element && dest.getParentNode() instanceof Element) {\n                dest = (Element) dest.getParentNode();\n            }\n        }",
+    "private String updateNamespaces(org.jsoup.nodes.Element el) {\n            int pos = el.tagName().indexOf(\":\");\n            return pos > 0 ? el.tagName().substring(0, pos) : \"\";\n        }"
+  ]
+}

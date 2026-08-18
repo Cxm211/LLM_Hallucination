@@ -1,0 +1,53 @@
+public static boolean equal(GeneralPath p1, GeneralPath p2) {
+        if (p1 == null) {
+            return (p2 == null);
+        }
+        if (p2 == null) {
+            return false;
+        }
+        if (p1.getWindingRule() != p2.getWindingRule()) {
+            return false;
+        }
+        PathIterator iterator1 = p1.getPathIterator(null);
+        PathIterator iterator2 = p2.getPathIterator(null);
+        double[] d1 = new double[6];
+        double[] d2 = new double[6];
+        boolean done = iterator1.isDone() && iterator2.isDone();
+        while (!done) {
+            if (iterator1.isDone() != iterator2.isDone()) {
+                return false;
+            }
+            int seg1 = iterator1.currentSegment(d1);
+            int seg2 = iterator2.currentSegment(d2);
+            if (seg1 != seg2) {
+                return false;
+            }
+            int nCoords;
+            switch (seg1) {
+                case PathIterator.SEG_MOVETO:
+                case PathIterator.SEG_LINETO:
+                    nCoords = 2;
+                    break;
+                case PathIterator.SEG_QUADTO:
+                    nCoords = 4;
+                    break;
+                case PathIterator.SEG_CUBICTO:
+                    nCoords = 6;
+                    break;
+                case PathIterator.SEG_CLOSE:
+                    nCoords = 0;
+                    break;
+                default:
+                    nCoords = 0;
+            }
+            for (int i = 0; i < nCoords; i++) {
+                if (Double.doubleToLongBits(d1[i]) != Double.doubleToLongBits(d2[i])) {
+                    return false;
+                }
+            }
+            iterator1.next();
+            iterator2.next();
+            done = iterator1.isDone() && iterator2.isDone();
+        }
+        return true;
+    }

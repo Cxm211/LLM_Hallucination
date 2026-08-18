@@ -1,0 +1,3 @@
+public void writeNumber(float f) throws IOException {
+        _appendValue(JsonToken.VALUE_NUMBER_FLOAT, Float.valueOf(f));
+    }

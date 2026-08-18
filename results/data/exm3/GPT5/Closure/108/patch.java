@@ -1,0 +1,18 @@
+public void applyAlias() {
+      Node aliasDefinition = aliasVar.getInitialValue();
+      String aliasName = aliasVar.getName();
+      String typeName = aliasReference.getString();
+      String aliasExpanded =
+          Preconditions.checkNotNull(aliasDefinition.getQualifiedName());
+
+      if (typeName.equals(aliasName)) {
+        aliasReference.setString(aliasExpanded);
+        return;
+      }
+
+      Preconditions.checkState(typeName.startsWith(aliasName + "."));
+      String replacement =
+          aliasExpanded + typeName.substring(aliasName.length());
+      aliasReference.setString(replacement);
+
+    }

@@ -1,0 +1,30 @@
+  private Node parseBasicTypeExpression(JsDocToken token) {
+    if (token == JsDocToken.STAR) {
+      return newNode(Token.STAR);
+    } else if (token == JsDocToken.LB) {
+      skipEOLs();
+      return parseArrayType(next());
+    } else if (token == JsDocToken.LC) {
+      skipEOLs();
+      return parseRecordType(next());
+    } else if (token == JsDocToken.LP) {
+      skipEOLs();
+      return parseUnionType(next());
+    } else if (token == JsDocToken.STRING) {
+      String string = stream.getString();
+      if ("function".equals(string)) {
+        skipEOLs();
+        token = next();
+        if (token != JsDocToken.LP) {
+          return reportTypeSyntaxWarning("msg.jsdoc.missing.lp");
+        }
+        return parseFunctionType(token);
+      } else if ("null".equals(string) || "undefined".equals(string)) {
+        return newStringNode(string);
+      } else {
+        return parseTypeName(token);
+      }
+    }
+
+    return reportGenericTypeSyntaxWarning();
+  }

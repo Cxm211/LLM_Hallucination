@@ -1,0 +1,9 @@
+// buggy code
+        public T create() {
+            try {
+                return clazz.newInstance();
+            } catch (final Exception ex) {
+                throw new FunctorException("Cannot instantiate class: " + clazz, ex);
+            }
+        }
+

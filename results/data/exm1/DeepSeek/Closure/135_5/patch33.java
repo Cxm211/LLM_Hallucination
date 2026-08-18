@@ -1,0 +1,1 @@
+    return super.defineProperty(name, type, inferred, inExterns);

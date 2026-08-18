@@ -1,0 +1,33 @@
+private void updateObjLitOrFunctionDeclarationAtVarNode(Name n) {
+
+    Ref ref = n.declaration;
+    String name = ref.node.getString();
+    Node rvalue = ref.node.getFirstChild();
+    Node varNode = ref.node.getParent();
+    Node gramps = varNode.getParent();
+
+    boolean isObjLit = rvalue.getType() == Token.OBJECTLIT;
+    int numChanges = 0;
+
+    if (isObjLit) {
+      numChanges += declareVarsForObjLitValues(
+          n, name, rvalue, varNode, gramps.getChildBefore(varNode),
+          gramps);
+    }
+
+    numChanges += addStubsForUndeclaredProperties(n, name, gramps, varNode);
+
+    if (isObjLit && n.canEliminate()) {
+      varNode.removeChild(ref.node);
+      if (!varNode.hasChildren()) {
+        gramps.removeChild(varNode);
+      }
+      numChanges++;
+
+      ref.node = null;
+    }
+
+    if (numChanges > 0) {
+      compiler.reportCodeChange();
+    }
+  }

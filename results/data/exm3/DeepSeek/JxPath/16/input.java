@@ -1,0 +1,158 @@
+// buggy function
+    public static boolean testNode(Node node, NodeTest test) {
+        if (test == null) {
+            return true;
+        }
+        if (test instanceof NodeNameTest) {
+            if (node.getNodeType() != Node.ELEMENT_NODE) {
+                return false;
+            }
+
+            NodeNameTest nodeNameTest = (NodeNameTest) test;
+            QName testName = nodeNameTest.getNodeName();
+            String namespaceURI = nodeNameTest.getNamespaceURI();
+            boolean wildcard = nodeNameTest.isWildcard();
+            String testPrefix = testName.getPrefix();
+            if (wildcard && testPrefix == null) {
+                return true;
+            }
+            if (wildcard
+                || testName.getName()
+                        .equals(DOMNodePointer.getLocalName(node))) {
+                String nodeNS = DOMNodePointer.getNamespaceURI(node);
+                return equalStrings(namespaceURI, nodeNS) || nodeNS == null
+                        && equalStrings(testPrefix, getPrefix(node));
+            }
+            return false;
+        }
+        if (test instanceof NodeTypeTest) {
+            int nodeType = node.getNodeType();
+            switch (((NodeTypeTest) test).getNodeType()) {
+                case Compiler.NODE_TYPE_NODE :
+                    return nodeType == Node.ELEMENT_NODE
+                            || nodeType == Node.DOCUMENT_NODE;
+                case Compiler.NODE_TYPE_TEXT :
+                    return nodeType == Node.CDATA_SECTION_NODE
+                        || nodeType == Node.TEXT_NODE;
+                case Compiler.NODE_TYPE_COMMENT :
+                    return nodeType == Node.COMMENT_NODE;
+                case Compiler.NODE_TYPE_PI :
+                    return nodeType == Node.PROCESSING_INSTRUCTION_NODE;
+            }
+            return false;
+        }
+        if (test instanceof ProcessingInstructionTest) {
+            if (node.getNodeType() == Node.PROCESSING_INSTRUCTION_NODE) {
+                String testPI = ((ProcessingInstructionTest) test).getTarget();
+                String nodePI = ((ProcessingInstruction) node).getTarget();
+                return testPI.equals(nodePI);
+            }
+        }
+        return false;
+    }
+
+    public static boolean testNode(
+        NodePointer pointer,
+        Object node,
+        NodeTest test)
+    {
+        if (test == null) {
+            return true;
+        }
+        if (test instanceof NodeNameTest) {
+            if (!(node instanceof Element)) {
+                return false;
+            }
+
+            NodeNameTest nodeNameTest = (NodeNameTest) test;
+            QName testName = nodeNameTest.getNodeName();
+            String namespaceURI = nodeNameTest.getNamespaceURI();
+            boolean wildcard = nodeNameTest.isWildcard();
+            String testPrefix = testName.getPrefix();
+            if (wildcard && testPrefix == null) {
+                return true;
+            }
+            if (wildcard
+                || testName.getName()
+                        .equals(JDOMNodePointer.getLocalName(node))) {
+                String nodeNS = JDOMNodePointer.getNamespaceURI(node);
+                return equalStrings(namespaceURI, nodeNS) || nodeNS == null
+                        && equalStrings(testPrefix, getPrefix(node));
+            }
+            return false;
+        }
+        if (test instanceof NodeTypeTest) {
+            switch (((NodeTypeTest) test).getNodeType()) {
+                case Compiler.NODE_TYPE_NODE :
+                    return (node instanceof Element) || (node instanceof Document);
+                case Compiler.NODE_TYPE_TEXT :
+                    return (node instanceof Text) || (node instanceof CDATA);
+                case Compiler.NODE_TYPE_COMMENT :
+                    return node instanceof Comment;
+                case Compiler.NODE_TYPE_PI :
+                    return node instanceof ProcessingInstruction;
+            }
+            return false;
+        }
+        if (test instanceof ProcessingInstructionTest && node instanceof ProcessingInstruction) {
+            String testPI = ((ProcessingInstructionTest) test).getTarget();
+            String nodePI = ((ProcessingInstruction) node).getTarget();
+            return testPI.equals(nodePI);
+        }
+        return false;
+    }
+
+// trigger testcase
+// org/apache/commons/jxpath/ri/model/XMLModelTestCase.java::testAxisFollowing
+public void testAxisFollowing() {
+        assertXPathValueIterator(
+            context,
+            "vendor/contact/following::location//street",
+            list("Orchard Road", "Tangerine Drive"));
+
+        // following:: with a namespace
+        assertXPathValue(
+            context,
+            "//location/following::price:sale/saleEnds",
+            "never");
+        assertXPathPointer(context, "//location[2]/following::node()[2]", "/vendor[1]/product[1]");
+    }
+
+// org/apache/commons/jxpath/ri/model/XMLModelTestCase.java::testAxisPreceding
+public void testAxisPreceding() {
+        // preceding::
+        assertXPathPointer(
+                context,
+                "//location[2]/preceding-sibling::location//street",
+        "/vendor[1]/location[1]/address[1]/street[1]");
+        assertXPathPointer(context, "//location[2]/preceding::*[1]", "/vendor[1]/location[1]/employeeCount[1]");
+        assertXPathPointer(context, "//location[2]/preceding::node()[3]", "/vendor[1]/location[1]/employeeCount[1]/text()[1]");
+        assertXPathPointer(context, "//location[2]/preceding::node()[4]", "/vendor[1]/location[1]/employeeCount[1]");
+    }
+
+// org/apache/commons/jxpath/ri/model/XMLModelTestCase.java::testAxisFollowing
+public void testAxisFollowing() {
+        assertXPathValueIterator(
+            context,
+            "vendor/contact/following::location//street",
+            list("Orchard Road", "Tangerine Drive"));
+
+        // following:: with a namespace
+        assertXPathValue(
+            context,
+            "//location/following::price:sale/saleEnds",
+            "never");
+        assertXPathPointer(context, "//location[2]/following::node()[2]", "/vendor[1]/product[1]");
+    }
+
+// org/apache/commons/jxpath/ri/model/XMLModelTestCase.java::testAxisPreceding
+public void testAxisPreceding() {
+        // preceding::
+        assertXPathPointer(
+                context,
+                "//location[2]/preceding-sibling::location//street",
+        "/vendor[1]/location[1]/address[1]/street[1]");
+        assertXPathPointer(context, "//location[2]/preceding::*[1]", "/vendor[1]/location[1]/employeeCount[1]");
+        assertXPathPointer(context, "//location[2]/preceding::node()[3]", "/vendor[1]/location[1]/employeeCount[1]/text()[1]");
+        assertXPathPointer(context, "//location[2]/preceding::node()[4]", "/vendor[1]/location[1]/employeeCount[1]");
+    }

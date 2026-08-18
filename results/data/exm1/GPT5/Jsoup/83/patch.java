@@ -1,0 +1,102 @@
+// buggy code
+    String consumeTagName() {
+        // '\t', '\n', '\r', '\f', ' ', '/', '>', nullChar
+        // NOTE: out of spec, added '<' to fix common author bugs
+        bufferUp();
+        final int start = bufPos;
+        final int remaining = bufLength;
+        final char[] val = charBuf;
+
+        while (bufPos < remaining) {
+            final char c = val[bufPos];
+            if (c == '\t'|| c ==  '\n'|| c ==  '\r'|| c ==  '\f'|| c ==  ' '|| c ==  '/'|| c ==  '>'|| c ==  TokeniserState.nullChar)
+                break;
+            bufPos++;
+        }
+
+        return bufPos > start ? cacheString(charBuf, stringCache, start, bufPos -start) : "";
+    }
+
+        void read(Tokeniser t, CharacterReader r) {
+            // previous TagOpen state did NOT consume, will have a letter char in current
+            //String tagName = r.consumeToAnySorted(tagCharsSorted).toLowerCase();
+            String tagName = r.consumeTagName();
+            t.tagPending.appendTagName(tagName);
+
+            char c = r.consume();
+            switch (c) {
+                case '\t':
+                case '\n':
+                case '\r':
+                case '\f':
+                case ' ':
+                    t.transition(BeforeAttributeName);
+                    break;
+                case '/':
+                    t.transition(SelfClosingStartTag);
+                    break;
+                    // intended fall through to next >
+                case '>':
+                    t.emitTagPending();
+                    t.transition(Data);
+                    break;
+                case nullChar: // replacement
+                    t.tagPending.appendTagName(replacementStr);
+                    break;
+                case eof: // should emit pending tag?
+                    t.eofError(this);
+                    t.transition(Data);
+                    break;
+                default: // buffer underrun
+                    t.tagPending.appendTagName(c);
+            }
+        }
+
+        void read(Tokeniser t, CharacterReader r) {
+            char c = r.consume();
+            switch (c) {
+                case '\t':
+                case '\n':
+                case '\r':
+                case '\f':
+                case ' ':
+                    break; // ignore whitespace
+                case '/':
+                    t.transition(SelfClosingStartTag);
+                    break;
+                    // intended fall through as if >
+                case '>':
+                    t.emitTagPending();
+                    t.transition(Data);
+                    break;
+                case nullChar:
+                    t.error(this);
+                    t.tagPending.newAttribute();
+                    r.unconsume();
+                    t.transition(AttributeName);
+                    break;
+                case eof:
+                    t.eofError(this);
+                    t.transition(Data);
+                    break;
+                case '"':
+                case '\'':
+                case '=':
+                    t.error(this);
+                    t.tagPending.newAttribute();
+                    t.tagPending.appendAttributeName(c);
+                    t.transition(AttributeName);
+                    break;
+                case '<':
+                    // stray < inside a tag's attribute list: end current tag and reprocess < as markup
+                    t.error(this);
+                    t.emitTagPending();
+                    t.transition(Data);
+                    r.unconsume();
+                    break;
+                default: // A-Z, anything else
+                    t.tagPending.newAttribute();
+                    r.unconsume();
+                    t.transition(AttributeName);
+            }
+        }

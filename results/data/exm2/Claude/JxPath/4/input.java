@@ -1,0 +1,114 @@
+    protected String getLanguage() {
+        Node n = node;
+        while (n != null) {
+            if (n.getNodeType() == Node.ELEMENT_NODE) {
+                Element e = (Element) n;
+                String attr = e.getAttribute("xml:lang");
+                if (attr != null && !attr.equals("")) {
+                    return attr;
+                }
+            }
+            n = n.getParentNode();
+        }
+        return null;
+    }
+
+    public Object getValue() {
+        return stringValue(node);
+    }
+
+    private String stringValue(Node node) {
+        int nodeType = node.getNodeType();
+        if (nodeType == Node.COMMENT_NODE) {
+            String text = ((Comment) node).getData();
+            return text == null ? "" : text.trim();
+        }
+        if (nodeType == Node.TEXT_NODE || nodeType == Node.CDATA_SECTION_NODE) {
+            String text = node.getNodeValue();
+            return text == null ? "" : text.trim();
+        }
+        if (nodeType == Node.PROCESSING_INSTRUCTION_NODE) {
+            String text = ((ProcessingInstruction) node).getData();
+            return text == null ? "" : text.trim();
+        }
+        NodeList list = node.getChildNodes();
+        StringBuffer buf = new StringBuffer(16);
+        for (int i = 0; i < list.getLength(); i++) {
+            Node child = list.item(i);
+            if (child.getNodeType() == Node.TEXT_NODE) {
+                buf.append(child.getNodeValue());
+            }
+            else {
+            buf.append(stringValue(child));
+            }
+        }
+        return buf.toString().trim();
+    }
+
+    public Object getValue() {
+        if (node instanceof Element) {
+            return ((Element) node).getTextTrim();
+        }
+        if (node instanceof Comment) {
+            String text = ((Comment) node).getText();
+            if (text != null) {
+                text = text.trim();
+            }
+            return text;
+        }
+        if (node instanceof Text) {
+            return ((Text) node).getTextTrim();
+        }
+        if (node instanceof CDATA) {
+            return ((CDATA) node).getTextTrim();
+        }
+        if (node instanceof ProcessingInstruction) {
+            String text = ((ProcessingInstruction) node).getData();
+            if (text != null) {
+                text = text.trim();
+            }
+            return text;
+        }
+        return null;
+    }
+
+    protected String getLanguage() {
+        Object n = node;
+        while (n != null) {
+            if (n instanceof Element) {
+                Element e = (Element) n;
+                String attr =
+                    e.getAttributeValue("lang", Namespace.XML_NAMESPACE);
+                if (attr != null && !attr.equals("")) {
+                    return attr;
+                }
+            }
+            n = nodeParent(n);
+        }
+        return null;
+    }
+
+// trigger testcase
+public void testNestedDOM() {
+        doTest("nested", DocumentContainer.MODEL_DOM, "foo;bar; baz ");
+    }
+
+public void testNestedJDOM() {
+        doTest("nested", DocumentContainer.MODEL_JDOM, "foo;bar; baz ");
+    }
+
+public void testNestedWithCommentsDOM() {
+        doTest("nested-with-comments", DocumentContainer.MODEL_DOM, "foo;bar; baz ");
+    }
+
+public void testNestedWithCommentsJDOM() {
+        doTest("nested-with-comments", DocumentContainer.MODEL_JDOM, "foo;bar; baz ");
+    }
+
+public void testPreserveDOM() {
+        doTest("preserve", DocumentContainer.MODEL_DOM, " foo ");
+    }
+
+public void testPreserveJDOM() {
+        doTest("preserve", DocumentContainer.MODEL_JDOM, " foo ");
+    }

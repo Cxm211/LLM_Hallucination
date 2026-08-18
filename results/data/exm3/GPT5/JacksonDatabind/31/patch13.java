@@ -1,0 +1,3 @@
+public void writeBoolean(boolean state) throws IOException {
+        _appendValue(state ? JsonToken.VALUE_TRUE : JsonToken.VALUE_FALSE);
+    }

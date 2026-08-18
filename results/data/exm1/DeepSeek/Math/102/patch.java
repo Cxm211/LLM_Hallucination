@@ -1,0 +1,26 @@
+public double chiSquare(double[] expected, long[] observed)
+        throws IllegalArgumentException {
+        if ((expected.length < 2) || (expected.length != observed.length)) {
+            throw new IllegalArgumentException(
+                    "observed, expected array lengths incorrect");
+        }
+        if (!isPositive(expected) || !isNonNegative(observed)) {
+            throw new IllegalArgumentException(
+                "observed counts must be non-negative and expected counts must be postive");
+        }
+        double sumObserved = 0.0d;
+        double sumExpected = 0.0d;
+        for (int i = 0; i < observed.length; i++) {
+            sumObserved += observed[i];
+            sumExpected += expected[i];
+        }
+        double scale = sumObserved / sumExpected;
+        double sumSq = 0.0d;
+        double dev = 0.0d;
+        for (int i = 0; i < observed.length; i++) {
+            double scaledExpected = expected[i] * scale;
+            dev = ((double) observed[i] - scaledExpected);
+            sumSq += dev * dev / scaledExpected;
+        }
+        return sumSq;
+    }

@@ -1,0 +1,17 @@
+    public boolean putAll(Object key, Collection values) {
+        if (values == null || values.size() == 0) {
+            return false;
+        }
+        Collection coll = getCollection(key);
+        if (coll == null) {
+            coll = createCollection(values.size());  // might produce a non-empty collection
+            boolean result = coll.addAll(values);
+            if (coll.size() > 0) {
+                // only add if non-zero size to maintain class state
+                getMap().put(key, coll);
+            }
+            return result;
+        } else {
+            return coll.addAll(values);
+        }
+    }

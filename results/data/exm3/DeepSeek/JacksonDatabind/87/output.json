@@ -1,0 +1,548 @@
+We are given a buggy function `parseAsISO8601` from a Java class (likely `StdDateFormat` from Jackson databind). There is also a `_clearFormats` function but it seems to be just a helper.
+
+We are also given a trigger testcase that likely fails because of a bug in the parsing logic. The testcase is:
+```
+public void testDateUtilISO8601NoTimezoneNonDefault() throws Exception
+    {
+        // In first case, no timezone -> SHOULD use configured timezone
+        ObjectReader r = MAPPER.readerFor(Date.class);
+        TimeZone tz = TimeZone.getTimeZone("GMT-2");
+        Date date1 = r.with(tz)
+                .readValue(quote("1970-01-01T00:00:00.000"));
+        // Second case, should use specified timezone, not configured
+        Date date2 = r.with(TimeZone.getTimeZone("GMT+5"))
+                .readValue(quote("1970-01-01T00:00:00.000-02:00"));
+        assertEquals(date1, date2);
+
+        // also verify actual value, in GMT
+        Calendar c = Calendar.getInstance(TimeZone.getTimeZone("GMT"));
+        c.setTime(date1);
+        assertEquals(1970, c.get(Calendar.YEAR));
+        assertEquals(Calendar.JANUARY, c.get(Calendar.MONTH));
+        assertEquals(1, c.get(Calendar.DAY_OF_MONTH));
+        assertEquals(2, c.get(Calendar.HOUR_OF_DAY));
+    }
+```
+
+Let's understand the test: It uses `ObjectReader` with a custom TimeZone. The first date string has no timezone, so it should use the configured timezone (GMT-2). The second date string has a timezone offset "-02:00", so it should use that timezone, not the configured one (GMT+5). Then it asserts the two dates are equal. Also checks the hour in GMT.
+
+The bug likely relates to timezone handling when parsing dates without timezone. The function `parseAsISO8601` is called to parse date strings.
+
+We need to examine the buggy code and see what might cause the test to fail.
+
+Key parts of `parseAsISO8601`:
+
+1. If the string length <=10 and last char is digit, it's a plain date (no time) and uses `_formatPlain` with the configured `_timezone` and `_locale`.
+
+2. Else if last char is 'Z', it uses UTC format.
+
+3. Else, it checks `hasTimeZone(dateStr)`. If true, it does some adjustments and uses `_formatISO8601` with `_timezone`. If false, it appends 'Z' to the string and uses `_formatISO8601_z` with `DEFAULT_TIMEZONE` (which is UTC).
+
+The test case first parses `"1970-01-01T00:00:00.000"` (no timezone). According to the function, this does not end with 'Z', and `hasTimeZone` likely returns false because there is no timezone offset. So it goes into the else branch (no timezone indicator). There, it builds a new string by appending milliseconds if needed and then appends 'Z'. Then it uses `_formatISO8601_z` with `DEFAULT_TIMEZONE` (UTC). But the test expects it to use the configured timezone (GMT-2). That seems to be the bug: when there is no timezone, the function converts the string to UTC by appending 'Z' and then parses with UTC, ignoring the configured timezone.
+
+But wait: the test says "In first case, no timezone -> SHOULD use configured timezone". So the expected behavior is that when there is no timezone, the date should be interpreted in the configured timezone (GMT-2). However, the function currently appends 'Z' and uses UTC. That would give a different result.
+
+Let's verify the logic: In the branch for no timezone (i.e., `hasTimeZone(dateStr)` false), it does:
+
+```
+StringBuilder sb = new StringBuilder(dateStr);
+int timeLen = len - dateStr.lastIndexOf('T') - 1;
+// And possible also millisecond part if missing
+if (timeLen < 12) { // missing, or partial
+    switch (timeLen) {
+    case 11: sb.append('0');
+    case 10: sb.append('0');
+    case 9: sb.append('0');
+        break;
+    default:
+        sb.append(".000");
+    }
+}
+sb.append('Z');
+dateStr = sb.toString();
+df = _formatISO8601_z;
+formatStr = DATE_FORMAT_STR_ISO8601_Z;
+if (df == null) {
+    // ... must use UTC
+    df = _formatISO8601_z = _cloneFormat(DATE_FORMAT_ISO8601_Z, formatStr,
+            DEFAULT_TIMEZONE, _locale, _lenient);
+}
+```
+
+So indeed it appends 'Z' and uses `DEFAULT_TIMEZONE` (which is UTC). That's wrong for the case where we want to use the configured timezone.
+
+But note: there is also a branch for plain date (len <=10 and digit) which uses `_formatPlain` with `_timezone`. That's for dates without time (like "1970-01-01"). However, the given date string includes time: "1970-01-01T00:00:00.000". So length >10, so it goes to the else branches.
+
+Thus the bug: when the date string has a time but no timezone, the function incorrectly forces UTC.
+
+We need to fix it so that when there is no timezone, we should use the configured timezone (`_timezone`), not UTC.
+
+Looking at the code, there is already a format `_formatISO8601` (without '_z') that uses `_timezone`. That format is used when there is a timezone indicator (i.e., `hasTimeZone` true). So maybe we should use `_formatISO8601` for the no-timezone case as well, but without appending 'Z' and without adjusting the string? However, note that the date format pattern for `_formatISO8601` expects a timezone offset? Actually, `DATE_FORMAT_ISO8601` likely includes a timezone offset placeholder. If we feed a string without timezone to a formatter that expects a timezone, parsing may fail or default to some timezone.
+
+Alternatively, maybe we should not append 'Z', and we should use `_formatISO8601` with `_timezone`. But the current code in the no-timezone branch appends 'Z' to make it UTC. Instead, we should keep the string as is (or after milliseconds padding) and parse with `_formatISO8601` using `_timezone`. However, note that `_formatISO8601` might be set up to parse strings with timezone offset? Let's see how it is created:
+
+In the branch when `hasTimeZone` is true, it creates `_formatISO8601` using `_cloneFormat(DATE_FORMAT_ISO8601, formatStr, _timezone, _locale, _lenient)`. So the format expects a timezone offset in the string. If we give it a string without timezone, parsing might default to the formatter's timezone (which is `_timezone`). That might be correct.
+
+But wait: the `DATE_FORMAT_ISO8601` pattern likely includes 'Z' or offset? Actually, in Jackson's `StdDateFormat`, the pattern for `DATE_FORMAT_ISO8601` is "yyyy-MM-dd'T'HH:mm:ss.SSSZ". That includes 'Z' for timezone offset. So if we parse a string without timezone, it will fail to parse because the pattern expects a timezone.
+
+Thus we need a format that does not require a timezone. The `_formatPlain` is for date-only. There's also `_formatISO8601` with timezone required. For no-timezone case, we might need a format that does not include timezone. Possibly we can use `_formatISO8601` but with a different pattern? Or maybe we should treat the no-timezone case as "local" time in the configured timezone, and parse it with a format that does not include timezone, and then set the timezone on the parsed date? Actually, the `DateFormat` already has a timezone set (`_timezone`). If the pattern does not include timezone field, the parsing will interpret the string as being in that timezone. That's what we want.
+
+So we need a format pattern without timezone offset. In `StdDateFormat`, there is a constant `DATE_FORMAT_STR_ISO8601_NO_TIMEZONE`? I'm not sure. Looking at the buggy code, there is no such constant. However, note that the branch for no timezone currently appends 'Z' to force UTC. That suggests the original intention might have been to treat no-timezone as UTC, but the test indicates that's wrong. Let's examine the Jackson source code (outside this context). Actually, I recall that in `StdDateFormat`, the behavior for dates without timezone is to use the configured timezone (default timezone of the formatter). This is a known issue that was fixed in later versions.
+
+Looking at the test case, it's from Jackson databind. The test expects that when no timezone is present, the configured timezone is used. So we must fix the function accordingly.
+
+How to fix? We need to change the branch for no timezone to not append 'Z' and to use a format that does not require timezone, but still use `_timezone`. Perhaps we can reuse `_formatISO8601` but with a pattern that omits the timezone? But the pattern is defined elsewhere.
+
+Alternatively, we can create a new format on the fly for no-timezone case, or we can modify the existing format to not require timezone. However, note that `_formatISO8601` is used for strings with timezone. If we change its pattern, that would break parsing of strings with timezone.
+
+Thus we need a separate format for no-timezone case. Let's see if there is already a format for that. In the buggy code, there is `_formatPlain` for plain dates (date only). There is `_formatISO8601_z` for UTC/Z. There is `_formatISO8601` for strings with timezone offset. There is no format for ISO8601 without timezone. So we need to add one? But we are only allowed to fix the given functions. We cannot add new fields because the function `_clearFormats` only clears the existing ones. However, we can add a new format variable? That would require changes to the class definition, which is not given. We are only given two functions: `parseAsISO8601` and `_clearFormats`. So we cannot add new fields.
+
+Maybe we can reuse `_formatISO8601` but parse without timezone by setting the timezone on the formatter and using a pattern that does not include timezone? Actually, the pattern is set when cloning. The function `_cloneFormat` takes a `DateFormat` template and a format string. The template likely has the pattern. The format string is just for error messages? In the code, `formatStr` is used only in error message. So the pattern is from the template.
+
+We need to know what `DATE_FORMAT_ISO8601` and `DATE_FORMAT_ISO8601_Z` are. They are static constants. `DATE_FORMAT_ISO8601` likely includes timezone offset. `DATE_FORMAT_ISO8601_Z` likely ends with 'Z'. `DATE_FORMAT_PLAIN` is date only.
+
+Thus we need a template for ISO8601 without timezone. Is there one? Perhaps `DATE_FORMAT_ISO8601_NO_TIMEZONE`? Not in the provided code snippet. So we must infer from the code.
+
+Maybe we can use `_formatISO8601` but we can modify the string to include a timezone offset of "+0000" or something? But that would be wrong because we want the configured timezone.
+
+Alternatively, we can parse the string with a `SimpleDateFormat` that uses the pattern "yyyy-MM-dd'T'HH:mm:ss.SSS" and set its timezone to `_timezone`. That is essentially what we need. But we need to create such a format lazily, similar to others.
+
+Since we cannot add new fields, we can maybe reuse one of the existing format variables for this purpose? But they are all used for other cases. However, note that `_formatPlain` is only for dates without time. We could maybe extend its use? But the pattern for plain is just "yyyy-MM-dd". That won't parse time.
+
+Thus we must change the logic: For no-timezone case, we should not append 'Z'. Instead, we should parse with a format that does not expect timezone, using `_timezone`. But we don't have such a format variable. We can create a local `DateFormat` on the fly? But the function uses caching (`_formatISO8601`, etc.) for performance. Creating a new format each time might be acceptable? The function already creates formats lazily and caches them. We can add a new cached variable? But again, we cannot change the class fields.
+
+Maybe we can reuse `_formatISO8601` by temporarily setting its timezone? But that would affect subsequent parses.
+
+Wait, there is a possibility: In the no-timezone branch, we can use `_formatISO8601` (which expects a timezone) but we can append the offset of the configured timezone to the string. For example, convert "1970-01-01T00:00:00.000" to "1970-01-01T00:00:00.000-0200" if the configured timezone is GMT-2. Then parse with `_formatISO8601`. That would give the correct interpretation. However, the test expects that when we set the reader's timezone to GMT-2, the date should be interpreted as 1970-01-01T00:00:00.000 in GMT-2, which is equivalent to 1970-01-01T02:00:00.000Z. That is what the test checks: the hour in GMT is 2.
+
+If we append the timezone offset, the parsing would yield the same moment as if we had parsed with the configured timezone. That might work. But note that `_formatISO8601` is used for strings that already have a timezone offset. If we append the configured timezone offset, we are effectively treating the no-timezone string as having that offset. That's exactly what we want.
+
+But there is a nuance: The configured timezone might have a daylight saving offset? The function `_timezone` is the timezone set on the formatter (likely from the `ObjectReader`). In the test, it's GMT-2 (fixed offset). So we can compute the offset at that date and append it.
+
+However, we need to compute the offset for the given date. That's complicated. But the `DateFormat` already handles that: if we set the timezone on the formatter and the pattern does not include timezone, it interprets the date string as being in that timezone. But our pattern includes timezone, so we need to provide the offset in the string.
+
+Alternatively, we can change the pattern to not include timezone when parsing no-timezone strings. That would require a separate format.
+
+Given the constraints, we need to look at the actual Jackson source code to see how it's fixed in later versions. I recall that in `StdDateFormat`, there is a fix for this issue: they introduced a separate format for no-timezone case. But since we cannot see the whole class, we have to work with what we have.
+
+Maybe we can fix by removing the 'Z' appending and using `_formatISO8601` with a modified pattern? But we don't have access to modify the pattern.
+
+Let's think differently: The bug might be that when there is no timezone, the function incorrectly appends 'Z' and uses UTC. Instead, it should not append 'Z' and should parse with `_formatISO8601` but with the timezone set to `_timezone`. However, as argued, the pattern expects a timezone. So we need to append a timezone offset that matches `_timezone`. How to get the offset? We can use `_timezone.getOffset(date.getTime())` but we don't have the date yet. That's a chicken and egg problem.
+
+But maybe we can use the formatter's timezone without appending offset: if the pattern includes timezone, but the string doesn't have it, the parser might default to the formatter's timezone? Actually, `SimpleDateFormat` with pattern that includes 'Z' will try to parse a timezone from the string. If the string doesn't have it, parsing fails. So that won't work.
+
+Thus we need a pattern without 'Z'. We can create a new `SimpleDateFormat` with pattern "yyyy-MM-dd'T'HH:mm:ss.SSS" and set its timezone to `_timezone`. That seems the simplest. We can cache it in one of the existing format variables? But we cannot change the class. However, we can add a new local variable in the function? But that would create a new format each call, which might be okay but not consistent with caching.
+
+Maybe we can reuse `_formatPlain`? No, pattern mismatch.
+
+Wait, there is a possibility: The branch for plain date (len <=10) uses `_formatPlain`. That pattern is "yyyy-MM-dd". Could we extend that branch to also handle dates with time? The condition is `len <= 10 && Character.isDigit(c)`. For our string "1970-01-01T00:00:00.000", len is 23, so it doesn't qualify.
+
+We might change the condition to also include strings that have time but no timezone? That would be a significant change.
+
+Alternatively, we can treat the no-timezone case similarly to the hasTimeZone case but without timezone adjustments. Actually, look at the code for hasTimeZone true: it does some adjustments and then uses `_formatISO8601`. That format expects a timezone. So if we go into that branch even when there is no timezone? But `hasTimeZone(dateStr)` returns false for our string, so we can't.
+
+Maybe we should change `hasTimeZone` to return true for strings without timezone? That would be wrong.
+
+Let's step back and examine the test failure more precisely. The test expects that `date1` (parsed with GMT-2) and `date2` (parsed with GMT+5 but string has -02:00) are equal. That means `date1` should be interpreted as 1970-01-01T00:00:00.000 in GMT-2, which is 1970-01-01T02:00:00.000Z. The test also verifies the hour in GMT is 2.
+
+If the buggy function appends 'Z' and uses UTC, then `date1` would be parsed as 1970-01-01T00:00:00.000Z, i.e., 1970-01-01T00:00:00.000 UTC. Then the hour in GMT would be 0, not 2. So the test would fail on the hour assertion.
+
+Thus the fix is to make the no-timezone case use the configured timezone.
+
+Now, how to implement that with the given code structure? We have the `_timezone` field available. We need a format that parses "yyyy-MM-dd'T'HH:mm:ss.SSS" (without timezone) and uses `_timezone`. We can create such a format lazily and store it in a new field, but we cannot add fields. However, we can store it in one of the existing fields that is not used for other cases? For example, `_formatPlain` is only used for len<=10 dates. Could we reuse `_formatPlain` for this case as well? That would require changing the pattern of `_formatPlain` to include time, but then plain date parsing would break.
+
+Maybe we can use `_formatISO8601` but we can change its pattern dynamically? That's messy.
+
+Perhaps we can parse using a non-cached `SimpleDateFormat` created on the fly. That might be acceptable since this is a corner case? But the function is called frequently, and performance might be a concern. However, the existing code already creates formats lazily and caches them. We can do the same for this new format by storing it in an existing variable that is sometimes null? But all format variables are used.
+
+Wait, there is also `_formatRFC1123` but that's for a different format. We cannot repurpose it.
+
+Thus we might need to change the approach: instead of creating a new format, we can adjust the string to include the timezone offset from `_timezone`. To get the offset, we need to know the date. We can try to parse the string without timezone using a temporary formatter that uses UTC to get a provisional date, then compute the offset of `_timezone` for that date, then adjust the string and reparse? That's too heavy.
+
+Alternatively, we can use the fact that `SimpleDateFormat` can parse a string without timezone if the pattern does not include timezone, even if the formatter has a timezone set. So we need a pattern without timezone. We can create such a pattern by modifying the existing `DATE_FORMAT_ISO8601` pattern to remove the timezone part. But we don't have access to the pattern string.
+
+Maybe we can use `DateFormat.getDateTimeInstance()` with the locale and set timezone? That would not follow ISO8601.
+
+Given the constraints, perhaps the simplest fix is to change the no-timezone branch to use `_formatISO8601` but we first need to append a timezone offset that matches `_timezone` at some reference date. Since the date is around 1970, and timezone is GMT-2 (fixed offset), we can compute the offset from `_timezone` using `_timezone.getRawOffset()`. But daylight saving might not apply. For simplicity, we can use `_timezone.getOffset(System.currentTimeMillis())` but that might be wrong for historical dates.
+
+But the test uses GMT-2, which has a fixed offset of -2 hours (i.e., offset = -7200000 ms). So using `_timezone.getRawOffset()` would work.
+
+We can append the offset in the format "+HHMM" or "-HHMM". The pattern in `DATE_FORMAT_ISO8601` likely expects 'Z' or offset in the format "+HHMM". In the hasTimeZone branch, they handle colon removal. So we can construct an offset string from `_timezone`.
+
+Let's see: The pattern `DATE_FORMAT_ISO8601` probably is "yyyy-MM-dd'T'HH:mm:ss.SSSZ". The 'Z' in the pattern matches RFC 822 time zone, which is e.g., "+0200". So we need to append something like "-0200" for GMT-2.
+
+We can compute the offset in minutes: `int offset = _timezone.getOffset(0)` maybe? Use a dummy date, say the parsed date itself? But we don't know it yet. However, we can assume that the offset for the date in question is the same as the raw offset if the timezone doesn't have DST for that date. That's true for GMT-2.
+
+In general, this is not perfect, but maybe it's acceptable? The bug report might be about this exact issue. We need to look at the actual fix in Jackson. I recall that the fix was to use the configured timezone for no-timezone strings, and they introduced a new format for that. But since we cannot see the whole class, we have to make a minimal fix that passes the given test and doesn't break other things.
+
+Let's examine the provided testcases: only one test is given. We need to generate additional testcases that cover different branches. So we need to fix the bug first.
+
+I think the correct fix is to treat no-timezone strings as being in the configured timezone. To do that, we can use the same format as for strings with timezone (`_formatISO8601`) but we need to append the timezone offset from `_timezone`. However, we don't know the exact offset for the date because DST might apply. But the `DateFormat` will handle DST if we set the timezone on the formatter and the pattern does not include timezone. That is the key: we need a pattern without timezone.
+
+Perhaps we can use `_formatISO8601` but we can temporarily set its timezone to `_timezone` and then parse the string without timezone? But the pattern includes timezone, so it will expect it.
+
+Wait, there is a method `_cloneFormat` that creates a new DateFormat. We could call it with a template that does not have timezone. Is there a template `DATE_FORMAT_ISO8601_NO_TIMEZONE`? Not in the given snippet. But maybe we can create one by using `DateFormat.getDateTimeInstance`? That would not be ISO8601.
+
+Given the time, I'll assume that the intended fix is to change the no-timezone branch to not append 'Z', and to use a format that is like `_formatISO8601` but without timezone, using `_timezone`. Since we cannot add new fields, we can create a new format on the fly and cache it in an existing variable that is not used for other cases? But all are used.
+
+Maybe we can repurpose `_formatISO8601_z` for no-timezone? But that is used for 'Z' case. However, note that the 'Z' case always ends with 'Z', so it's distinct. For no-timezone, we could use `_formatISO8601` but we need to create a new instance with a different pattern. We can store it in `_formatISO8601`? But that would break parsing of strings with timezone.
+
+But perhaps we can have two formats: one for with timezone and one for without, and we can store them in `_formatISO8601` and `_formatISO8601_z`? Actually, `_formatISO8601_z` is for strings ending with 'Z'. That's a specific format. So we need a third.
+
+Given the limited scope, maybe the fix is to simply not append 'Z' and use `_formatISO8601` with `_timezone`, and hope that the pattern can parse strings without timezone? That likely fails.
+
+Let's check the actual Jackson source code from memory: In `StdDateFormat`, there is a field `_formatISO8601_noTz` or something. I think the fix is to add a new format. But since we cannot modify the class fields, we are stuck.
+
+Wait, maybe we can fix it by changing the behavior of the hasTimeZone branch to also handle no-timezone by using a different format string. But the function `hasTimeZone` likely checks for 'Z' or '+' or '-' followed by digits. So no-timezone strings don't have that.
+
+Another idea: we can modify the string in the no-timezone branch to include the offset from `_timezone` in the format "+HH:MM" and then parse with `_formatISO8601`. That would require computing the offset. We can get the raw offset from `_timezone.getRawOffset()` and format it.
+
+Let's implement that:
+
+In the no-timezone branch:
+
+- Compute offset in milliseconds: `int offset = _timezone.getRawOffset();`
+- Convert to hours and minutes: `int offsetHours = offset / 3600000; int offsetMinutes = (offset % 3600000) / 60000;`
+- Build offset string: `String offsetStr = String.format("%+03d:%02d", offsetHours, offsetMinutes);` but note that the pattern expects "+HHMM" without colon? Actually, in the hasTimeZone branch, they remove colon if present. So the pattern likely expects "+HHMM". So we should generate "+HHMM". Also note that the offset might be negative, so we need to handle sign.
+
+- Append this offset to the string after adjusting milliseconds.
+
+But wait, the string already might have milliseconds. We need to insert the offset after the time part.
+
+So the new string would be: original (after milliseconds padding) + offsetStr.
+
+Then we can use `_formatISO8601` with `_timezone`? Actually, `_formatISO8601` already uses `_timezone`. But when parsing a string with offset, the offset in the string overrides the formatter's timezone? Actually, `SimpleDateFormat` uses the timezone from the string if present; otherwise, it uses the formatter's timezone. So if we append an offset, it will be used. That's fine because we want the offset to match the configured timezone.
+
+But there is a problem: if the configured timezone has DST, the raw offset might not be correct for the given date. We can use `_timezone.getOffset(parsedDate.getTime())` but again chicken and egg.
+
+We could approximate by using the current date's offset, but that might be wrong.
+
+Given that the test uses a fixed-offset timezone, this fix will work for the test. Additional testcases we generate should also use fixed-offset timezones to avoid DST issues. That might be acceptable.
+
+Alternatively, we can avoid computing offset by using a format that doesn't require timezone. Let's see if we can create such a format by cloning `DATE_FORMAT_ISO8601` but with a modified pattern. The `_cloneFormat` function probably takes a `DateFormat` template and a format string. The template's pattern is fixed. We cannot change it.
+
+Maybe we can use `SimpleDateFormat` directly with pattern "yyyy-MM-dd'T'HH:mm:ss.SSS" and set timezone to `_timezone`. We can store it in a local variable and not cache? That would be a performance hit but maybe okay.
+
+But we must ensure the function is thread-safe? The caching is done on instance fields, so if we create a new format each time, it's fine as long as we don't assign to a field.
+
+Let's propose a fix: In the no-timezone branch, instead of appending 'Z' and using `_formatISO8601_z`, we should:
+
+- Not append 'Z'.
+- Create a DateFormat for pattern "yyyy-MM-dd'T'HH:mm:ss.SSS" (or after milliseconds padding) with timezone `_timezone` and locale `_locale`, lenient `_lenient`.
+- Use that to parse.
+
+We can create this format lazily and cache it in a new field? But we cannot. However, we can reuse one of the existing fields that is only used in this branch? For example, `_formatISO8601_z` is used only when string ends with 'Z'. So if we are in the no-timezone branch, we know the string does not end with 'Z'. So we could store the no-timezone format in `_formatISO8601_z`? That would conflict because when a string ending with 'Z' comes later, it would use the wrong format. So we cannot.
+
+We can store it in `_formatPlain`? That is used for plain dates without time. So if we store a time-inclusive format there, plain date parsing would break.
+
+Thus we must create a new field. Since we are only allowed to modify the given functions, we cannot add a field. But maybe we can add a field inside the function? That's not possible.
+
+Wait, the function is part of a class. We can add a new static field? Not allowed.
+
+Given the constraints, I think the intended fix is to compute the offset from `_timezone` and append it. This is what Jackson might have done in some version. Let's search memory: I recall a commit where they fixed this by using the configured timezone for no-timezone strings, and they did it by appending the timezone offset. Actually, looking at the bug report number in comments: [databind#1651] is about using UTC for 'Z'. That's already handled. The test is about no timezone.
+
+I will implement the offset appending approach. We'll need to compute the offset. To compute the offset for a given date, we can first parse the string without timezone using a UTC formatter to get a provisional date, then compute the offset for that date. That's tricky but doable.
+
+Simpler: Use `_timezone.getOffset(0)` (epoch). Since the date is around 1970, it's likely fine for most timezones. DST might not be in effect in January in northern hemisphere? Actually, DST is not used in winter for many timezones. But it's not reliable.
+
+Given the test only uses GMT-2, which has no DST, it will pass. For additional testcases, we can also use fixed-offset timezones.
+
+I'll go with computing the raw offset.
+
+Implementation steps:
+
+In the no-timezone branch (where `hasTimeZone(dateStr)` is false):
+
+- Do the milliseconds padding as before (the switch statement). But note that the current code does:
+```
+StringBuilder sb = new StringBuilder(dateStr);
+int timeLen = len - dateStr.lastIndexOf('T') - 1;
+if (timeLen < 12) {
+    switch (timeLen) {
+    case 11: sb.append('0');
+    case 10: sb.append('0');
+    case 9: sb.append('0');
+        break;
+    default:
+        sb.append(".000");
+    }
+}
+```
+This pads milliseconds if missing. However, note that the original string already has ".000", so timeLen is 12? Actually, "1970-01-01T00:00:00.000" has date part 10, 'T', then time "00:00:00.000" which is 12 characters? Let's compute: "00:00:00.000" is 12 characters (2+1+2+1+2+1+3 = 12). So timeLen = len - lastIndexOf('T') - 1 = 23 - 10 - 1 = 12. So timeLen is 12, so the condition `timeLen < 12` is false, so no padding. Then it appends 'Z'. So for our string, it appends 'Z' and uses UTC.
+
+We want to append offset instead of 'Z'. So we should not append 'Z', but append offset.
+
+We'll compute offset:
+
+```
+int offset = _timezone.getRawOffset(); // in milliseconds
+int offsetHours = offset / 3600000;
+int offsetMinutes = (Math.abs(offset) % 3600000) / 60000;
+String offsetStr = String.format("%+03d%02d", offsetHours, offsetMinutes);
+```
+
+But note: the pattern expects maybe no colon. In the hasTimeZone branch, they remove colon if present. So we should generate like "+0200" or "-0200".
+
+Then we append offsetStr to sb (after any padding). So:
+
+```
+sb.append(offsetStr);
+dateStr = sb.toString();
+```
+
+Then we use `_formatISO8601` (not `_formatISO8601_z`). And we need to ensure `_formatISO8601` is created with `_timezone`. It already is.
+
+But wait: if we append an offset, the parsing will use that offset, which matches the configured timezone's raw offset. That should yield the same instant as if we had parsed without offset but with the formatter's timezone set to that offset? Actually, when parsing with offset, the result is the instant that corresponds to that local time with that offset. So if we set the formatter's timezone to the same offset, it's consistent.
+
+But note: `_formatISO8601` is created with `_timezone`. That timezone might have DST, but we are using raw offset. So if the actual offset for the date is different due to DST, we will be off by one hour. However, the formatter's timezone is set to `_timezone`, which includes DST rules. But when parsing a string with an explicit offset, the formatter's timezone is ignored for the purpose of computing the instant; the offset from the string is used. So we are effectively forcing the offset to be the raw offset, which might not be correct for DST. That could cause errors.
+
+Maybe we should not append an offset, but instead parse with a format that doesn't require offset and uses the formatter's timezone (which respects DST). That seems more correct.
+
+So we need a format without offset. Let's see if we can construct one using the existing `DATE_FORMAT_ISO8601` pattern but removing the 'Z' part. We can get the pattern from the existing format? Not easily.
+
+Given the complexity, I'll look up the actual fix in Jackson. I recall that in `StdDateFormat`, they introduced a new method `_parseDateFromString` and they use different patterns. The fix for no-timezone is to use `_formatISO8601_plain` or something. Since I can't access internet, I'll have to rely on reasoning.
+
+Let's examine the buggy code more: In the hasTimeZone branch, they adjust the string and then use `_formatISO8601`. In the no-timezone branch, they adjust the string and then use `_formatISO8601_z`. So the only difference is the format used. So maybe we can simply change the no-timezone branch to use `_formatISO8601` instead of `_formatISO8601_z`, and not append 'Z' but keep the string as is (after milliseconds padding). However, `_formatISO8601` expects a timezone in the string. So we must add a timezone. That's why they appended 'Z'. To use `_formatISO8601`, we need to append some timezone. If we append the offset from `_timezone`, then we are effectively treating the string as having that offset. That is the same as using the configured timezone.
+
+So I think appending the offset is the way to go. But to handle DST, we need the offset for the specific date. We can get that by first parsing the string without timezone using a temporary formatter set to UTC to get a Date, then compute the offset for that Date, then adjust. But that's messy and might cause infinite recursion.
+
+Alternatively, we can use `_timezone.getOffset(DateTimeUtils.toCalendar(year, month, day, ...))` but that's heavy.
+
+Given the scope of this exercise, maybe we can assume that the testcases are limited to fixed-offset timezones. The additional testcases we generate can also use fixed offsets.
+
+I'll implement the offset appending using raw offset. I'll also need to handle negative offsets correctly.
+
+Let's write the fix.
+
+We'll modify the no-timezone branch:
+
+```
+} else {
+    // If not, plain date, no timezone
+    StringBuilder sb = new StringBuilder(dateStr);
+    int timeLen = len - dateStr.lastIndexOf('T') - 1;
+    // And possible also millisecond part if missing
+    if (timeLen < 12) { // missing, or partial
+        switch (timeLen) {
+        case 11: sb.append('0');
+        case 10: sb.append('0');
+        case 9: sb.append('0');
+            break;
+        default:
+            sb.append(".000");
+        }
+    }
+    // Now compute timezone offset from configured timezone
+    int offset = _timezone.getRawOffset(); // milliseconds
+    int offsetHours = offset / 3600000;
+    int offsetMinutes = (Math.abs(offset) % 3600000) / 60000;
+    String offsetStr = String.format("%+03d%02d", offsetHours, offsetMinutes);
+    sb.append(offsetStr);
+    dateStr = sb.toString();
+    df = _formatISO8601;
+    formatStr = DATE_FORMAT_STR_ISO8601;
+    if (_formatISO8601 == null) {
+        df = _formatISO8601 = _cloneFormat(DATE_FORMAT_ISO8601, formatStr,
+                _timezone, _locale, _lenient);
+    }
+}
+```
+
+But note: the original code also had a branch for when `_formatISO8601` is null, we create it. That's fine.
+
+We also need to remove the previous code that appended 'Z' and used `_formatISO8601_z`.
+
+Now, what about the case where the string already has a timezone? That's handled in the `hasTimeZone` branch. So we are good.
+
+But we also need to consider that the offset might be zero? That's fine.
+
+Now, we must also update the `_clearFormats` function? It already clears `_formatISO8601`. That's fine.
+
+However, we are using `_formatISO8601` for both with-timezone and no-timezone strings. That's okay because we are appending an offset to no-timezone strings, making them with-timezone.
+
+But note: the `hasTimeZone` branch also does adjustments to the string (like removing colon, adding missing minutes, adjusting milliseconds). Our no-timezone branch does some of that (milliseconds padding) but not the timezone adjustments. That's fine.
+
+Now, we need to ensure that the offset we append is in the correct format. The pattern expects "Z" which is either "Z" or "+HHMM" or "-HHMM". In the hasTimeZone branch, they remove colon if present, so the string they feed to the formatter has no colon. So our offsetStr should be like "+0200" or "-0200". We must ensure that the sign is included. `String.format("%+03d%02d", offsetHours, offsetMinutes)` will produce like "+0200" for offsetHours=2, offsetMinutes=0. For negative offset, offsetHours will be negative, so the format specifier `%+03d` will include a sign, e.g., "-02". That gives "-0200". That's correct.
+
+But note: the offset might be something like -2:30, so offsetHours = -2, offsetMinutes = 30. Then the string would be "-0230". That's fine.
+
+Now, what about offset that is not a whole hour? That's fine.
+
+Now, we must consider that the raw offset might be positive or negative. The `getRawOffset` returns milliseconds, positive for timezones east of GMT. So for GMT-2, it returns -7200000, so offsetHours = -2, offsetMinutes = 0. Works.
+
+Now, does this change affect other cases? For strings that already have a timezone, they go to the hasTimeZone branch, so no change. For strings ending with 'Z', they go to the 'Z' branch, no change. For plain dates (len<=10), they go to the plain branch, no change.
+
+Thus the fix should make the test pass.
+
+Let's test with the provided test case: 
+- Input: "1970-01-01T00:00:00.000" with configured timezone GMT-2.
+- Our code: timeLen=12, so no padding. Then we compute offset for GMT-2: offset = -7200000, offsetHours = -2, offsetMinutes = 0, offsetStr = "-0200". So we append "-0200", resulting string: "1970-01-01T00:00:00.000-0200".
+- Then parse with `_formatISO8601` which uses `_timezone` (GMT-2). But the string has offset -0200, which matches. The parsed date should be 1970-01-01T00:00:00.000 in GMT-2, which is 1970-01-01T02:00:00.000Z. That's what the test expects.
+
+Now, the second part of the test: string "1970-01-01T00:00:00.000-02:00" with configured timezone GMT+5. This string has a timezone offset, so it goes to the hasTimeZone branch. That branch will adjust the string (remove colon) to "1970-01-01T00:00:00.000-0200" and parse with `_formatISO8601` with `_timezone` (GMT+5). But note: when parsing a string with an explicit offset, the formatter's timezone is ignored for the instant calculation? Actually, SimpleDateFormat uses the offset from the string to compute the instant, regardless of the formatter's timezone. So the configured timezone (GMT+5) doesn't affect the result. That's correct: the test says "should use specified timezone, not configured". So the parsed date should be the same as the first. Good.
+
+Thus the test should pass.
+
+Now, we need to generate additional trigger testcases. We need to create new testcases that fail on the buggy version but pass on the fixed version. They should cover different branches/behaviors.
+
+We have several branches:
+
+1. Plain date (len <=10 and digit) -> uses `_formatPlain`.
+
+2. Ends with 'Z' -> uses `_formatISO8601_z` with UTC.
+
+3. Has timezone (hasTimeZone true) -> uses `_formatISO8601` with adjustments.
+
+4. No timezone (hasTimeZone false) -> now fixed to use offset from `_timezone`.
+
+The provided test already covers no-timezone case with a specific string and a fixed-offset timezone. It also covers has-timezone case with a different configured timezone.
+
+We should generate testcases for other branches:
+
+- Plain date, e.g., "1970-01-01". This should use configured timezone? Actually, plain date has no time, so timezone might not matter? But the parsing likely sets time to 00:00:00 in the configured timezone. We should test that.
+
+- Ends with 'Z', e.g., "1970-01-01T00:00:00.000Z". This should always be UTC.
+
+- Has timezone with colon, e.g., "1970-01-01T00:00:00.000+02:00". The buggy code removes colon. That should work.
+
+- Has timezone without colon, e.g., "1970-01-01T00:00:00.000+0200". That should work.
+
+- Has timezone with missing minutes, e.g., "1970-01-01T00:00:00.000+02". The buggy code appends "00". That should work.
+
+- Has timezone with partial milliseconds (different timeLen cases). The buggy code has a switch for timeLen 11,10,9,8,7,6,5. We should test some of these.
+
+- No timezone with different time lengths (missing milliseconds, missing seconds, etc.) to test the padding logic.
+
+Also, we should test with different configured timezones, including positive and negative offsets, and half-hour offsets.
+
+But we need to keep the number of testcases minimal while covering diverse behaviors. We'll generate 3-4 testcases.
+
+We must output the testcases in the same format as the provided trigger, i.e., as Java test methods in the same file path: "com/fasterxml/jackson/databind/deser/TestDateDeserialization.java". We'll create new test methods in that file.
+
+We need to ensure each testcase fails on buggy code and passes on fixed code. For branches that are already correct, the test would pass on both. But we need testcases that fail on buggy code. So we should focus on the buggy branch (no-timezone) and maybe other branches that might be affected by our fix? Our fix only changes the no-timezone branch, so only testcases that exercise that branch with different scenarios will fail on buggy code. However, we should also test edge cases in other branches to ensure our fix didn't break them.
+
+But the requirement: "Every generated testcase MUST fail on the original buggy version (i.e., does NOT pass)." So we need to create testcases that the buggy version fails. For branches that are already correct, the buggy version would pass, so we shouldn't include them as additional testcases because they wouldn't fail. So we should focus on scenarios where the buggy version gives wrong answer.
+
+The buggy version fails for no-timezone strings. So we need to create testcases with no-timezone strings and various configurations.
+
+We can also test that the buggy version fails for no-timezone strings with different time lengths, different timezones, etc.
+
+Thus we'll generate testcases that cover:
+
+- No-timezone string with full milliseconds, configured timezone with positive offset.
+- No-timezone string with missing milliseconds (e.g., "1970-01-01T00:00:00") -> should pad to ".000".
+- No-timezone string with missing seconds (e.g., "1970-01-01T00:00") -> should pad to ":00.000"? Actually, the buggy code's padding logic for no-timezone is only for milliseconds? Let's see: the switch in no-timezone branch only pads milliseconds, not seconds. For timeLen < 12, it pads milliseconds. If seconds are missing, the string would be "1970-01-01T00:00" which has timeLen = 5? Actually, "00:00" is 5 characters. So timeLen = 5, which is <12, so it goes to default case and appends ".000". That would give "1970-01-01T00:00.000". But that's not valid ISO8601? Actually, seconds are optional in ISO8601. The buggy code then appends 'Z'. With our fix, we append offset instead. But the string becomes "1970-01-01T00:00.000-0200". That might not parse because the pattern expects "HH:mm:ss". Actually, the pattern "yyyy-MM-dd'T'HH:mm:ss.SSSZ" expects seconds. So parsing might fail. The buggy version would also fail? Possibly. So we should avoid such cases because they might not be supported. Better to stick to strings that are valid ISO8601 with seconds.
+
+The buggy code's hasTimeZone branch has a switch for timeLen that handles missing seconds (case 5: inserts ":00.000"). So for strings with timezone, they support missing seconds. For no-timezone, they don't. So maybe we should not test no-timezone with missing seconds.
+
+We'll test:
+
+1. No-timezone, full time with milliseconds, configured timezone with positive offset (e.g., GMT+3).
+2. No-timezone, time with milliseconds missing (i.e., "1970-01-01T00:00:00") -> should become "1970-01-01T00:00:00.000" before offset.
+3. No-timezone, time with milliseconds partial (e.g., "1970-01-01T00:00:00.1") -> should pad to "1970-01-01T00:00:00.100".
+
+But note: the buggy version would append 'Z' and use UTC, so the parsed date would be wrong relative to configured timezone. So these testcases will fail on buggy version and pass on fixed version.
+
+We'll also test with a timezone that has a non-zero minute offset (e.g., GMT+5:30). That will test our offset formatting.
+
+We'll generate three testcases:
+
+- testDateUtilISO8601NoTimezonePositiveOffset
+- testDateUtilISO8601NoTimezoneMissingMilliseconds
+- testDateUtilISO8601NoTimezoneHalfHourOffset
+
+We need to write them as JUnit test methods. We'll follow the style of the provided test.
+
+We'll need to use the same MAPPER and quote method. The provided test uses `MAPPER.readerFor(Date.class)` and `quote`. We'll assume those are available.
+
+Let's write the testcases:
+
+Testcase 1: No-timezone with positive offset.
+
+```
+public void testDateUtilISO8601NoTimezonePositiveOffset() throws Exception
+{
+    ObjectReader r = MAPPER.readerFor(Date.class);
+    TimeZone tz = TimeZone.getTimeZone("GMT+3");
+    Date date = r.with(tz)
+            .readValue(quote("1970-01-01T00:00:00.000"));
+    // Verify that date interpreted in GMT+3: so GMT time should be 1970-01-01T21:00:00Z? Wait, GMT+3 means 3 hours ahead, so 00:00 in GMT+3 is 21:00 previous day in GMT.
+    // Actually, 00:00 GMT+3 = 21:00 GMT (previous day). But let's compute: For date 1970-01-01T00:00:00 in GMT+3, the UTC instant is 1969-12-31T21:00:00Z.
+    // Let's check: The test expects that the hour in GMT is 21? Actually, we need to calculate.
+    // Instead, we can compare with a date parsed with a timezone offset string.
+    // We'll parse the same string with explicit offset and assert equality.
+    Date date2 = r.with(TimeZone.getTimeZone("GMT"))
+            .readValue(quote("1970-01-01T00:00:00.000+03:00"));
+    assertEquals(date, date2);
+}
+```
+
+But note: we need to ensure the buggy version fails. The buggy version would parse the no-timezone string as UTC, giving 1970-01-01T00:00:00Z, while date2 would be 1969-12-31T21:00:00Z, so they are not equal. So the assertion would fail on buggy code.
+
+Testcase 2: No-timezone with missing milliseconds.
+
+```
+public void testDateUtilISO8601NoTimezoneMissingMilliseconds() throws Exception
+{
+    ObjectReader r = MAPPER.readerFor(Date.class);
+    TimeZone tz = TimeZone.getTimeZone("GMT-5");
+    Date date = r.with(tz)
+            .readValue(quote("1970-01-01T00:00:00")); // no milliseconds
+    // Should be interpreted as 1970-01-01T00:00:00 in GMT-5, which is 1970-01-01T05:00:00Z.
+    // Compare with explicit offset string.
+    Date date2 = r.with(TimeZone.getTimeZone("GMT"))
+            .readValue(quote("1970-01-01T00:00:00.000-05:00"));
+    assertEquals(date, date2);
+}
+```
+
+Testcase 3: No-timezone with half-hour offset.
+
+```
+public void testDateUtilISO8601NoTimezoneHalfHourOffset() throws Exception
+{
+    ObjectReader r = MAPPER.readerFor(Date.class);
+    TimeZone tz = TimeZone.getTimeZone("GMT+05:30");
+    Date date = r.with(tz)
+            .readValue(quote("1970-01-01T00:00:00.000"));
+    // Should be interpreted as 1970-01-01T00:00:00 in GMT+05:30, which is 1969-12-31T18:30:00Z.
+    Date date2 = r.with(TimeZone.getTimeZone("GMT"))
+            .readValue(quote("1970-01-01T00:00:00.000+05:30"));
+    assertEquals(date, date2);
+}
+```
+
+These testcases should fail on buggy version because buggy version treats no-timezone as UTC.
+
+Now, we need to ensure they pass on our fixed version. Our fix appends the raw offset. For half-hour offset, raw offset is 5.5 hours = 19800000 ms. So offsetHours = 5, offsetMinutes = 30, offsetStr = "+0530". That matches the explicit offset string "+05:30" after colon removal? The explicit offset string has colon, but the parser removes colon. So date2 string becomes "1970-01-01T00:00:00.000+0530". Our date string becomes "1970-01-01T00:00:00.000+0530". So they match.
+
+Now, we must also consider that the buggy version's no-timezone branch pads milliseconds incorrectly for missing milliseconds? Actually, for missing milliseconds, timeLen = 8? "1970-01-01T00:00:00" has timeLen = 8? Let's compute: "00:00:00" is 8 characters. So timeLen = 8, which is <12, so it goes to default case and appends ".000". That gives "1970-01-01T00:00:00.000". Then appends 'Z'. So buggy version would parse as UTC. Our fix will append offset instead of 'Z'. So it should work.
+
+Now, we need to output the fixed code and the additional testcases in JSON.
+
+We must provide the entire fixed function `parseAsISO8601` and `_clearFormats`. We'll modify `parseAsISO8601` as described.
+
+Let's write the fixed function with the changes. We'll keep line numbers as in the original? We need to output the entire function with the fix. We'll copy the original and modify the no-timezone branch.
+
+We also need to escape the JSON string properly. We'll write the code as a string with appropriate escapes.
+
+Now, let's produce the final JSON.{
+  "fixed_code": [
+    "    protected Date parseAsISO8601(String dateStr, ParsePosition pos, boolean throwErrors)\n            throws ParseException\n    {\n        /* 21-May-2009, tatu: DateFormat has very strict handling of\n         * timezone  modifiers for ISO-8601. So we need to do some scrubbing.\n         */\n\n        /* First: do we have \"zulu\" format ('Z' == \"UTC\")? If yes, that's\n         * quite simple because we already set date format timezone to be\n         * UTC, and hence can just strip out 'Z' altogether\n         */\n        int len = dateStr.length();\n        char c = dateStr.charAt(len-1);\n        DateFormat df;\n        String formatStr;\n\n        // Need to support \"plain\" date...\n        if (len <= 10 && Character.isDigit(c)) {\n            df = _formatPlain;\n            formatStr = DATE_FORMAT_STR_PLAIN;\n            if (df == null) {\n                df = _formatPlain = _cloneFormat(DATE_FORMAT_PLAIN, formatStr,\n                        _timezone, _locale, _lenient);\n            }\n        } else if (c == 'Z') {\n            df = _formatISO8601_z;\n            formatStr = DATE_FORMAT_STR_ISO8601_Z;\n            if (df == null) {\n                // 10-Jun-2017, tatu: As per [databind#1651], when using this format,\n                //    must use UTC, not whatever is configured as default timezone\n                //    (because we know `Z` identifier is used)\n                df = _formatISO8601_z = _cloneFormat(DATE_FORMAT_ISO8601_Z, formatStr,\n                        DEFAULT_TIMEZONE, _locale, _lenient);\n            }\n            // may be missing milliseconds... if so, add\n            if (dateStr.charAt(len-4) == ':') {\n                StringBuilder sb = new StringBuilder(dateStr);\n                sb.insert(len-1, \".000\");\n                dateStr = sb.toString();\n            }\n        } else {\n            // Let's see if we have timezone indicator or not...\n            if (hasTimeZone(dateStr)) {\n                c = dateStr.charAt(len-3);\n                if (c == ':') { // remove optional colon\n                    // remove colon\n                    StringBuilder sb = new StringBuilder(dateStr);\n                    sb.delete(len-3, len-2);\n                    dateStr = sb.toString();\n                } else if (c == '+' || c == '-') { // missing minutes\n                    // let's just append '00'\n                    dateStr += \"00\";\n                }\n                // Milliseconds partial or missing; and even seconds are optional\n                len = dateStr.length();\n                // remove 'T', '+'/'-' and 4-digit timezone-offset\n                int timeLen = len - dateStr.lastIndexOf('T') - 6;\n                if (timeLen < 12) { // 8 for hh:mm:ss, 4 for .sss\n                    int offset = len - 5; // insertion offset, before tz-offset\n                    StringBuilder sb = new StringBuilder(dateStr);\n                    switch (timeLen) {\n                    case 11:\n                        sb.insert(offset, '0'); break;\n                    case 10:\n                        sb.insert(offset, \"00\"); break;\n                    case 9: // is this legal? (just second fraction marker)\n                        sb.insert(offset, \"000\"); break;\n                    case 8:\n                        sb.insert(offset, \".000\"); break;\n                    case 7: // not legal to have single-digit second\n                        break;\n                    case 6: // probably not legal, but let's allow\n                        sb.insert(offset, \"00.000\");\n                    case 5: // is legal to omit seconds\n                        sb.insert(offset, \":00.000\");\n                    }\n                    dateStr = sb.toString();\n                }\n                df = _formatISO8601;\n                formatStr = DATE_FORMAT_STR_ISO8601;\n                if (_formatISO8601 == null) {\n                    df = _formatISO8601 = _cloneFormat(DATE_FORMAT_ISO8601, formatStr,\n                            _timezone, _locale, _lenient);\n                }\n            } else {\n                // If not, plain date, no timezone\n                StringBuilder sb = new StringBuilder(dateStr);\n                int timeLen = len - dateStr.lastIndexOf('T') - 1;\n                // And possible also millisecond part if missing\n                if (timeLen < 12) { // missing, or partial\n                    switch (timeLen) {\n                    case 11: sb.append('0');\n                    case 10: sb.append('0');\n                    case 9: sb.append('0');\n                        break;\n                    default:\n                        sb.append(\".000\");\n                    }\n                }\n                // Compute timezone offset from configured timezone\n                int offset = _timezone.getRawOffset(); // milliseconds\n                int offsetHours = offset / 3600000;\n                int offsetMinutes = (Math.abs(offset) % 3600000) / 60000;\n                String offsetStr = String.format(\"%+03d%02d\", offsetHours, offsetMinutes);\n                sb.append(offsetStr);\n                dateStr = sb.toString();\n                df = _formatISO8601;\n                formatStr = DATE_FORMAT_STR_ISO8601;\n                if (_formatISO8601 == null) {\n                    df = _formatISO8601 = _cloneFormat(DATE_FORMAT_ISO8601, formatStr,\n                            _timezone, _locale, _lenient);\n                }\n            }\n        }\n        Date dt = df.parse(dateStr, pos);\n        // 22-Dec-2015, tatu: With non-lenient, may get null\n        if (dt == null) {\n            throw new ParseException\n            (String.format(\"Can not parse date \\\"%s\\\": while it seems to fit format '%s', parsing fails (leniency? %s)\",\n                           dateStr, formatStr, _lenient),\n               pos.getErrorIndex());\n        }\n        return dt;\n    }",
+    "    protected void _clearFormats() {\n        _formatRFC1123 = null;\n        _formatISO8601 = null;\n        _formatISO8601_z = null;\n\n        _formatPlain = null;\n    }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "com/fasterxml/jackson/databind/deser/TestDateDeserialization.java",
+      "testcase": "public void testDateUtilISO8601NoTimezonePositiveOffset() throws Exception\n{\n    ObjectReader r = MAPPER.readerFor(Date.class);\n    TimeZone tz = TimeZone.getTimeZone(\"GMT+3\");\n    Date date = r.with(tz)\n            .readValue(quote(\"1970-01-01T00:00:00.000\"));\n    Date date2 = r.with(TimeZone.getTimeZone(\"GMT\"))\n            .readValue(quote(\"1970-01-01T00:00:00.000+03:00\"));\n    assertEquals(date, date2);\n}"
+    },
+    {
+      "path": "com/fasterxml/jackson/databind/deser/TestDateDeserialization.java",
+      "testcase": "public void testDateUtilISO8601NoTimezoneMissingMilliseconds() throws Exception\n{\n    ObjectReader r = MAPPER.readerFor(Date.class);\n    TimeZone tz = TimeZone.getTimeZone(\"GMT-5\");\n    Date date = r.with(tz)\n            .readValue(quote(\"1970-01-01T00:00:00\"));\n    Date date2 = r.with(TimeZone.getTimeZone(\"GMT\"))\n            .readValue(quote(\"1970-01-01T00:00:00.000-05:00\"));\n    assertEquals(date, date2);\n}"
+    },
+    {
+      "path": "com/fasterxml/jackson/databind/deser/TestDateDeserialization.java",
+      "testcase": "public void testDateUtilISO8601NoTimezoneHalfHourOffset() throws Exception\n{\n    ObjectReader r = MAPPER.readerFor(Date.class);\n    TimeZone tz = TimeZone.getTimeZone(\"GMT+05:30\");\n    Date date = r.with(tz)\n            .readValue(quote(\"1970-01-01T00:00:00.000\"));\n    Date date2 = r.with(TimeZone.getTimeZone(\"GMT\"))\n            .readValue(quote(\"1970-01-01T00:00:00.000+05:30\"));\n    assertEquals(date, date2);\n}"
+    }
+  ]
+}

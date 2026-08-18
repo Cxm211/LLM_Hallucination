@@ -1,0 +1,14 @@
+public ObjectNode deserialize(JsonParser p, DeserializationContext ctxt) throws IOException
+{
+    if (p.getCurrentToken() == JsonToken.START_OBJECT) {
+        p.nextToken();
+        return deserializeObject(p, ctxt, ctxt.getNodeFactory());
+    }
+    if (p.getCurrentToken() == JsonToken.FIELD_NAME) {
+        return deserializeObject(p, ctxt, ctxt.getNodeFactory());
+    }
+    if (p.getCurrentToken() == JsonToken.END_OBJECT) {
+        return deserializeObject(p, ctxt, ctxt.getNodeFactory());
+    }
+    throw ctxt.mappingException(ObjectNode.class);
+}

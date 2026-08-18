@@ -1,0 +1,23 @@
+protected static Boolean _isShapeWrittenUsingIndex(Class<?> enumClass,
+            JsonFormat.Value format, boolean fromClass)
+    {
+        JsonFormat.Shape shape = (format == null) ? null : format.getShape();
+        if (shape == null) {
+            return null;
+        }
+        // i.e. "default", check dynamically
+        if (shape == Shape.ANY || shape == Shape.SCALAR) {
+            return null;
+        }
+        // 19-May-2016, tatu: also consider "natural" shape
+        if (shape == Shape.STRING || shape == Shape.NATURAL) {
+            return Boolean.FALSE;
+        }
+        // 01-Oct-2014, tatu: For convenience, consider "as-array" to also mean 'yes, use index')
+        if (shape.isNumeric() || (shape == Shape.ARRAY)) {
+            return Boolean.TRUE;
+        }
+        // 07-Mar-2017, tatu: Also means `OBJECT` not available as property annotation...
+        // but we should not throw; fall back to default (null)
+        return null;
+    }

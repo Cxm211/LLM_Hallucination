@@ -1,0 +1,1 @@
+        public DoubleSerializer() { super(Double.class, JsonParser.NumberType.DOUBLE, "number"); }

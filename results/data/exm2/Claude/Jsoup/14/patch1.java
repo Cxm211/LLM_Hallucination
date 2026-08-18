@@ -1,0 +1,14 @@
+void read(Tokeniser t, CharacterReader r) {
+    if (r.matches('/')) {
+        t.createTempBuffer();
+        t.advanceTransition(RCDATAEndTagOpen);
+        // diverge from spec: got a start tag, but there's no appropriate end tag (</title>), so rather than
+        // consuming to EOF; break out here
+    } else if (r.matches("<")) {
+        t.emit("<");
+        t.transition(Rcdata);
+    } else {
+        t.emit("<");
+        t.transition(Rcdata);
+    }
+}

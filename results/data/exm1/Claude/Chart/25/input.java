@@ -1,0 +1,438 @@
+// buggy code
+    protected void drawHorizontalItem(Graphics2D g2,
+                                      CategoryItemRendererState state,
+                                      Rectangle2D dataArea,
+                                      CategoryPlot plot,
+                                      CategoryAxis domainAxis,
+                                      ValueAxis rangeAxis,
+                                      StatisticalCategoryDataset dataset,
+                                      int row,
+                                      int column) {
+                                     
+        RectangleEdge xAxisLocation = plot.getDomainAxisEdge();
+        
+        // BAR Y
+        double rectY = domainAxis.getCategoryStart(column, getColumnCount(), 
+                dataArea, xAxisLocation);
+
+        int seriesCount = getRowCount();
+        int categoryCount = getColumnCount();
+        if (seriesCount > 1) {
+            double seriesGap = dataArea.getHeight() * getItemMargin()
+                               / (categoryCount * (seriesCount - 1));
+            rectY = rectY + row * (state.getBarWidth() + seriesGap);
+        }
+        else {
+            rectY = rectY + row * state.getBarWidth();
+        }
+
+        // BAR X
+        Number meanValue = dataset.getMeanValue(row, column);
+
+        double value = meanValue.doubleValue();
+        double base = 0.0;
+        double lclip = getLowerClip();
+        double uclip = getUpperClip();
+
+        if (uclip <= 0.0) {  // cases 1, 2, 3 and 4
+            if (value >= uclip) {
+                return; // bar is not visible
+            }
+            base = uclip;
+            if (value <= lclip) {
+                value = lclip;
+            }
+        }
+        else if (lclip <= 0.0) { // cases 5, 6, 7 and 8
+            if (value >= uclip) {
+                value = uclip;
+            }
+            else {
+                if (value <= lclip) {
+                    value = lclip;
+                }
+            }
+        }
+        else { // cases 9, 10, 11 and 12
+            if (value <= lclip) {
+                return; // bar is not visible
+            }
+            base = getLowerClip();
+            if (value >= uclip) {
+               value = uclip;
+            }
+        }
+
+        RectangleEdge yAxisLocation = plot.getRangeAxisEdge();
+        double transY1 = rangeAxis.valueToJava2D(base, dataArea, yAxisLocation);
+        double transY2 = rangeAxis.valueToJava2D(value, dataArea, 
+                yAxisLocation);
+        double rectX = Math.min(transY2, transY1);
+
+        double rectHeight = state.getBarWidth();
+        double rectWidth = Math.abs(transY2 - transY1);
+
+        Rectangle2D bar = new Rectangle2D.Double(rectX, rectY, rectWidth, 
+                rectHeight);
+        Paint seriesPaint = getItemPaint(row, column);
+        g2.setPaint(seriesPaint);
+        g2.fill(bar);
+        if (isDrawBarOutline() && state.getBarWidth() > 3) {
+            g2.setStroke(getItemStroke(row, column));
+            g2.setPaint(getItemOutlinePaint(row, column));
+            g2.draw(bar);
+        }
+
+        // standard deviation lines
+            double valueDelta = dataset.getStdDevValue(row, column).doubleValue();
+            double highVal = rangeAxis.valueToJava2D(meanValue.doubleValue() 
+                    + valueDelta, dataArea, yAxisLocation);
+            double lowVal = rangeAxis.valueToJava2D(meanValue.doubleValue() 
+                    - valueDelta, dataArea, yAxisLocation);
+
+            if (this.errorIndicatorStroke != null) {
+                g2.setStroke(this.errorIndicatorStroke);
+            }
+            else {
+                g2.setStroke(getItemOutlineStroke(row, column));
+            }
+            if (this.errorIndicatorPaint != null) {
+                g2.setPaint(this.errorIndicatorPaint);  
+            }
+            else {
+                g2.setPaint(getItemOutlinePaint(row, column));   
+            }
+        
+            Line2D line = null;
+            line = new Line2D.Double(lowVal, rectY + rectHeight / 2.0d, 
+                                     highVal, rectY + rectHeight / 2.0d);
+            g2.draw(line);
+            line = new Line2D.Double(highVal, rectY + rectHeight * 0.25, 
+                                     highVal, rectY + rectHeight * 0.75);
+            g2.draw(line);
+            line = new Line2D.Double(lowVal, rectY + rectHeight * 0.25, 
+                                     lowVal, rectY + rectHeight * 0.75);
+            g2.draw(line);
+        
+        CategoryItemLabelGenerator generator = getItemLabelGenerator(row, 
+                column);
+        if (generator != null && isItemLabelVisible(row, column)) {
+            drawItemLabel(g2, dataset, row, column, plot, generator, bar, 
+                    (value < 0.0));
+        }        
+
+        // add an item entity, if this information is being collected
+        EntityCollection entities = state.getEntityCollection();
+        if (entities != null) {
+            addItemEntity(entities, dataset, row, column, bar);
+        }
+
+    }
+
+    protected void drawVerticalItem(Graphics2D g2,
+                                    CategoryItemRendererState state,
+                                    Rectangle2D dataArea,
+                                    CategoryPlot plot,
+                                    CategoryAxis domainAxis,
+                                    ValueAxis rangeAxis,
+                                    StatisticalCategoryDataset dataset,
+                                    int row,
+                                    int column) {
+                                     
+        RectangleEdge xAxisLocation = plot.getDomainAxisEdge();
+        
+        // BAR X
+        double rectX = domainAxis.getCategoryStart(
+            column, getColumnCount(), dataArea, xAxisLocation
+        );
+
+        int seriesCount = getRowCount();
+        int categoryCount = getColumnCount();
+        if (seriesCount > 1) {
+            double seriesGap = dataArea.getWidth() * getItemMargin()
+                               / (categoryCount * (seriesCount - 1));
+            rectX = rectX + row * (state.getBarWidth() + seriesGap);
+        }
+        else {
+            rectX = rectX + row * state.getBarWidth();
+        }
+
+        // BAR Y
+        Number meanValue = dataset.getMeanValue(row, column);
+
+        double value = meanValue.doubleValue();
+        double base = 0.0;
+        double lclip = getLowerClip();
+        double uclip = getUpperClip();
+
+        if (uclip <= 0.0) {  // cases 1, 2, 3 and 4
+            if (value >= uclip) {
+                return; // bar is not visible
+            }
+            base = uclip;
+            if (value <= lclip) {
+                value = lclip;
+            }
+        }
+        else if (lclip <= 0.0) { // cases 5, 6, 7 and 8
+            if (value >= uclip) {
+                value = uclip;
+            }
+            else {
+                if (value <= lclip) {
+                    value = lclip;
+                }
+            }
+        }
+        else { // cases 9, 10, 11 and 12
+            if (value <= lclip) {
+                return; // bar is not visible
+            }
+            base = getLowerClip();
+            if (value >= uclip) {
+               value = uclip;
+            }
+        }
+
+        RectangleEdge yAxisLocation = plot.getRangeAxisEdge();
+        double transY1 = rangeAxis.valueToJava2D(base, dataArea, yAxisLocation);
+        double transY2 = rangeAxis.valueToJava2D(value, dataArea, 
+                yAxisLocation);
+        double rectY = Math.min(transY2, transY1);
+
+        double rectWidth = state.getBarWidth();
+        double rectHeight = Math.abs(transY2 - transY1);
+
+        Rectangle2D bar = new Rectangle2D.Double(rectX, rectY, rectWidth, 
+                rectHeight);
+        Paint seriesPaint = getItemPaint(row, column);
+        g2.setPaint(seriesPaint);
+        g2.fill(bar);
+        if (isDrawBarOutline() && state.getBarWidth() > 3) {
+            g2.setStroke(getItemStroke(row, column));
+            g2.setPaint(getItemOutlinePaint(row, column));
+            g2.draw(bar);
+        }
+
+        // standard deviation lines
+            double valueDelta = dataset.getStdDevValue(row, column).doubleValue();
+            double highVal = rangeAxis.valueToJava2D(meanValue.doubleValue() 
+                    + valueDelta, dataArea, yAxisLocation);
+            double lowVal = rangeAxis.valueToJava2D(meanValue.doubleValue() 
+                    - valueDelta, dataArea, yAxisLocation);
+
+            if (this.errorIndicatorStroke != null) {
+                g2.setStroke(this.errorIndicatorStroke);
+            }
+            else {
+                g2.setStroke(getItemOutlineStroke(row, column));
+            }
+            if (this.errorIndicatorPaint != null) {
+                g2.setPaint(this.errorIndicatorPaint);  
+            }
+            else {
+                g2.setPaint(getItemOutlinePaint(row, column));   
+            }
+            Line2D line = null;
+            line = new Line2D.Double(rectX + rectWidth / 2.0d, lowVal,
+                                     rectX + rectWidth / 2.0d, highVal);
+            g2.draw(line);
+            line = new Line2D.Double(rectX + rectWidth / 2.0d - 5.0d, highVal,
+                                     rectX + rectWidth / 2.0d + 5.0d, highVal);
+            g2.draw(line);
+            line = new Line2D.Double(rectX + rectWidth / 2.0d - 5.0d, lowVal,
+                                     rectX + rectWidth / 2.0d + 5.0d, lowVal);
+            g2.draw(line);
+        
+        CategoryItemLabelGenerator generator = getItemLabelGenerator(row, 
+                column);
+        if (generator != null && isItemLabelVisible(row, column)) {
+            drawItemLabel(g2, dataset, row, column, plot, generator, bar, 
+                    (value < 0.0));
+        }        
+
+        // add an item entity, if this information is being collected
+        EntityCollection entities = state.getEntityCollection();
+        if (entities != null) {
+            addItemEntity(entities, dataset, row, column, bar);
+        }
+    }
+
+// relevant test
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testEquals
+    public void testEquals() {
+        StatisticalBarRenderer r1 = new StatisticalBarRenderer();
+        StatisticalBarRenderer r2 = new StatisticalBarRenderer();
+        assertEquals(r1, r2);
+        
+        r1.setErrorIndicatorPaint(Color.red);
+        assertFalse(r1.equals(r2));
+        r2.setErrorIndicatorPaint(Color.red);
+        assertTrue(r2.equals(r1));
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testHashcode
+    public void testHashcode() {
+        StatisticalBarRenderer r1 = new StatisticalBarRenderer();
+        StatisticalBarRenderer r2 = new StatisticalBarRenderer();
+        assertTrue(r1.equals(r2));
+        int h1 = r1.hashCode();
+        int h2 = r2.hashCode();
+        assertEquals(h1, h2);
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testCloning
+    public void testCloning() {
+        StatisticalBarRenderer r1 = new StatisticalBarRenderer();
+        StatisticalBarRenderer r2 = null;
+        try {
+            r2 = (StatisticalBarRenderer) r1.clone();
+        }
+        catch (CloneNotSupportedException e) {
+            e.printStackTrace();
+        }
+        assertTrue(r1 != r2);
+        assertTrue(r1.getClass() == r2.getClass());
+        assertTrue(r1.equals(r2));
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testSerialization
+    public void testSerialization() {
+
+        StatisticalBarRenderer r1 = new StatisticalBarRenderer();
+        StatisticalBarRenderer r2 = null;
+
+        try {
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            ObjectOutput out = new ObjectOutputStream(buffer);
+            out.writeObject(r1);
+            out.close();
+
+            ObjectInput in = new ObjectInputStream(new ByteArrayInputStream(
+                    buffer.toByteArray()));
+            r2 = (StatisticalBarRenderer) in.readObject();
+            in.close();
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+        }
+        assertEquals(r1, r2);
+
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testDrawWithNullInfo
+    public void testDrawWithNullInfo() {
+        boolean success = false;
+        try {
+            DefaultStatisticalCategoryDataset dataset 
+                    = new DefaultStatisticalCategoryDataset();
+            dataset.add(1.0, 2.0, "S1", "C1");
+            dataset.add(3.0, 4.0, "S1", "C2");
+            CategoryPlot plot = new CategoryPlot(dataset, 
+                    new CategoryAxis("Category"), new NumberAxis("Value"), 
+                    new StatisticalBarRenderer());
+            JFreeChart chart = new JFreeChart(plot);
+             chart.createBufferedImage(300, 200, 
+                    null);
+            success = true;
+        }
+        catch (NullPointerException e) {
+            e.printStackTrace();
+            success = false;
+        }
+        assertTrue(success);
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testDrawWithNullMeanVertical
+    public void testDrawWithNullMeanVertical() {
+        boolean success = false;
+        try {
+            DefaultStatisticalCategoryDataset dataset 
+                    = new DefaultStatisticalCategoryDataset();
+            dataset.add(1.0, 2.0, "S1", "C1");
+            dataset.add(null, new Double(4.0), "S1", "C2");
+            CategoryPlot plot = new CategoryPlot(dataset, 
+                    new CategoryAxis("Category"), new NumberAxis("Value"), 
+                    new StatisticalBarRenderer());
+            JFreeChart chart = new JFreeChart(plot);
+             chart.createBufferedImage(300, 200, 
+                    null);
+            success = true;
+        }
+        catch (NullPointerException e) {
+            e.printStackTrace();
+            success = false;
+        }
+        assertTrue(success);
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testDrawWithNullMeanHorizontal
+    public void testDrawWithNullMeanHorizontal() {
+        boolean success = false;
+        try {
+            DefaultStatisticalCategoryDataset dataset 
+                    = new DefaultStatisticalCategoryDataset();
+            dataset.add(1.0, 2.0, "S1", "C1");
+            dataset.add(null, new Double(4.0), "S1", "C2");
+            CategoryPlot plot = new CategoryPlot(dataset, 
+                    new CategoryAxis("Category"), new NumberAxis("Value"), 
+                    new StatisticalBarRenderer());
+            plot.setOrientation(PlotOrientation.HORIZONTAL);
+            JFreeChart chart = new JFreeChart(plot);
+             chart.createBufferedImage(300, 200, 
+                    null);
+            success = true;
+        }
+        catch (NullPointerException e) {
+            e.printStackTrace();
+            success = false;
+        }
+        assertTrue(success);
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testDrawWithNullDeviationVertical
+    public void testDrawWithNullDeviationVertical() {
+        boolean success = false;
+        try {
+            DefaultStatisticalCategoryDataset dataset 
+                    = new DefaultStatisticalCategoryDataset();
+            dataset.add(1.0, 2.0, "S1", "C1");
+            dataset.add(new Double(4.0), null, "S1", "C2");
+            CategoryPlot plot = new CategoryPlot(dataset, 
+                    new CategoryAxis("Category"), new NumberAxis("Value"), 
+                    new StatisticalBarRenderer());
+            JFreeChart chart = new JFreeChart(plot);
+             chart.createBufferedImage(300, 200, 
+                    null);
+            success = true;
+        }
+        catch (NullPointerException e) {
+            e.printStackTrace();
+            success = false;
+        }
+        assertTrue(success);
+    }
+
+// org.jfree.chart.renderer.category.junit.StatisticalBarRendererTests::testDrawWithNullDeviationHorizontal
+    public void testDrawWithNullDeviationHorizontal() {
+        boolean success = false;
+        try {
+            DefaultStatisticalCategoryDataset dataset 
+                    = new DefaultStatisticalCategoryDataset();
+            dataset.add(1.0, 2.0, "S1", "C1");
+            dataset.add(new Double(4.0), null, "S1", "C2");
+            CategoryPlot plot = new CategoryPlot(dataset, 
+                    new CategoryAxis("Category"), new NumberAxis("Value"), 
+                    new StatisticalBarRenderer());
+            plot.setOrientation(PlotOrientation.HORIZONTAL);
+            JFreeChart chart = new JFreeChart(plot);
+             chart.createBufferedImage(300, 200, 
+                    null);
+            success = true;
+        }
+        catch (NullPointerException e) {
+            e.printStackTrace();
+            success = false;
+        }
+        assertTrue(success);
+    }

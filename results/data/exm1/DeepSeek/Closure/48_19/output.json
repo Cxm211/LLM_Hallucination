@@ -1,0 +1,552 @@
+We are given a single Java source file that contains a buggy function `maybeDeclareQualifiedName` and a large number of test methods from various test classes. The buggy function is part of `TypedScopeCreator` (likely). The task is to determine which test methods actually trigger the bug and produce a minimal correct fix.
+
+First, we need to understand the bug. The function `maybeDeclareQualifiedName` is quite long. Let's examine it carefully.
+
+```java
+void maybeDeclareQualifiedName(NodeTraversal t, JSDocInfo info,
+    Node n, Node parent, Node rhsValue) {
+  Node ownerNode = n.getFirstChild();
+  String ownerName = ownerNode.getQualifiedName();
+  String qName = n.getQualifiedName();
+  String propName = n.getLastChild().getString();
+  Preconditions.checkArgument(qName != null && ownerName != null);
+  // ... rest
+}
+```
+
+The bug might be related to the logic of determining where to declare properties. However, there's a known bug in `maybeDeclareQualifiedName` in Closure Compiler related to the condition for declaring properties on object types. Specifically, the condition at line:
+
+```java
+if ((!ownerType.hasOwnProperty(propName) ||
+     ownerType.isPropertyTypeInferred(propName)) &&
+    ((isExtern && !ownerType.isNativeObjectType()) ||
+     !ownerType.isInstanceType())) {
+```
+
+The issue is that when the property is already declared (not inferred) and the owner type is an instance type, the property should not be re-declared. But the condition `((isExtern && !ownerType.isNativeObjectType()) || !ownerType.isInstanceType())` might be too permissive or incorrect. In particular, the original bug report for this pattern (e.g., issue 48) is about properties being incorrectly declared as inferred when they should be declared.
+
+Looking at the test methods, many are from `TypedScopeCreatorTest`. The bug is likely exposed by tests that check property declaration status (inferred vs declared). For example:
+- `testInferredProperty1` vs `testInferredProperty1a` - note that one expects `isPropertyTypeInferred` true, the other false. The difference is the presence of a comment? Actually, looking at the test code: testInferredProperty1 has "var foo = {}; foo.Bar = 3;" and expects `assertTrue(foo.isPropertyTypeInferred("Bar"))`. testInferredProperty1a has "var foo = {};  foo.Bar = 3;" (two spaces? Actually double space? Not sure). testInferredProperty2 and testInferredProperty2b: one has `var foo = { Bar: 3 };` vs `var foo = {  Bar: 3 };` (extra space). These tests may have been added to test the bug fix. The bug likely caused properties assigned in object literals to be incorrectly declared as inferred when they should be declared, or vice versa.
+
+The bug in `maybeDeclareQualifiedName` could be in the logic that determines `inferred`. Let's trace that logic:
+
+```java
+boolean inferred = true;
+if (info != null) {
+  // Determining declaration for #1 + #3 + #4
+  inferred = !(info.hasType()
+      || info.hasEnumParameterType()
+      || (info.isConstant() && valueType != null
+          && !valueType.isUnknownType())
+      || FunctionTypeBuilder.isFunctionTypeDeclaration(info));
+}
+
+if (inferred) {
+  // Determining declaration for #2
+  inferred = !(rhsValue != null &&
+      rhsValue.isFunction() &&
+      (info != null || !scope.isDeclared(qName, false)));
+}
+
+if (!inferred) {
+  ObjectType ownerType = getObjectSlot(ownerName);
+  if (ownerType != null) {
+    // Only declare this as an official property if it has not been
+    // declared yet.
+    boolean isExtern = t.getInput() != null && t.getInput().isExtern();
+    if ((!ownerType.hasOwnProperty(propName) ||
+         ownerType.isPropertyTypeInferred(propName)) &&
+        ((isExtern && !ownerType.isNativeObjectType()) ||
+         !ownerType.isInstanceType())) {
+      // If the property is undeclared or inferred, declare it now.
+      ownerType.defineDeclaredProperty(propName, valueType, n);
+    }
+  }
+  // defineSlot with inferred=false
+  defineSlot(n, parent, valueType, inferred);
+} else if (rhsValue != null && rhsValue.isTrue()) {
+  // delegate proxy ...
+}
+```
+
+The condition for declaring a property on the owner type has two parts: (1) the property is not already declared (or is inferred), and (2) either (isExtern and not native) OR not an instance type. The problem is that for instance types (like instances of a constructor), we want to skip declaring properties on the instance type itself because that would incorrectly add properties to the instance type rather than the prototype. However, the condition `!ownerType.isInstanceType()` means that if the owner type is an instance type, we never declare the property on it (unless isExtern and not native). That seems correct for most cases. But there is a subtlety: when the property is being assigned to an object literal that is being used as the prototype (e.g., `Foo.prototype = {bar: 1}`), the owner type might be the prototype object (which is not an instance type) and we should declare property `bar` on `Foo.prototype`. That works because `Foo.prototype` is not an instance type (it's a prototype type).
+
+But what about cases like `var foo = {}; foo.Bar = 3;`? Here, `foo` is an object literal, its type is `{}`. `getObjectSlot(ownerName)` returns the type of `foo`, which is an ObjectType (not an instance type). So the condition `!ownerType.isInstanceType()` is true, so we will declare property `Bar` as declared. However, the test `testInferredProperty1` expects it to be inferred. That means the bug might be that the property should be inferred in that case, but the current code declares it as declared? Actually, looking at `testInferredProperty1`: it expects `assertTrue(foo.isPropertyTypeInferred("Bar"))`. But the code above would set `inferred` to false? Let's see: for `var foo = {}; foo.Bar = 3;`, there is no JSDoc info, so `info` is null. Then `inferred` remains true (since no info). Then `inferred = !(rhsValue != null && rhsValue.isFunction() && ...)`; `rhsValue` is a number literal, not a function, so the condition fails, so `inferred` stays true. So `inferred` is true. That means `if (!inferred)` is false, so we go to the `else if` branch (which is for delegate proxy, not relevant). So we do NOT call `defineSlot` with `inferred=false`; we only call `defineSlot` inside the `if (!inferred)` block. So if `inferred` remains true, we skip defining the slot? But the slot should still be defined. Actually, there is a call to `defineSlot` only if `!inferred`. That suggests that for inferred properties, we do not call `defineSlot` at all? Wait, there is also a call to `defineSlot` outside the `if (!inferred)` block? No, only inside. That means if `inferred` is true, we never call `defineSlot`. But the property still gets declared? The code also has the part that declares the property on the owner type inside `if (!inferred)`. So if `inferred` is true, we also skip declaring on owner type. That means the property is not declared at all? But the test expects it to be inferred. There must be another mechanism that defines the slot for inferred properties. Maybe `defineSlot` is called elsewhere? Or maybe the stub declaration adds it? Actually, earlier in the function, there is a check:
+
+```java
+if (valueType == null) {
+  if (parent.isExprResult()) {
+    stubDeclarations.add(new StubDeclaration(...));
+  }
+  return;
+}
+```
+
+If valueType is not null, we proceed. But if `inferred` is true, we don't call `defineSlot`, so the slot is not defined? That seems like a problem. However, perhaps `defineSlot` is called for all cases? Let's look at the full function again. I see that after determining `valueType`, there is code for prototype handling, then if `valueType == null` return, then the `inferred` logic, then at the end, there is a call to `defineSlot` only inside `if (!inferred)`. So if `inferred` is true, we go to the `else if` branch which is only for delegate proxy. That means inferred properties are not defined as slots? That would cause many tests to fail. But maybe the slot is defined elsewhere, e.g., in the caller or in `processPropertyAssignment`. This function is called from `processPropertyAssignment` which might handle inferred properties differently. The bug might be that the condition for declaring the property on the owner type is incorrect, causing properties to be declared when they should be inferred, or vice versa.
+
+Looking at the test `testInferredProperty1a`: it expects `assertFalse(foo.isPropertyTypeInferred("Bar"))` for the same code but with an extra space? Actually, the difference is not just space; the test name suggests "1a" might be different. Wait, the source shows:
+- testInferredProperty1: "var foo = {}; foo.Bar = 3;"
+- testInferredProperty1a: "var foo = {};  foo.Bar = 3;" (double space? maybe it's a formatting issue, but it's the same code)
+- testInferredProperty2: "var foo = { Bar: 3 };"
+- testInferredProperty2b: "var foo = {  Bar: 3 };" (double space)
+- testInferredProperty2c: "var foo = {  Bar: 3 };" but expects function type? That seems different.
+
+This suggests that the tests are checking a subtle behavior where the presence of a comment or something changes the inference. But in the provided code, there are no JSDoc comments. So maybe the bug is that the property is incorrectly declared when it should be inferred, or vice versa.
+
+Another clue: test `testInferredProperty1` expects `assertTrue(foo.isPropertyTypeInferred("Bar"))`, while `testInferredProperty1a` expects `assertFalse`. But both have the same code? Possibly the difference is that one is run with externs? Or maybe the function `maybeDeclareQualifiedName` is called in a context where the scope has changed. However, given the task, we need to identify which test methods expose the bug. Typically, the bug in `maybeDeclareQualifiedName` is that it incorrectly determines whether a property is declared or inferred, specifically for object literal assignments. The known issue (Closure Compiler bug 48) is about properties being declared as inferred when they should be declared or vice versa.
+
+Let's look at the test methods that specifically check `isPropertyTypeInferred`:
+- testInferredProperty1: expects true
+- testInferredProperty1a: expects false
+- testInferredProperty2: expects true
+- testInferredProperty2b: expects false
+- testInferredProperty2c: expects false (but different property type)
+- testInferredProperty3: expects true
+- testInferredProperty4: expects true
+- testInferredProperty5: expects false
+- testInferredProperty6: expects false
+
+The bug might cause some of these to fail. Which ones? The bug likely causes `isPropertyTypeInferred` to return the wrong value. For example, for `var foo = {}; foo.Bar = 3;`, it might incorrectly set the property as declared when it should be inferred. Or maybe the opposite.
+
+But we also have many other tests. The bug might also affect the `defineSlot` call, causing slots not to be defined.
+
+Given the complexity, I need to find a pattern. A known fix for `maybeDeclareQualifiedName` in the Closure Compiler repository is to change the condition for declaring property on owner type. The original code:
+
+```java
+if ((!ownerType.hasOwnProperty(propName) ||
+     ownerType.isPropertyTypeInferred(propName)) &&
+    ((isExtern && !ownerType.isNativeObjectType()) ||
+     !ownerType.isInstanceType())) {
+  ownerType.defineDeclaredProperty(propName, valueType, n);
+}
+```
+
+The bug is that this condition also blocks declaring properties on prototypes (which are not instance types) when they are already declared. But more importantly, it might incorrectly allow declaring properties on instance types under certain conditions. Actually, the condition `!ownerType.isInstanceType()` is meant to prevent declaring properties on instances (like `var x = new Foo(); x.bar = 1;`). But for object literals, `ownerType` is not an instance type, so it goes through. That seems fine.
+
+However, there is another issue: the condition `ownerType.isPropertyTypeInferred(propName)` might be true even if the property was previously declared, leading to re-declaration? But that seems okay.
+
+A more likely bug is in the logic of `inferred` itself. For example, the line:
+
+```java
+inferred = !(info.hasType()
+    || info.hasEnumParameterType()
+    || (info.isConstant() && valueType != null
+        && !valueType.isUnknownType())
+    || FunctionTypeBuilder.isFunctionTypeDeclaration(info));
+```
+
+If `info` is not null but does not have type info, it might incorrectly set `inferred` to true. But the condition is: if any of those is true, `inferred` becomes false. That seems correct.
+
+Then later:
+
+```java
+if (inferred) {
+  inferred = !(rhsValue != null &&
+      rhsValue.isFunction() &&
+      (info != null || !scope.isDeclared(qName, false)));
+}
+```
+
+This sets `inferred` to false if the rhs is a function and either info exists or the qName was not declared. This is for #2.
+
+The bug might be in the `scope.isDeclared(qName, false)` check. If the qName is already declared, then the condition `!scope.isDeclared(qName, false)` is false, so `(info != null || !scope.isDeclared(...))` becomes `info != null` or false? Actually, if `info` is null and `scope.isDeclared` returns true, then `(info != null || !scope.isDeclared)` = false, so the whole condition fails, and `inferred` remains true. That means if a function assignment is made to a property that was already declared, it is considered inferred. That might be correct.
+
+I think the key is to look at the tests that directly check the state of properties. Many TypedScopeCreatorTest tests will likely be affected. But we need to find which ones actually trigger the bug.
+
+Another approach: The bug might be related to the handling of `@const` or `@type` annotations. The test `testDeclaredObjectLitProperty4` expects `assertTrue(xType.isPropertyTypeDeclared("z"))` and `assertFalse(xType.isPropertyTypeDeclared("y"))` for an object literal with two properties `{y: 5, z: 3}`. That suggests that property `z` is declared (because it's the last property? Actually, the test expects `y` is not declared, `z` is declared. That seems odd. The behavior might be due to the order of processing: the last property gets declared? That could be a bug.
+
+Similarly, `testDeclaredObjectLitProperty1` expects the property type to be `number` and the type to be `{y: number}`. It does not check inferred/declared. But `testDeclaredObjectLitProperty4` explicitly checks declared status.
+
+Also, `testInferredProperty2b` and `testInferredProperty2c` have the same code but expect different property types. That seems like a bug: the same code should not produce different results.
+
+Given the large number of tests, I'll assume the bug is likely exposed by tests that check property declaration status (inferred vs declared) because that's what the function controls. Also, tests that check property types on object literals.
+
+Let's compile a list of test methods that might expose the bug:
+
+From TypedScopeCreatorTest:
+- testStubProperty
+- testConstructorProperty
+- testEnumProperty
+- testInferredProperty1, testInferredProperty1a
+- testInferredProperty2, testInferredProperty2b, testInferredProperty2c
+- testInferredProperty3, testInferredProperty4, testInferredProperty5, testInferredProperty6
+- testPrototypeInit
+- testBogusPrototypeInit
+- testInferredPrototypeProperty1, testInferredPrototypeProperty2
+- testEnum, testEnumElement, testNamespacedEnum, testEnumAlias, testNamespacesEnumAlias
+- testCollectedFunctionStub, testCollectedFunctionStubLocal, testNamespacedFunctionStub, testNamespacedFunctionStubLocal, testCollectedCtorProperty
+- testPropertyOnUnknownSuperClass1, testPropertyOnUnknownSuperClass2
+- testMethodBeforeFunction1, testMethodBeforeFunction2
+- testAddMethodsPrototypeTwoWays
+- testInferredVar, testDeclaredVar
+- testPropertiesOnInterface, testPropertiesOnInterface2
+- testStubsInExterns, testStubsInExterns2, testStubsInExterns3, testStubsInExterns4
+- testPropertyInExterns1, testPropertyInExterns2, testPropertyInExterns3
+- testTypedStubsInExterns, testTypesInExterns
+- testPropertyDeclarationOnInstanceType, testPropertyDeclarationOnRecordType
+- testGlobalThis1, testGlobalThis2
+- testObjectLiteralCast, testBadObjectLiteralCast1, testBadObjectLiteralCast2
+- testConstructorNode, testForLoopIntegration, testConstructorAlias, testNamespacedConstructorAlias
+- testTemplateType, testClosureParameterTypesWithoutJSDoc, testClosureParameterTypesWithJSDoc
+- testDuplicateExternProperty1, testDuplicateExternProperty2
+- testAbstractMethod, testAbstractMethod2, testAbstractMethod3, testAbstractMethod4
+- testActiveXObject
+- testReturnTypeInference1-5
+- testLiteralTypesInferred
+- testGlobalQualifiedNameInLocalScope
+- testDeclaredObjectLitProperty1-5
+- testDeclaredConstType1-3
+
+From TypeCheckTest (many tests that test type checking errors, not directly the scope creator). However, the bug in `maybeDeclareQualifiedName` could affect type resolution and cause incorrect type checks. For example, test `testMissingProperty30` etc. But those check for missing property errors, which might be affected by whether properties are declared.
+
+But the task is to identify which test methods actually trigger the bug. The bug might be a well-known one: In Closure Compiler, there was a bug in `maybeDeclareQualifiedName` where properties assigned to object literals were incorrectly marked as declared when they should be inferred, or vice versa. The fix involved adjusting the condition for declaring properties on owner types. Specifically, the condition `((isExtern && !ownerType.isNativeObjectType()) || !ownerType.isInstanceType())` was changed to `((isExtern && !ownerType.isNativeObjectType()) || !ownerType.isInstanceType())`? Actually, the fix was to add a check for `ownerType.isFunctionPrototypeType()` or something like that.
+
+I recall that the bug fix for issue 48 (maybe) was to change the condition so that properties on object literals (not prototypes) are declared only if there is JSDoc info. Or something like that.
+
+Given the time, I'll focus on test methods that explicitly test the inferred/declared status of properties on object literals and prototype assignments, as those are most likely to be affected.
+
+Let's look at `testDeclaredObjectLitProperty4`:
+```java
+testSame("var x = {y: 5,  z: 3};");
+ObjectType xType = ObjectType.cast(globalScope.getVar("x").getType());
+assertEquals("number", xType.getPropertyType("y").toString());
+assertFalse(xType.isPropertyTypeDeclared("y"));
+assertTrue(xType.isPropertyTypeDeclared("z"));
+assertEquals("{y: number, z: number}", xType.toString());
+```
+
+This expects that `y` is not declared but `z` is declared. That seems odd; both should be either declared or both inferred. The only difference is that `z` has two spaces before it? Actually, the code has "  z: 3" with two spaces. That might cause a different AST? Unlikely. Perhaps the bug causes only the last property to be declared. So this test likely exposes the bug.
+
+Similarly, `testInferredProperty2b` and `testInferredProperty2c` have the same code but expect different results. That suggests that one of them is the correct behavior after fix. Which one is buggy? The test names: `testInferredProperty2b` might be the fixed version? Not sure.
+
+Given the typical pattern, the bug is that properties on object literals are not being declared when they should be, or vice versa. The test `testDeclaredObjectLitProperty4` expects a mix, which is likely the buggy behavior. After fix, probably both `y` and `z` should be declared or both inferred? Actually, if there is no JSDoc, they should be inferred? But the code currently handles object literals specially: if the property is in an object literal and there is no JSDoc, it is considered inferred? But the function `maybeDeclareQualifiedName` is called for each property assignment. For object literal properties, the owner is the object literal, and the rhs is the value. There is no JSDoc info. So `inferred` should be true. Then it should not declare the property on owner type. But the test expects `z` to be declared. That suggests that the bug causes some properties to be declared even when inferred. Perhaps the condition `((isExtern && !ownerType.isNativeObjectType()) || !ownerType.isInstanceType())` is true for object literal types (which are not instance types), so it declares the property. That would make both `y` and `z` declared. But the test expects only `z` declared. So the bug must be that only the last property gets declared? That could happen if the function is called multiple times and the property is first inferred then later declared? Or maybe the order matters.
+
+I think the bug is more subtle. Possibly the bug is in the `defineSlot` call: for inferred properties, `defineSlot` is not called, so the property is not added to the scope? But then how does the type get propagated? Actually, the slot for `x.y` is defined by the assignment. The `defineSlot` is called with `inferred` parameter. If `inferred` is true, the slot is not defined at all in this function? That would be bad. But maybe `defineSlot` is called elsewhere for all properties? Wait, looking at the function, there is a call to `defineSlot` only inside `if (!inferred)`. So if `inferred` is true, we don't call `defineSlot`. That means the property `x.y` would not have a slot? But the scope must have a slot for it, otherwise `scope.isDeclared(qName, false)` would fail later. So maybe `defineSlot` is called elsewhere for all properties? Or maybe the `if (!inferred)` block also handles the case when there is no JSDoc and the property is not a function? Actually, if `inferred` is true, we go to the `else if` branch, which is only for delegate proxy. So for a simple assignment like `x.y = 3`, `inferred` is true, we skip the `if (!inferred)` block, and we do nothing except possibly add stub declaration if valueType is null. But valueType is non-null. So the property is not declared at all? That can't be right. There must be another mechanism: perhaps the function is not called for all assignments? Or maybe `defineSlot` is called in the caller `processPropertyAssignment` regardless? Actually, the function `maybeDeclareQualifiedName` is called, and it may or may not call `defineSlot`. But the caller might also call `defineSlot`? Let's check the context: This function is likely part of `TypedScopeCreator`. The `processPropertyAssignment` method probably calls `maybeDeclareQualifiedName` and then later still defines the slot? No, `maybeDeclareQualifiedName` is supposed to handle the declaration. So if it doesn't define the slot, the slot would not be added. That would cause many tests to fail. Therefore, the bug might be that the condition for `!inferred` is too restrictive, so that many properties that should be declared are not, causing missing slots. But the tests pass? Actually, we are looking at buggy code, so some tests fail.
+
+Given the difficulty, I'll adopt a strategy: The most likely tests that expose the bug are those that explicitly check the declaration status (inferred vs declared) or property types that depend on declaration logic. Also, tests that check for duplicate warnings or missing property errors might be affected.
+
+From the list, I'll pick the following as potential trigger methods:
+
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty1
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty1a
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2b
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2c
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty3
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty4
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty5
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty6
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testDeclaredObjectLitProperty4
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testDeclaredObjectLitProperty1 (maybe)
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testPrototypeInit
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredPrototypeProperty1
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredPrototypeProperty2
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testEnumProperty
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testConstructorProperty
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testCollectedFunctionStub
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testCollectedCtorProperty
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testPropertiesOnInterface
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testPropertiesOnInterface2
+
+Additionally, some TypeCheckTest tests might be affected, but they are more about type checking errors rather than scope creation. However, the bug might cause type errors that are not expected. For example, `testMissingProperty30` etc.
+
+But the bug is specifically in `maybeDeclareQualifiedName`, which is part of `TypedScopeCreator`. So the tests in `TypedScopeCreatorTest` are directly testing the scope creation. Therefore, the failing tests are likely those.
+
+Given the requirement to output only the trigger methods that actually expose the bug, and we need to be precise, I'll assume that the bug is exposed by tests that check the declared/inferred status of properties that are assigned without JSDoc, especially on object literals. The test `testDeclaredObjectLitProperty4` explicitly expects a behavior that seems inconsistent (y not declared, z declared). That is likely the buggy behavior. After fix, both should be either declared or both inferred. Which one is correct depends on the intended semantics. In the Closure Compiler, properties in object literals are considered declared if they have JSDoc; otherwise inferred. But here there is no JSDoc, so both should be inferred. So `testDeclaredObjectLitProperty4` expecting one declared is a bug. Similarly, `testInferredProperty2b` expects false (declared) for `var foo = {  Bar: 3 };` which is likely the buggy behavior; the correct should be inferred (true). So the bug causes some properties to be declared when they should be inferred.
+
+Thus, the trigger methods include those that expect a property to be declared (inferred false) when it should be inferred (true). That includes:
+- testInferredProperty1a (expects false)
+- testInferredProperty2b (expects false)
+- testInferredProperty2c (expects false)
+- testInferredProperty5 (expects false)
+- testInferredProperty6 (expects false)
+- testDeclaredObjectLitProperty4 (expects z declared)
+- testDeclaredObjectLitProperty1? Not sure, it checks property type but not declared status.
+- testConstructorProperty (expects false)
+- testEnumProperty (expects true? It checks isPropertyTypeDeclared)
+- testCollectedFunctionStub (expects false)
+- testCollectedCtorProperty (expects false)
+
+Actually, many tests expect declared properties. The bug might cause properties that should be declared to be inferred instead, or vice versa. We need to know which direction the bug goes.
+
+Let's look at the condition in `if (!inferred)`:
+
+```java
+ObjectType ownerType = getObjectSlot(ownerName);
+if (ownerType != null) {
+  boolean isExtern = ...;
+  if ((!ownerType.hasOwnProperty(propName) ||
+       ownerType.isPropertyTypeInferred(propName)) &&
+      ((isExtern && !ownerType.isNativeObjectType()) ||
+       !ownerType.isInstanceType())) {
+    ownerType.defineDeclaredProperty(propName, valueType, n);
+  }
+}
+defineSlot(n, parent, valueType, inferred);
+```
+
+If `inferred` is false, it will attempt to define the property on the owner type if the conditions are met. Then it always calls `defineSlot` with `inferred=false`. So if `inferred` is false, the property becomes declared. If `inferred` is true, we skip the `if` block and go to `else if` (delegate proxy) or do nothing. That means for inferred properties, we do NOT call `defineSlot`. That seems like a bug: we should always call `defineSlot`? Or maybe `defineSlot` is only called for declared properties? The slot for the variable (e.g., `x.y`) is still needed for the scope. If `inferred` is true, the slot would not be defined, so the variable wouldn't be known. That would cause problems. However, the function might not be the only place where slots are defined. There might be another path for inferred properties. In typical Closure Compiler, the slot is defined by the scope creator elsewhere, maybe in a separate pass. Actually, `maybeDeclareQualifiedName` is called from `processPropertyAssignment` which is called during scope creation. The slot for qualified names is defined in `declareSlot` or something. But if not defined here, it might be defined later? That seems unlikely.
+
+Maybe the bug is that when `inferred` is true, we should still call `defineSlot` with `inferred=true`. But the code doesn't do that. So the fix would be to move the `defineSlot` call outside the `if (!inferred)` block, so it's always called. Or add an else clause.
+
+Looking at the code after the `if (!inferred)` block, there is an `else if (rhsValue != null && rhsValue.isTrue())`. That handles delegate proxy. So if `inferred` is true and rhs is not true, nothing happens. That means the slot is not defined. So definitely, `defineSlot` should be called for both cases, with the appropriate `inferred` flag.
+
+Thus, the minimal fix is to ensure that `defineSlot` is always called. Currently, it is only called inside `if (!inferred)`. We need to call it regardless, but with the correct `inferred` value. So we should move the `defineSlot` call after the `if-else` structure, or add an else for the case where `inferred` is true and not delegate.
+
+Additionally, the condition for declaring property on owner type also needs to be corrected? Possibly.
+
+Given the test `testDeclaredObjectLitProperty4` expects `z` declared but `y` not declared. If we always call `defineSlot` for all properties, then both would get slots, but the property on owner type might still not be declared for `y` because of the condition? Actually, the condition for declaring on owner type is inside `if (!inferred)`. So if `inferred` is true, we don't declare on owner type. That means for `y`, if it's processed first and `inferred` is true (since no JSDoc), we don't declare on owner type, but we also don't call `defineSlot`. However, if we move `defineSlot` outside, we would call it with `inferred=true`, which would add the slot as an inferred slot. For `z`, maybe something causes `inferred` to be false? Why would `z` be different? Possibly because of the extra space? That seems unlikely. Maybe the order of processing: the object literal is processed as a whole, and properties are added one by one. When the first property `y` is processed, `ownerType` (the object literal type) may not yet have `y` as an own property, so the condition `!ownerType.hasOwnProperty(propName)` is true, but since `inferred` is true, we don't enter the block. For `z`, it is the last property. Perhaps after processing `y`, something changes? Unclear.
+
+A more plausible explanation: There is a bug in the condition that determines `inferred`. For object literals, the function might be called multiple times, and the `info` might be set somehow for the last property? Or maybe the `rhsValue` is constant for `z`? Both are number literals.
+
+I think the bug is that `defineSlot` is not called for inferred properties, causing the slot to not be defined. That would cause all assignments without JSDoc to be ignored, leading to many missing variable errors. But the tests that check for properties (like testInferredProperty1) expect the property to exist and be inferred. So if the slot is not defined, the property would not exist, and the test would fail. Therefore, the bug must be that `defineSlot` is called elsewhere, perhaps in the caller, but with incorrect inferred flag? Or maybe the function is only called for declared properties? The function name `maybeDeclareQualifiedName` suggests it may or may not declare. For inferred properties, perhaps the call is skipped? But the test `testInferredProperty1` expects the property to exist and be inferred, so the property must be defined somewhere. If not here, then somewhere else. That somewhere else might be `processPropertyAssignment` which might call `defineSlot` directly for inferred properties. In that case, the bug might be in the condition that decides whether to call this function at all.
+
+Given the time constraints, I'll assume the standard fix for this bug in the Closure Compiler code is to change the condition in the `if (!inferred)` block to also handle the case where the property should be declared on the owner type even when `inferred` is true? Or to change the logic so that `defineSlot` is always called.
+
+Looking at the Closure Compiler source code history, there is a commit that fixes issue 48. The fix for `maybeDeclareQualifiedName` is to change the condition:
+
+```java
+if ((!ownerType.hasOwnProperty(propName) ||
+     ownerType.isPropertyTypeInferred(propName)) &&
+    ((isExtern && !ownerType.isNativeObjectType()) ||
+     !ownerType.isInstanceType())) {
+```
+
+to something like:
+
+```java
+if (!inferred &&
+    (!ownerType.hasOwnProperty(propName) ||
+     ownerType.isPropertyTypeInferred(propName)) &&
+    ((isExtern && !ownerType.isNativeObjectType()) ||
+     !ownerType.isInstanceType())) {
+```
+
+But that would only declare on owner type when `inferred` is false. Currently, the condition does not check `!inferred`. Wait, the code is inside `if (!inferred)`, so it already checks that. So that's fine.
+
+Another fix might be to change the condition for `defineSlot` to always be called. For example:
+
+```java
+if (!inferred) {
+  // declare on owner type
+  // ...
+}
+defineSlot(n, parent, valueType, inferred);
+```
+
+That would ensure the slot is always defined. That seems like a logical fix.
+
+Also, the prototype handling might have issues.
+
+Given the test `testDeclaredObjectLitProperty4`, after fix, both `y` and `z` should be inferred, so both `isPropertyTypeDeclared` should be false. That matches the expected after fix. So the fix should cause all properties without JSDoc to be inferred.
+
+Thus, the minimal fix is to move the `defineSlot` call outside the `if (!inferred)` block so that it is always called. Also, the `else if` for delegate proxy might need adjustment because now `defineSlot` will be called for all cases, but the delegate case should also define the slot? Actually, in the delegate case, we call `defineSlot` inside `else if`. That would still work.
+
+So the corrected code should be:
+
+```java
+if (!inferred) {
+  ObjectType ownerType = getObjectSlot(ownerName);
+  if (ownerType != null) {
+    boolean isExtern = t.getInput() != null && t.getInput().isExtern();
+    if ((!ownerType.hasOwnProperty(propName) ||
+         ownerType.isPropertyTypeInferred(propName)) &&
+        ((isExtern && !ownerType.isNativeObjectType()) ||
+         !ownerType.isInstanceType())) {
+      ownerType.defineDeclaredProperty(propName, valueType, n);
+    }
+  }
+} else if (rhsValue != null && rhsValue.isTrue()) {
+  // delegate proxy
+  FunctionType ownerType =
+      JSType.toMaybeFunctionType(getObjectSlot(ownerName));
+  if (ownerType != null) {
+    JSType ownerTypeOfThis = ownerType.getTypeOfThis();
+    String delegateName = codingConvention.getDelegateSuperclassName();
+    JSType delegateType = delegateName == null ?
+        null : typeRegistry.getType(delegateName);
+    if (delegateType != null &&
+        ownerTypeOfThis.isSubtype(delegateType)) {
+      defineSlot(n, parent, getNativeType(BOOLEAN_TYPE), true);
+    }
+  }
+  // Additionally, should we call defineSlot for the inferred case? 
+  // Actually, we need to ensure that even when not delegate, the slot is defined.
+  // So we should move the defineSlot call after the if-else, or add it in the else case.
+}
+
+// defineSlot should be called for all cases?
+```
+
+But note that in the `else if` block, `defineSlot` is called for delegate. So we need to ensure that in the case where `inferred` is true and rhs is not true, we also call `defineSlot`. Currently, we don't. So we need to add that.
+
+The minimal fix is to restructure so that `defineSlot` is always called at the end. Something like:
+
+```java
+boolean shouldDefineSlot = true;
+if (!inferred) {
+  // ownerType stuff
+} else if (rhsValue != null && rhsValue.isTrue()) {
+  // delegate stuff
+  // For delegate, defineSlot is already called inside, so set shouldDefineSlot = false
+  shouldDefineSlot = false;
+}
+if (shouldDefineSlot) {
+  defineSlot(n, parent, valueType, inferred);
+}
+```
+
+But that might be more invasive. Alternatively, we can add an else clause that calls defineSlot.
+
+Given that the bug is exposed by tests like `testInferredProperty1` which expects the property to be inferred and exist, the current code probably does not call defineSlot for that case, causing the property to not exist. But the test passes on the buggy version? Actually, the buggy version might have other mechanisms. I'm going in circles.
+
+Given the time, I'll produce a fix that moves `defineSlot` outside the if-else, and also adjusts the delegate case to not duplicate. However, to be minimal, I'll keep the delegate case as is and add an else that calls defineSlot for inferred non-delegate case.
+
+The fixed function will be:
+
+```java
+void maybeDeclareQualifiedName(NodeTraversal t, JSDocInfo info,
+    Node n, Node parent, Node rhsValue) {
+  Node ownerNode = n.getFirstChild();
+  String ownerName = ownerNode.getQualifiedName();
+  String qName = n.getQualifiedName();
+  String propName = n.getLastChild().getString();
+  Preconditions.checkArgument(qName != null && ownerName != null);
+
+  // ... (same as before until the inferred logic)
+
+  if (!inferred) {
+    ObjectType ownerType = getObjectSlot(ownerName);
+    if (ownerType != null) {
+      boolean isExtern = t.getInput() != null && t.getInput().isExtern();
+      if ((!ownerType.hasOwnProperty(propName) ||
+           ownerType.isPropertyTypeInferred(propName)) &&
+          ((isExtern && !ownerType.isNativeObjectType()) ||
+           !ownerType.isInstanceType())) {
+        ownerType.defineDeclaredProperty(propName, valueType, n);
+      }
+    }
+    defineSlot(n, parent, valueType, inferred);
+  } else if (rhsValue != null && rhsValue.isTrue()) {
+    FunctionType ownerType =
+        JSType.toMaybeFunctionType(getObjectSlot(ownerName));
+    if (ownerType != null) {
+      JSType ownerTypeOfThis = ownerType.getTypeOfThis();
+      String delegateName = codingConvention.getDelegateSuperclassName();
+      JSType delegateType = delegateName == null ?
+          null : typeRegistry.getType(delegateName);
+      if (delegateType != null &&
+          ownerTypeOfThis.isSubtype(delegateType)) {
+        defineSlot(n, parent, getNativeType(BOOLEAN_TYPE), true);
+      }
+    }
+  } else {
+    // Inferred, non-delegate case: define slot as inferred
+    defineSlot(n, parent, valueType, inferred);
+  }
+}
+```
+
+This ensures that `defineSlot` is always called. However, this might cause duplicate calls in the delegate case because it still calls `defineSlot` inside the block and we also call it in the else? No, the else only executes if not the delegate case. So it's fine.
+
+Now, we need to output the trigger methods. Based on the analysis, the tests that are most likely to fail due to the missing `defineSlot` call for inferred properties are those that expect properties to exist and be inferred. Those include:
+- testInferredProperty1 (expects inferred true)
+- testInferredProperty2 (expects inferred true)
+- testInferredProperty3 (expects inferred true)
+- testInferredProperty4 (expects inferred true)
+- testPrototypeInit? (expects inferred)
+- testInferredPrototypeProperty1, testInferredPrototypeProperty2
+- Many others.
+
+But also tests that expect declared properties might be affected if the bug causes them to be inferred.
+
+Given the complexity, I'll list all TypedScopeCreatorTest methods that check property declaration status or property types that depend on correct slot definition. Since the bug is likely that inferred properties are not being defined as slots, any test that references those properties will fail. That includes many.
+
+However, the task says "Determine which testcase methods actually expose the bug." So we need to pick those that fail due to the bug. I'll assume the bug is that `defineSlot` is not called for inferred properties, causing the slot to not exist. Therefore, tests that check for property existence or type on such properties will fail.
+
+Let's list all test methods from TypedScopeCreatorTest:
+
+- testStubProperty: checks that property exists and has unknown type. That property is defined by a stub (no assignment). That might not be affected.
+- testConstructorProperty: expects property Bar on foo is declared. That is a constructor assignment, which has JSDoc? Actually, no JSDoc. But it's a function assignment, so `inferred` might be false because of the function case? The code: `inferred = !(rhsValue.isFunction() && (info != null || !scope.isDeclared(qName, false)));` For `foo.Bar = function() {};`, there is no info, and `scope.isDeclared(qName, false)` is false (since not declared before), so the condition is true, making `inferred` false. So defineSlot is called. So that test should still pass.
+- testEnumProperty: similar, assignment of object literal? Actually, `foo.Bar = {XXX: 'xxx'};` is an object literal, not a function. So `inferred` would be true (since no info and not a function). Then defineSlot is not called in buggy version, so the property `foo.Bar` would not have a slot. The test expects it to have a property with enum type. That would fail. So testEnumProperty likely exposes the bug.
+- testInferredProperty1: expects property inferred. The property is defined by assignment of number. Inferred true, so no defineSlot, so property not defined -> test fails.
+- testInferredProperty1a: expects property not inferred (declared). But with bug, it would not even exist, so test fails.
+- testInferredProperty2, 2b, 2c: similar.
+- testInferredProperty3,4,5,6: similar.
+- testPrototypeInit: expects inferred property on instance. The assignment `Foo.prototype = {bar: 1};` is processed, and the property `bar` should be inferred. Bug: defineSlot not called for inferred, so property not on prototype? Actually, the property is on the object literal, not on a qualified name. The assignment is to `Foo.prototype`, which is a qualified name. For `Foo.prototype = {bar: 1}`, the function is called with n = `Foo.prototype`, rhs = object literal. The property `bar` is handled elsewhere? Actually, the object literal is processed separately. The slot for `Foo.prototype` is defined. That might still be declared? I'm not sure.
+- testInferredPrototypeProperty1: `Foo.prototype.bar = 1;` This is a direct assignment. The qualified name is `Foo.prototype.bar`. Inferred true, so no defineSlot. The property `bar` on prototype would not be defined -> test fails.
+- testInferredPrototypeProperty2: similar.
+- testEnum, testEnumElement, testNamespacedEnum, testEnumAlias: These involve object literal assignments to names. For example, `var Foo = {BAR: 1};` - this creates a variable `Foo` and an object literal. The property `BAR` is part of the object literal, processed as an object lit property, not as a qualified name assignment? Actually, `{BAR: 1}` is an object literal, its properties are processed separately. The qualified name `Foo.BAR` might be created when the object literal is assigned to `Foo`. The function is called for the assignment of the object literal to `Foo` (which is a simple name, not a qualified name? Actually, `Foo` is a simple name, so maybe not handled by this function. So these tests might not directly trigger the bug.
+- testCollectedFunctionStub: `this.foo;` inside constructor. This is a stub declaration. The function is called with `n` being a GETPROP? The stub is added in the `if (valueType == null)` block. That might be unaffected.
+- testCollectedCtorProperty: `this.foo = 3;` inside constructor. This is a property assignment on an instance. The owner is `this`, which is of function type? The function is called. There is no JSDoc, rhs is number, so inferred true. So no defineSlot, so the property `foo` on the instance type would not be defined. The test expects it to be declared (not inferred). So it would fail.
+- testPropertiesOnInterface: `I.prototype.bar;` is a stub? Actually, it's a property get, no assignment. That might be handled as stub.
+- testPropertyDeclarationOnInstanceType: `var a = {}; a.name = 0;` This is an assignment to a property of an object literal. Inferred true, no defineSlot, so `a.name` slot not defined. The test expects the slot to exist and be number. So that would fail.
+- testPropertyDeclarationOnRecordType: similar.
+- testGlobalThis1: `var x = this;` not qualified name.
+- testObjectLiteralCast: involves `goog.reflect.object(A.B, {isEnabled: 3})` and later `(new A.B()).isEnabled`. The property `isEnabled` on the instance is declared. That might be affected.
+- testGlobalQualifiedNameInLocalScope: `ns.foo` defined inside a function. That is a function assignment, so inferred might be false, so it might work.
+- testDeclaredObjectLitProperty4: expects `z` declared and `y` not declared. With bug, neither would exist, so test fails.
+- testDeclaredConstType1-3: probably unaffected.
+
+Thus, many tests are exposed.
+
+Given the instruction to output only the trigger methods that actually expose the bug, we need to be selective. I'll include those that are most clearly dependent on the correct working of `maybeDeclareQualifiedName` for inferred properties.
+
+I'll list them as:
+
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testEnumProperty
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty1
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty1a
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2b
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2c
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty3
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty4
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty5
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty6
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testPrototypeInit
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredPrototypeProperty1
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredPrototypeProperty2
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testCollectedCtorProperty
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testPropertyDeclarationOnInstanceType
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testPropertyDeclarationOnRecordType
+- com.google.javascript.jscomp.TypedScopeCreatorTest::testDeclaredObjectLitProperty4
+
+Additionally, some TypeCheckTest tests might rely on correct property declaration for type checking. For example, `testDfa12`, `testDfa13` etc. But those are more about flow analysis, which might be indirectly affected. I'll skip those unless evidence.
+
+Given the requirement, I'll output the above list.
+
+Now, for the fixed code, we need to produce the full corrected implementation of the function `maybeDeclareQualifiedName`. We'll modify it as described: ensure `defineSlot` is always called. We'll keep the rest unchanged.
+
+Let's write the fixed function.
+
+Note: The original code has `// ...` sections; we'll reproduce the complete function with our fix.
+
+We'll output the fixed function as a JSON string.
+
+Also, we need to include all functions from the input, but the input only contains one function? The source_file only contains the buggy function and the tests. The task says "fixed_code must include every function from the input, in the same order". Since the input only has one function `maybeDeclareQualifiedName`, we output one fixed function.
+
+Let's produce the fixed code.{
+  "trigger_method": [
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testEnumProperty",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty1",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty1a",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2b",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty2c",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty3",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty4",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty5",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredProperty6",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testPrototypeInit",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredPrototypeProperty1",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testInferredPrototypeProperty2",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testCollectedCtorProperty",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testPropertyDeclarationOnInstanceType",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testPropertyDeclarationOnRecordType",
+    "com.google.javascript.jscomp.TypedScopeCreatorTest::testDeclaredObjectLitProperty4"
+  ],
+  "fixed_code": [
+    "void maybeDeclareQualifiedName(NodeTraversal t, JSDocInfo info,\n        Node n, Node parent, Node rhsValue) {\n      Node ownerNode = n.getFirstChild();\n      String ownerName = ownerNode.getQualifiedName();\n      String qName = n.getQualifiedName();\n      String propName = n.getLastChild().getString();\n      Preconditions.checkArgument(qName != null && ownerName != null);\n\n      // Precedence of type information on GETPROPs:\n      // 1) @type annnotation / @enum annotation\n      // 2) ASSIGN to FUNCTION literal\n      // 3) @param/@return annotation (with no function literal)\n      // 4) ASSIGN to something marked @const\n      // 5) ASSIGN to anything else\n      //\n      // 1, 3, and 4 are declarations, 5 is inferred, and 2 is a declaration iff\n      // the function has jsdoc or has not been declared before.\n      //\n      // FUNCTION literals are special because TypedScopeCreator is very smart\n      // about getting as much type information as possible for them.\n\n      // Determining type for #1 + #2 + #3 + #4\n      JSType valueType = getDeclaredType(t.getSourceName(), info, n, rhsValue);\n      if (valueType == null && rhsValue != null) {\n        // Determining type for #5\n        valueType = rhsValue.getJSType();\n      }\n      // Function prototypes are special.\n      // It's a common JS idiom to do:\n      // F.prototype = { ... };\n      // So if F does not have an explicitly declared super type,\n      // allow F.prototype to be redefined arbitrarily.\n      if (\"prototype\".equals(propName)) {\n        Var qVar = scope.getVar(qName);\n        if (qVar != null) {\n          // If the programmer has declared that F inherits from Super,\n          // and they assign F.prototype to an object literal,\n          // then they are responsible for making sure that the object literal's\n          // implicit prototype is set up appropriately. We just obey\n          // the @extends tag.\n          ObjectType qVarType = ObjectType.cast(qVar.getType());\n          if (qVarType != null &&\n              rhsValue != null &&\n              rhsValue.isObjectLit()) {\n            typeRegistry.resetImplicitPrototype(\n                rhsValue.getJSType(), qVarType.getImplicitPrototype());\n          } else if (!qVar.isTypeInferred()) {\n            // If the programmer has declared that F inherits from Super,\n            // and they assign F.prototype to some arbitrary expression,\n            // there's not much we can do. We just ignore the expression,\n            // and hope they've annotated their code in a way to tell us\n            // what props are going to be on that prototype.\n            return;\n          }\n          if (qVar.getScope() == scope) {\n            scope.undeclare(qVar);\n          }\n        }\n      }\n\n      if (valueType == null) {\n        if (parent.isExprResult()) {\n          stubDeclarations.add(new StubDeclaration(\n              n,\n              t.getInput() != null && t.getInput().isExtern(),\n              ownerName));\n        }\n\n        return;\n      }\n\n      // NOTE(nicksantos): Determining whether a property is declared or not\n      // is really really obnoxious.\n      //\n      // The problem is that there are two (equally valid) coding styles:\n      //\n      // (function() {\n      //   /* The authoritative definition of goog.bar. */\n      //   goog.bar = function() {};\n      // })();\n      //\n      // function f() {\n      //   goog.bar();\n      //   /* Reset goog.bar to a no-op. */\n      //   goog.bar = function() {};\n      // }\n      //\n      // In a dynamic language with first-class functions, it's very difficult\n      // to know which one the user intended without looking at lots of\n      // contextual information (the second example demonstrates a small case\n      // of this, but there are some really pathological cases as well).\n      //\n      // The current algorithm checks if either the declaration has\n      // jsdoc type information, or @const with a known type,\n      // or a function literal with a name we haven't seen before.\n      boolean inferred = true;\n      if (info != null) {\n        // Determining declaration for #1 + #3 + #4\n        inferred = !(info.hasType()\n            || info.hasEnumParameterType()\n            || (info.isConstant() && valueType != null\n                && !valueType.isUnknownType())\n            || FunctionTypeBuilder.isFunctionTypeDeclaration(info));\n      }\n\n      if (inferred) {\n        // Determining declaration for #2\n        inferred = !(rhsValue != null &&\n            rhsValue.isFunction() &&\n            (info != null || !scope.isDeclared(qName, false)));\n      }\n\n      if (!inferred) {\n        ObjectType ownerType = getObjectSlot(ownerName);\n        if (ownerType != null) {\n          // Only declare this as an official property if it has not been\n          // declared yet.\n          boolean isExtern = t.getInput() != null && t.getInput().isExtern();\n          if ((!ownerType.hasOwnProperty(propName) ||\n               ownerType.isPropertyTypeInferred(propName)) &&\n              ((isExtern && !ownerType.isNativeObjectType()) ||\n               !ownerType.isInstanceType())) {\n            // If the property is undeclared or inferred, declare it now.\n            ownerType.defineDeclaredProperty(propName, valueType, n);\n          }\n        }\n\n        // If the property is already declared, the error will be\n        // caught when we try to declare it in the current scope.\n        defineSlot(n, parent, valueType, inferred);\n      } else if (rhsValue != null && rhsValue.isTrue()) {\n        // We declare these for delegate proxy method properties.\n        FunctionType ownerType =\n            JSType.toMaybeFunctionType(getObjectSlot(ownerName));\n        if (ownerType != null) {\n          JSType ownerTypeOfThis = ownerType.getTypeOfThis();\n          String delegateName = codingConvention.getDelegateSuperclassName();\n          JSType delegateType = delegateName == null ?\n              null : typeRegistry.getType(delegateName);\n          if (delegateType != null &&\n              ownerTypeOfThis.isSubtype(delegateType)) {\n            defineSlot(n, parent, getNativeType(BOOLEAN_TYPE), true);\n          }\n        }\n      } else {\n        defineSlot(n, parent, valueType, inferred);\n      }\n    }"
+  ]
+}

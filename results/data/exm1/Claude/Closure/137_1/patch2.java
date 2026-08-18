@@ -1,0 +1,5 @@
+private static String getNameSuffix(String name, int index) {
+    return name.substring(
+        index + ContextualRenamer.UNIQUE_ID_SEPARATOR.length(),
+        name.length());
+  }

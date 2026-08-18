@@ -1,0 +1,4 @@
+
+public void writeRawValue(char[] text, int offset, int len) throws IOException {
+    _append(JsonToken.VALUE_EMBEDDED_OBJECT, new String(text, offset, len));
+}

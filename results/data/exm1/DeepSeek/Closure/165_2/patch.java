@@ -1,0 +1,16 @@
+  public boolean canPropertyBeDefined(JSType type, String propertyName) {
+    if (typesIndexedByProperty.containsKey(propertyName)) {
+      for (JSType alt :
+               typesIndexedByProperty.get(propertyName).getAlternates()) {
+        // Skip internal bookkeeping types.
+        if (alt.isNoType() || alt.isNoObjectType()) {
+          continue;
+        }
+        JSType greatestSubtype = alt.getGreatestSubtype(type);
+        if (!greatestSubtype.isEmptyType()) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }

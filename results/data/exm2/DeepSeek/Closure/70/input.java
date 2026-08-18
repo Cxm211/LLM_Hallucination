@@ -1,0 +1,82 @@
+    private void declareArguments(Node functionNode) {
+      Node astParameters = functionNode.getFirstChild().getNext();
+      Node body = astParameters.getNext();
+      FunctionType functionType = (FunctionType) functionNode.getJSType();
+      if (functionType != null) {
+        Node jsDocParameters = functionType.getParametersNode();
+        if (jsDocParameters != null) {
+          Node jsDocParameter = jsDocParameters.getFirstChild();
+          for (Node astParameter : astParameters.children()) {
+            if (jsDocParameter != null) {
+              defineSlot(astParameter, functionNode,
+                  jsDocParameter.getJSType(), true);
+              jsDocParameter = jsDocParameter.getNext();
+            } else {
+              defineSlot(astParameter, functionNode, null, true);
+            }
+          }
+        }
+      }
+    } // end declareArguments
+
+// trigger testcase
+public void testDuplicateLocalVarDecl() throws Exception {
+    testClosureTypesMultipleWarnings(
+        "/** @param {number} x */\n" +
+        "function f(x) { /** @type {string} */ var x = ''; }",
+        Lists.newArrayList(
+            "variable x redefined with type string, original definition" +
+            " at  [testcode] :2 with type number",
+            "initializing variable\n" +
+            "found   : string\n" +
+            "required: number"));
+  }
+
+public void testFunctionArguments13() throws Exception {
+    // verifying that the argument type have non-inferrable types
+    testTypes(
+        "/** @return {boolean} */ function u() { return true; }" +
+        "/** @param {boolean} b\n@return {?boolean} */" +
+        "function f(b) { if (u()) { b = null; } return b; }",
+        "assignment\n" +
+        "found   : null\n" +
+        "required: boolean");
+  }
+
+public void testDuplicateLocalVarDecl() throws Exception {
+    testClosureTypesMultipleWarnings(
+        "/** @param {number} x */\n" +
+        "function f(x) { /** @type {string} */ var x = ''; }",
+        Lists.newArrayList(
+            "variable x redefined with type string, original definition" +
+            " at  [testcode] :2 with type number",
+            "initializing variable\n" +
+            "found   : string\n" +
+            "required: number"));
+  }
+
+public void testFunctionArguments13() throws Exception {
+    // verifying that the argument type have non-inferrable types
+    testTypes(
+        "/** @return {boolean} */ function u() { return true; }" +
+        "/** @param {boolean} b\n@return {?boolean} */" +
+        "function f(b) { if (u()) { b = null; } return b; }",
+        "assignment\n" +
+        "found   : null\n" +
+        "required: boolean");
+  }
+
+public void testScoping12() throws Exception {
+    testTypes(
+        "/** @constructor */ function F() {}" +
+        "/** @type {number} */ F.prototype.bar = 3;" +
+        "/** @param {!F} f */ function g(f) {" +
+        "  /** @return {string} */" +
+        "  function h() {" +
+        "    return f.bar;" +
+        "  }" +
+        "}",
+        "inconsistent return type\n" +
+        "found   : number\n" +
+        "required: string");
+  }

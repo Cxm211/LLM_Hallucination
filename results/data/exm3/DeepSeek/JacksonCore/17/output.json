@@ -1,0 +1,414 @@
+We are given buggy functions and a trigger testcase. We need to fix the bug and generate additional testcases.
+
+First, analyze the buggy functions.
+
+The functions appear to be part of a JSON generator/writer that writes raw text. The main functions: 
+1. `writeRaw(String text, int offset, int len) throws IOException`
+2. `_writeSegmentedRaw(char[] cbuf, int offset, int len) throws IOException`
+3. `_outputRawMultiByteChar(int ch, char[] cbuf, int inputOffset, int inputEnd) throws IOException`
+
+The trigger testcase is `testRawWithSurrogatesString`, which likely tests raw writing with surrogate pairs.
+
+Let's examine the code.
+
+The `writeRaw` method writes a substring of text. It uses a char buffer and calls `writeRaw(char[] buf, int offset, int len)` (not shown here? It might be in a parent class). Actually, the code shows `writeRaw(buf, 0, len2)`. That probably calls another overload `writeRaw(char[], int, int)` which might be `_writeSegmentedRaw`? Looking at the code, `writeRaw` is using a char buffer and then calling `writeRaw(buf, 0, len2)`. But we don't see that method signature. Possibly `writeRaw(char[], int, int)` is defined elsewhere and calls `_writeSegmentedRaw`? Actually, we see `_writeSegmentedRaw` is private. Maybe `writeRaw(char[], int, int)` is implemented as calling `_writeSegmentedRaw`. In the provided buggy functions, we have `_writeSegmentedRaw` and `_outputRawMultiByteChar`. So likely the bug is in handling of surrogate pairs across segment boundaries.
+
+The `writeRaw(String, int, int)` method splits the input into chunks of size `buf.length`. For each chunk, it copies chars from the string to the buffer and calls `writeRaw(char[],0,len2)`. But note the comment: 
+```
+            // If this is NOT the last segment and if the last character looks like
+            // split surrogate second half, drop it
+```
+This suggests that there is a bug when a surrogate pair is split across segments. The comment says "drop it" but the code doesn't actually do that. So the bug might be that it doesn't handle split surrogates correctly.
+
+Looking at the `writeRaw` method: It does not check for surrogates at all. It just splits based on buffer size. If a high surrogate is at the end of a segment and the low surrogate is in the next segment, then the first segment will contain only the high surrogate, and `writeRaw` will process it alone, which may cause an error. The comment indicates that they intended to drop the last character if it looks like a split surrogate second half. But actually, they need to prevent splitting a surrogate pair across boundaries. Possibly they should adjust the segment length to avoid splitting a surrogate pair.
+
+The `_writeSegmentedRaw` method processes char array and writes UTF-8 bytes. It handles multi-byte characters including surrogates. In `_outputRawMultiByteChar`, there is a check for surrogates: if `ch >= SURR1_FIRST` and `ch <= SURR2_LAST`, then it's a surrogate. It expects a second part. If `inputOffset >= inputEnd`, it reports an error. But note that `_outputRawMultiByteChar` is called from `_writeSegmentedRaw` when `ch >= 0x800`. However, in `_writeSegmentedRaw`, after reading a character `ch`, if `ch < 0x800`, it writes two bytes. Otherwise, it calls `_outputRawMultiByteChar`. But note: In `_writeSegmentedRaw`, the character `ch` is read as `char ch = cbuf[offset++];` (after the inner loop). So `offset` is incremented before calling `_outputRawMultiByteChar`. Then `_outputRawMultiByteChar` receives `ch` (the first surrogate?) Actually, `ch` is the character read. If it is a high surrogate, then `ch` will be in the range SURR1_FIRST to SURR1_LAST. In `_outputRawMultiByteChar`, it checks if `ch >= SURR1_FIRST` and `ch <= SURR2_LAST`. That includes both high and low surrogates. If it is a surrogate, it checks if `inputOffset >= inputEnd`. But note: `inputOffset` is the offset passed, which after incrementing in `_writeSegmentedRaw` points to the next character. So if we have a high surrogate at position `offset-1`, then `inputOffset` is the index of the next character. If there is a low surrogate at `inputOffset`, we should combine them. The code does: `_outputSurrogates(ch, cbuf[inputOffset]);` and returns `inputOffset+1`. That seems correct.
+
+But what about the case where the surrogate pair is split across buffer segments in `writeRaw`? In `writeRaw`, we copy a chunk of the string into a char array buffer. If the chunk ends with a high surrogate, the low surrogate is not in this chunk. Then when `writeRaw(char[]...)` is called on that chunk, it will eventually call `_writeSegmentedRaw` on that buffer, and when it processes the high surrogate, it will see that there is no next character (since `inputOffset >= inputEnd`), and report an error: "Split surrogate on writeRaw() input (last character)". That error is reported from `_outputRawMultiByteChar` when `inputOffset >= inputEnd`. So the bug is that `writeRaw(String, int, int)` does not avoid splitting surrogate pairs across segments. The fix is to adjust the segment length to ensure that we do not cut a surrogate pair.
+
+Thus, in `writeRaw(String text, int offset, int len)`, we should check the last character of each segment (except the last segment) to see if it is a high surrogate (i.e., a leading surrogate). If it is, we should reduce `len2` by 1 so that the high surrogate is moved to the next segment. Or we could skip writing that character in this segment and adjust offset accordingly. The comment suggests dropping it, but dropping would lose data. Better to include it in the next segment.
+
+Actually, the comment says: "If this is NOT the last segment and if the last character looks like split surrogate second half, drop it". Wait, "split surrogate second half" means a low surrogate? That is, if the last character is a low surrogate (second half) and it is split from its high surrogate? Actually, if we split a pair, the first segment ends with a high surrogate (first half), and the second segment starts with a low surrogate (second half). The comment says "split surrogate second half" – that would be the low surrogate at the beginning of the next segment? But the check is on the last character of the segment. So maybe they meant: if the last character is a high surrogate (first half) and it would be split from its second half, then drop it? But they say "second half", which is confusing.
+
+Let's think: If a surrogate pair is split, the first segment ends with a high surrogate (first half). The second segment starts with a low surrogate (second half). So the last character of the segment is a high surrogate, which is the first half. So maybe they mis-spoke: they should check for a high surrogate (first half) and drop it (i.e., not include it in this segment) so that it moves to the next segment together with its low surrogate. But dropping it would mean we skip writing it? Actually, we need to write both halves together. So we should not write the high surrogate alone. Therefore, we should adjust the segment boundary so that if the last character is a high surrogate, we reduce the segment length by 1, leaving that high surrogate for the next segment. That way, the high surrogate and its low surrogate will be in the same segment.
+
+Alternatively, if the first character of a segment is a low surrogate (and it was split from previous high surrogate), then we have an invalid sequence. But the previous segment would have ended with a high surrogate, which would be invalid alone. To avoid that, we must ensure that we never cut between a high surrogate and its following low surrogate. So we should check the last character of the segment (except the last segment) and if it is a high surrogate, reduce the segment length to exclude it.
+
+But note: The buffer size might be small. If the buffer size is 1 and we have a surrogate pair, we cannot fit both in one segment. However, the buffer is a char buffer, and the segment length is at most buf.length. If buf.length is 1, then we cannot avoid splitting. But then we would have to handle it differently. Perhaps the writer should be able to handle a single high surrogate? But according to UTF-16, a high surrogate without a low surrogate is invalid. The application may be passing valid strings, so we should ensure we don't split. The buffer size is likely larger than 1. We can assume that the buffer is large enough to hold at least a few characters.
+
+Thus, the fix in `writeRaw(String, int, int)` is: when we compute `len2 = Math.min(buf.length, len)`, we should check if `len2 < len` (i.e., not the last segment) and if the character at `offset+len2-1` is a high surrogate (i.e., between 0xD800 and 0xDBFF). If so, we should decrement `len2` by 1 to avoid splitting. But we must also ensure `len2 > 0`. If `len2` becomes 0? That would happen if buf.length is 1 and the first character is a high surrogate. In that case, we cannot write any character from this segment; we might need to write nothing and then the next segment will start with the high surrogate? But then the next segment will have the high surrogate and possibly the low surrogate if buf.length >=2? Actually, if buf.length is 1, then we are forced to split. However, the code in `_writeSegmentedRaw` will then see a lone high surrogate and report an error. To avoid that, we could allow the high surrogate to be written alone? But that would be an invalid UTF-16 sequence. Alternatively, we could increase the buffer size? Not possible. So we need to handle the case where a surrogate pair must be split across buffer boundaries. How does the original code intend to handle that? The comment says "drop it", meaning they might skip the last character if it is a split surrogate second half. But that doesn't make sense.
+
+Let's look at the actual Jackson source code. This appears to be from `JsonGenerator` or `UTF8JsonGenerator`. I recall that in Jackson, there is a method `writeRaw` that handles splitting of surrogate pairs. I think the fix is to check for a high surrogate at the end of a segment and reduce the segment length accordingly. That is common practice.
+
+We'll implement that.
+
+Now, also examine `_writeSegmentedRaw` and `_outputRawMultiByteChar` for any other bugs. In `_outputRawMultiByteChar`, there is a condition `if (ch >= SURR1_FIRST)`. It should be `if (ch >= Character.MIN_SURROGATE && ch <= Character.MAX_SURROGATE)`. But they use constants SURR1_FIRST and SURR2_LAST. Those are likely defined as 0xD800 and 0xDFFF. That's fine. However, note that the condition `ch >= SURR1_FIRST` includes low surrogates as well. Then they check `ch <= SURR2_LAST`. That's both high and low. Then they say "yes, outside of BMP". But low surrogates are also outside BMP? Actually, surrogates are in the BMP but are reserved for UTF-16. They are not valid characters. So the method name `_outputRawMultiByteChar` suggests it outputs a multi-byte UTF-8 sequence for a character outside the BMP, which requires 4 bytes. For a surrogate pair, they need to combine two surrogates into one Unicode code point and then encode as 4 bytes. They call `_outputSurrogates`. That seems correct.
+
+But there is a bug: In `_outputRawMultiByteChar`, after checking for surrogates, if it's a surrogate, they call `_outputSurrogates(ch, cbuf[inputOffset])` but they haven't checked that `cbuf[inputOffset]` is a low surrogate. Actually, they do check `if (inputOffset >= inputEnd || cbuf == null)`. But they don't verify that the second char is a low surrogate. However, `_outputSurrogates` likely does that. We'll assume it's correct.
+
+Also, in `_writeSegmentedRaw`, after the inner loop, they check `if ((_outputTail + 3) >= _outputEnd)`. That ensures there is space for up to 3 bytes. But for a surrogate pair, they need 4 bytes. However, `_outputRawMultiByteChar` when handling a surrogate pair, it calls `_outputSurrogates` which might need 4 bytes. Does `_outputSurrogates` check buffer space? Probably it does. But note that `_writeSegmentedRaw` only ensures 3 bytes free. That might be insufficient for a surrogate pair which requires 4 bytes. So there is a potential buffer overflow. Let's see: In `_writeSegmentedRaw`, before calling `_outputRawMultiByteChar`, they have already checked `if ((_outputTail + 3) >= _outputEnd)`. If `_outputTail + 3 >= _outputEnd`, they flush. But if `_outputTail + 3 < _outputEnd`, then `_outputTail + 4` might be equal to `_outputEnd`? That would mean only 3 bytes free, but we need 4. So we need to ensure at least 4 bytes free for a surrogate pair. However, the code in `_outputRawMultiByteChar` might call `_outputSurrogates`, which might need to write 4 bytes. If there is only space for 3 bytes, that would cause an array index out of bounds. So we should adjust the condition to ensure at least 4 bytes free when we might write a surrogate pair. But how to know if the character is a surrogate? At that point, we don't know yet because we haven't read the next character. The condition `ch < 0x800` is for characters that are two-byte UTF-8. For characters >= 0x800, they could be three-byte UTF-8 (for BMP characters outside 0x800-0xFFFF) or four-byte UTF-8 for supplementary characters (which are represented by surrogate pairs). But note that `ch` is a char, so it can only be up to 0xFFFF. Characters beyond 0xFFFF are represented as two chars (surrogate pair). So when we have a char >= 0x800, it could be a three-byte UTF-8 encoding if it's not a surrogate. If it is a surrogate (high or low), we need to handle the pair. The method `_outputRawMultiByteChar` will check. So we need to ensure there is enough space for up to 4 bytes. The condition `(_outputTail + 3) >= _outputEnd` ensures there are at most 2 bytes left? Actually, if `_outputTail + 3 >= _outputEnd`, then `_outputTail` to `_outputEnd-1` has less than 3 bytes free. So they flush to make more space. After flushing, we have at least `_outputEnd - _outputTail` bytes free, which is the buffer size. Usually buffer size is large enough. But to be safe, we should ensure at least 4 bytes free before processing a character that might become a surrogate pair. However, we don't know if it's a surrogate until we read it. So we could check after we read the character, but before writing. In `_outputRawMultiByteChar`, before writing, we could check if we need to flush. But note that `_outputRawMultiByteChar` is called only when `ch >= 0x800`. In `_writeSegmentedRaw`, after reading `ch`, we have already incremented offset. If we need to flush, we should flush before writing. However, the check `if ((_outputTail + 3) >= _outputEnd)` is done before reading `ch`? Actually, the flow: 
+- After inner loop, we have `if ((_outputTail + 3) >= _outputEnd) { _flushBuffer(); }`
+- Then `char ch = cbuf[offset++];`
+- Then if `ch < 0x800`, write two bytes (already have space because we ensured at least 3 bytes free, so 2 bytes is fine).
+- Else, call `_outputRawMultiByteChar`.
+
+But for `ch >= 0x800`, we might need up to 4 bytes. However, we only ensured 3 bytes free. So if we need 4 bytes, we might overflow. Therefore, we should change the condition to ensure at least 4 bytes free. But note: For characters that are not surrogates, we only need 3 bytes. So we could check inside `_outputRawMultiByteChar` for surrogate case and flush if needed. That would be more precise.
+
+Looking at `_outputRawMultiByteChar`, it writes three bytes for non-surrogate characters. But for surrogate pairs, it calls `_outputSurrogates`. That method likely writes 4 bytes. So we need to ensure there is space for 4 bytes before writing. We can modify `_outputRawMultiByteChar` to check if `ch` is a surrogate and if so, ensure at least 4 bytes free. Alternatively, we can change the condition in `_writeSegmentedRaw` to `if ((_outputTail + 4) >= _outputEnd)` for safety, because any character >= 0x800 might be a surrogate and require 4 bytes? Actually, if `ch` is a high surrogate, we will then read the next char (low surrogate) and combine them into a 4-byte sequence. But the method `_outputRawMultiByteChar` will handle that and write 4 bytes. So we need at least 4 bytes free. If `ch` is not a surrogate (i.e., a BMP character between 0x800 and 0xFFFF), we only need 3 bytes. So we could keep the check as is and then inside `_outputRawMultiByteChar`, if it's a surrogate, check for space again. But note that `_outputRawMultiByteChar` is called after we have already incremented offset. If we flush inside, we might have to adjust? That's okay.
+
+Let's examine `_outputSurrogates` (not provided). We don't have its code. But we can assume it writes 4 bytes. We need to ensure there is enough space. Since we don't have the code, we must rely on the existing logic. The bug report likely is about the splitting across segments in `writeRaw`. The trigger testcase is `testRawWithSurrogatesString`. That test probably writes a string containing surrogate pairs and expects no error. The bug likely manifests as an error when surrogate pairs are split across buffer boundaries.
+
+Therefore, the main fix is in `writeRaw(String, int, int)` to avoid splitting surrogate pairs. We'll also consider the buffer space issue, but since the testcase might already pass with the given buffer size, we might not need to change that. However, to be safe, we should also adjust the condition in `_writeSegmentedRaw` to ensure at least 4 bytes free when we might write a surrogate pair. But we cannot change `_writeSegmentedRaw` without seeing the whole class? We can only change the provided functions. The provided functions are three: `writeRaw(String,...)`, `_writeSegmentedRaw`, and `_outputRawMultiByteChar`. We can modify all three.
+
+Let's list the modifications:
+
+1. In `writeRaw(String text, int offset, int len)`, we need to adjust len2 to not end with a high surrogate when there are more characters after this segment. Also, we should handle the case where the first character of a segment is a low surrogate (if previous segment ended with a high surrogate, we already prevented that by moving the high surrogate to this segment). So we only need to check the last character.
+
+Implementation:
+```
+int len2 = Math.min(buf.length, len);
+if (len2 < len) {
+    // Not the last segment, check if last char is a high surrogate
+    char c = text.charAt(offset + len2 - 1);
+    if (c >= '\uD800' && c <= '\uDBFF') {
+        // high surrogate, reduce segment length to avoid splitting
+        len2--;
+    }
+}
+if (len2 <= 0) {
+    // This can happen if buf.length is 1 and the first char is a high surrogate.
+    // In that case, we cannot write anything in this segment; we need to write the high surrogate together with the next char.
+    // We'll just skip this segment and continue.
+    // But we must ensure we don't infinite loop. We'll set len2 to 1? Actually, if len2 becomes 0, then offset and len remain unchanged, causing infinite loop.
+    // So we must write at least one character. But writing a lone high surrogate is invalid. However, we have no choice if buffer size is 1.
+    // The original code would write it and then report an error. We'll keep the original behavior? Or we could increase buffer size? Not possible.
+    // For safety, we'll write it anyway and let the downstream error happen. But we can avoid infinite loop by setting len2 = 1.
+    len2 = 1;
+}
+```
+But note: if we set len2=1, we are still splitting the surrogate pair. That will cause an error. However, this is a degenerate case. We'll assume buffer size is large enough. We can simply not adjust if len2 becomes 0, and instead keep len2 as originally computed? Actually, if len2 is 1 and the char is a high surrogate, we cannot avoid splitting. So we can just let it be. The condition `if (len2 < len)` ensures we only adjust when there is more data. If len2 is 1 and len > 1, then len2 < len, and we will decrement to 0, which is problematic. So we should only decrement if len2 > 1? Actually, we should ensure len2 remains positive. So:
+```
+if (len2 < len && len2 > 0) {
+    char c = text.charAt(offset + len2 - 1);
+    if (c >= '\uD800' && c <= '\uDBFF') {
+        len2--;
+    }
+}
+if (len2 == 0) {
+    // If we removed the only character because it was a high surrogate and there are more characters,
+    // we need to write at least one character to make progress. But we cannot write the high surrogate alone.
+    // So we revert: write the high surrogate anyway. This will likely cause an error downstream.
+    len2 = 1;
+}
+```
+
+But note: if buf.length is 1 and the first char is a high surrogate, then len2=1, len>1, we check and decrement to 0. Then we set len2=1, so we write the high surrogate alone. That's the same as before. So no improvement. We could instead increase the buffer size? Not possible. So we accept that edge case.
+
+2. In `_writeSegmentedRaw`, we should ensure at least 4 bytes free before processing a character that might be a surrogate. We can change the condition `if ((_outputTail + 3) >= _outputEnd)` to `if ((_outputTail + 4) >= _outputEnd)`. Because the maximum bytes needed for any character (including surrogate pair) is 4. However, for ASCII we only need 1 byte. But we already have a separate inner loop for ASCII that flushes when `_outputTail >= end`. For non-ASCII, we need at least 2 bytes (for ch < 0x800) or 3 bytes (for ch >= 0x800 and not surrogate) or 4 bytes (for surrogate). So we need to ensure at least 4 bytes free. But note: after the inner loop, we have already flushed if `_outputTail >= end`. Then we check for `(_outputTail + 3) >= _outputEnd`. That ensures at least 3 bytes free? Actually, if `(_outputTail + 3) >= _outputEnd`, then there are less than 3 bytes free, so we flush. After flushing, we have at least the buffer size free. So if we change to 4, we flush a bit earlier, which is fine.
+
+But we also need to consider the case where we are writing a two-byte sequence (ch < 0x800). That requires 2 bytes, so having 3 bytes free is sufficient. With 4 bytes free, it's also sufficient. So we can change to 4.
+
+Alternatively, we can keep 3 and inside `_outputRawMultiByteChar`, if it's a surrogate, check for space and flush if needed. Since we don't have `_outputSurrogates`, we'll change to 4 for safety.
+
+3. In `_outputRawMultiByteChar`, we should also check buffer space before writing the three bytes for non-surrogate case. But we already flushed in `_writeSegmentedRaw` with condition +3, so for non-surrogate we have at least 3 bytes free. If we changed to +4, we have at least 4 bytes free, which is fine. However, note that `_outputRawMultiByteChar` is also called from elsewhere? Probably only from `_writeSegmentedRaw`. So we can rely on the caller ensuring enough space. But to be safe, we can add a check before writing the three bytes. But the existing code does not check. It assumes enough space. Since we already flushed, it should be fine.
+
+But there is another bug: In `_outputRawMultiByteChar`, when it's a surrogate, it checks `if (inputOffset >= inputEnd || cbuf == null)`. The condition `cbuf == null` seems odd; cbuf is a parameter, it could be null? But the caller passes the array, so it shouldn't be null. However, note that `_outputRawMultiByteChar` is also used for writing a single char? The method signature is `_outputRawMultiByteChar(int ch, char[] cbuf, int inputOffset, int inputEnd)`. The `cbuf` may be null if called from a different context? Possibly from `writeRaw(char[] ...)`? Not sure. We'll leave it as is.
+
+Now, we must also consider the comment in `writeRaw` about dropping the last character if it looks like a split surrogate second half. That suggests they intended to handle low surrogates at the beginning of a segment? Actually, the comment says "If this is NOT the last segment and if the last character looks like split surrogate second half, drop it". That implies that the last character of the segment might be a low surrogate that was split from its high surrogate in the previous segment. But if we ensure we don't split a pair, then we won't have a low surrogate at the start of a segment without its high surrogate. However, if the input string itself starts with a low surrogate (malformed), that's a separate issue. We are not required to handle malformed input? Possibly the method should handle it gracefully. But the comment suggests they wanted to drop a low surrogate that is split. So maybe we should also check if the first character of a segment is a low surrogate and if the previous segment ended with a high surrogate? That is complicated.
+
+Given the trigger testcase likely tests valid surrogate pairs, we focus on preventing splitting.
+
+Thus, the fix for `writeRaw` is as described.
+
+Now, we need to generate additional trigger testcases. We have one trigger testcase path: `com/fasterxml/jackson/core/json/RawValueWithSurrogatesTest.java::testRawWithSurrogatesString`. The testcase code is just a call to `_testRawWithSurrogatesString(false)`. We need to generate new testcases that fail on buggy code but pass on fixed code. They should cover different branches/behaviors not already covered. The existing test likely writes a string with surrogate pairs. We need to test edge cases:
+
+- A string that causes splitting across buffer boundaries.
+- A string that ends with a high surrogate (invalid).
+- A string that starts with a low surrogate.
+- A string with multiple surrogate pairs.
+- Very long strings that fill buffer exactly.
+
+We need to know the buffer size `_charBuffer` in `writeRaw`. We don't have that. But we can assume it's some default, maybe 2000? In Jackson, the buffer size is typically 2000 for char buffer? We can write a test that uses a string longer than the buffer to force segmentation. We can also set the buffer size via reflection? That might be too complex. The testcase should be minimal and likely use the existing test infrastructure. Since we don't have the full class, we need to create testcases that are similar to the provided one.
+
+We'll generate new test methods in the same test class. The path is the same as the trigger testcase path. So we can add multiple test methods. But the output format expects a list of additional testcases, each with a path and testcase code. The path must be one of the exact file paths of the provided trigger testcases. We have only one path: "com/fasterxml/jackson/core/json/RawValueWithSurrogatesTest.java". So we will create multiple testcases all with the same path? That would mean we are adding multiple test methods to the same file. But each testcase entry should be a separate test method? The instruction says: "Each testcase must have a corresponding path end with .java. The path must be one of the exact file paths of the provided trigger testcases." That suggests we can output multiple testcases for the same path, each containing a different test method. However, we cannot output duplicate paths? Actually, we can output multiple entries with the same path but different testcase code. But if we put them all in one JSON array, each entry is a separate testcase. The test runner might run each independently. But they would be separate methods. So we can generate multiple testcase strings, each being a complete Java method.
+
+We need to generate minimal number of testcases that cover new behaviors. Let's think about branches in the buggy code:
+
+In `writeRaw`:
+- The while loop splits segments.
+- The branch where `len2 = buf.length` vs `len`.
+- The branch where last character is a high surrogate (not handled).
+
+In `_writeSegmentedRaw`:
+- The inner loop for ASCII characters.
+- The branch for non-ASCII: ch < 0x800 vs ch >= 0x800.
+- In ch >= 0x800, the surrogate branch vs non-surrogate.
+- The buffer flushing conditions.
+
+In `_outputRawMultiByteChar`:
+- Surrogate vs non-surrogate.
+- If surrogate, whether second part exists.
+
+We want to cover scenarios not covered by the existing trigger testcase. The existing test likely writes a string with surrogate pairs, but maybe it doesn't cause segmentation because the string is short. So we need a test that forces segmentation. Also, we need a test that causes a high surrogate at the end of a segment.
+
+We can create testcases:
+
+1. Test with a string that is longer than the internal char buffer, containing a surrogate pair that would be split across segments. This will fail on buggy code (error about split surrogate) and pass on fixed code.
+
+2. Test with a string that ends with a high surrogate (invalid UTF-16). This might cause an error in both buggy and fixed? Actually, the buggy code might report an error in `_outputRawMultiByteChar` because it sees a lone high surrogate. The fixed code will also see a lone high surrogate because it's the last segment and we don't adjust. So both would fail. But we need a test that fails on buggy but passes on fixed. So we need a scenario where buggy fails but fixed passes. That would be the splitting scenario. For invalid input, both might behave the same. So we don't need that.
+
+3. Test with a string that starts with a low surrogate. That is invalid, and both might throw an error? Possibly the buggy code might not detect it? Not sure.
+
+4. Test with a string that has a surrogate pair exactly aligned with buffer boundaries so that the pair is not split. That should pass on both.
+
+We'll focus on the splitting scenario. Also, we might test the buffer space issue: if we write a surrogate pair when the output buffer has only 3 bytes free, it might overflow. So we need a test that triggers the condition where `(_outputTail + 3) >= _outputEnd` but we need 4 bytes. We can create a test that writes many ASCII characters to fill the output buffer almost full, then write a surrogate pair. That might cause buffer overflow. But we need to know the output buffer size. We can approximate with a large string.
+
+Given the limited context, we'll generate two additional testcases:
+
+- One that forces segmentation of a surrogate pair.
+- One that forces output buffer to be nearly full and then write a surrogate pair to test the space condition.
+
+But we need to ensure they fail on buggy code. For the second, if the buggy code doesn't ensure 4 bytes free, it might cause an ArrayIndexOutOfBoundsException. That would be a failure. Our fix ensures 4 bytes free, so it passes.
+
+We need to write test methods that use the same test class. We'll assume the test class has a method `_testRawWithSurrogatesString(boolean)` and other helpers. We'll create new methods that call `writeRaw` with specific strings.
+
+Let's design:
+
+Test 1: `testRawWithSurrogatesSplitAcrossSegments`
+We'll create a string that is longer than the char buffer. We need to know the buffer size. We can try to infer from typical Jackson: the char buffer size might be 2000. We can use a string of 2000 characters, then a surrogate pair, then more characters. But we don't know. Alternatively, we can use reflection to get the buffer size. That's too heavy. We can instead write a loop that writes many characters and rely on the fact that the buffer is fixed. However, to be safe, we can write a string that is guaranteed to be split by using a small buffer if we can set it. Since we cannot modify the buffer size, we can use the existing generator's configuration? Not sure.
+
+Maybe the test infrastructure already provides a way to create a generator with a small buffer. The existing test likely does that. We can mimic by calling `_testRawWithSurrogatesString` with a parameter? The trigger testcase calls `_testRawWithSurrogatesString(false)`. There might be an overload that allows setting buffer size. We don't know.
+
+Given the constraints, we can write a test that uses the default generator and writes a very long string (e.g., 10000 characters) containing a surrogate pair. This will likely cause segmentation because the buffer is finite. This should fail on buggy code. It's a valid test.
+
+Test 2: `testRawWithSurrogatesAndFullOutputBuffer`
+We need to fill the output buffer. We can write many ASCII characters (each takes 1 byte) until the buffer is almost full, then write a surrogate pair (4 bytes). To do this, we need to know the output buffer size. Typically, it's also around 2000. We can write 2000 ASCII characters, then a surrogate pair. But if the buffer flushes automatically when full, we might not be able to control. However, the method `writeRaw` might not flush until the buffer is full. We can write enough characters to fill the buffer exactly minus 3 bytes, then write a surrogate pair that requires 4 bytes. That would cause the bug if the check is only for 3 bytes. We can achieve this by writing raw bytes? Not easy.
+
+Alternatively, we can skip the second test because the primary bug is splitting. We'll generate only one additional testcase to keep minimal.
+
+The instruction says "maximize coverage of different behaviors/branches" with minimal number of testcases. So we should at least cover the segmentation bug and maybe the buffer space bug. But we only have three functions, and the buffer space bug is not certain.
+
+Let's examine the provided functions more: In `_writeSegmentedRaw`, the condition `if ((_outputTail + 3) >= _outputEnd)` is used before processing a non-ASCII character. For a surrogate pair, we need 4 bytes, so if `_outputTail + 3 == _outputEnd - 1`, meaning only 3 bytes free, then after flushing? Actually, if `(_outputTail + 3) >= _outputEnd`, then they flush. So after flushing, `_outputTail` becomes 0, and there is `_outputEnd` bytes free (the whole buffer). So there will be plenty of space. So the only issue is when `(_outputTail + 3) < _outputEnd` but `_outputTail + 4 > _outputEnd`. That is, there are exactly 3 bytes free. In that case, they do not flush, and then they call `_outputRawMultiByteChar` for a surrogate, which will try to write 4 bytes, causing overflow. So we need to cover that case. To trigger that, we need to arrange the output buffer such that after writing some bytes, there are exactly 3 bytes left, and then we encounter a surrogate pair. That is possible.
+
+Thus, we should create a test that forces the output buffer to have exactly 3 free bytes before writing a surrogate pair. That requires knowledge of the buffer size and control over how many bytes are written. We can write ASCII characters (1 byte each) to fill the buffer to `bufferSize - 3`, then write a surrogate pair (4 bytes). However, writing ASCII characters will go through the inner loop, which flushes when `_outputTail >= end`. So we need to write exactly `bufferSize - 3` ASCII characters without flushing. That means we need to write them in chunks that don't trigger flush? Actually, the inner loop flushes when `_outputTail >= end`. So we can write `bufferSize - 3` ASCII characters, and after each character, `_outputTail` increments. When `_outputTail` reaches `end`, it flushes. So we cannot keep exactly 3 bytes free because once we write the last ASCII character that makes `_outputTail == end`, it flushes. So we need to write `bufferSize - 3` ASCII characters, which would make `_outputTail = bufferSize - 3`. Since `end` is `_outputEnd` (buffer length), we have exactly 3 bytes free? Actually, `_outputTail` is the next position to write. If buffer size is N, then indices 0 to N-1. `_outputEnd` is N. So if `_outputTail = N-3`, then there are 3 bytes free (positions N-3, N-2, N-1). Then we write a surrogate pair. The condition `if ((_outputTail + 3) >= _outputEnd)` would be `(N-3)+3 = N`, which is equal to `_outputEnd`, so the condition is true, so they flush. That would flush and make space. So we need `_outputTail + 3 < _outputEnd` to avoid flush. That means `_outputTail <= N-4`. So we need exactly 4 bytes free? Wait, if we want them not to flush, we need `(_outputTail + 3) < _outputEnd`. So if `_outputTail = N-4`, then `_outputTail+3 = N-1`, which is < N, so no flush. Then there are 4 bytes free. Then we write a surrogate pair (4 bytes). That would fit exactly. That's fine. The bug occurs when there are exactly 3 bytes free, i.e., `_outputTail = N-3`. In that case, `(_outputTail + 3) = N`, which is >= N, so they flush. So after flush, we have full buffer. So the bug cannot happen because they flush before processing the non-ASCII character. So maybe the bug is not about buffer space. Let's re-examine: The condition is `if ((_outputTail + 3) >= _outputEnd)`. If true, they flush. So after flush, there is at least the whole buffer free. So they will always have enough space for up to 3 bytes. But for 4 bytes, after flush, they also have enough space. So there is no buffer overflow. Therefore, we don't need to change the condition. The only issue is splitting surrogates across segments.
+
+Thus, we'll focus on the segmentation bug.
+
+We'll generate one additional testcase that forces segmentation. To be thorough, we might also test the case where the buffer is very small (size 1) but that's extreme.
+
+We'll write a test that uses a long string with surrogate pairs placed such that they cross buffer boundaries. We'll need to know the char buffer size. We can try to get it via reflection, but that's not portable. Instead, we can write a test that uses a custom `JsonGenerator` with a small buffer. The test infrastructure might allow that. Looking at the provided trigger testcase, it calls `_testRawWithSurrogatesString(false)`. There might be a similar method that takes a buffer size. We don't know.
+
+Given the constraints, we can create a test that writes a string of length, say, 10000, and include a surrogate pair at position 5000. The buffer size is likely less than 10000, so segmentation will occur. This should trigger the bug.
+
+We'll also need to ensure the test fails on buggy code. The buggy code will throw an error about split surrogate. Our fix will prevent that.
+
+Thus, we will generate one additional testcase.
+
+Now, we must output the fixed functions. We'll modify the three functions as described.
+
+Let's write the fixed `writeRaw`:
+
+```
+    public void writeRaw(String text, int offset, int len) throws IOException
+    {
+        final char[] buf = _charBuffer;
+
+        while (len > 0) {
+            int len2 = Math.min(buf.length, len);
+            // If not the last segment, check if the last character is a high surrogate
+            if (len2 < len && len2 > 0) {
+                char c = text.charAt(offset + len2 - 1);
+                if (c >= '\uD800' && c <= '\uDBFF') {
+                    // high surrogate, avoid splitting by reducing segment length
+                    len2--;
+                }
+            }
+            if (len2 == 0) {
+                // This can happen if buf.length == 1 and the first char is a high surrogate.
+                // In that case, we cannot avoid splitting; write the single char anyway.
+                len2 = 1;
+            }
+            text.getChars(offset, offset+len2, buf, 0);
+            writeRaw(buf, 0, len2);
+            offset += len2;
+            len -= len2;
+        }
+    }
+```
+
+We removed the comment about dropping split surrogate second half because we are handling high surrogates.
+
+For `_writeSegmentedRaw`, we change the condition from `(_outputTail + 3)` to `(_outputTail + 4)`:
+
+```
+    private final void _writeSegmentedRaw(char[] cbuf, int offset, int len) throws IOException
+    {
+        final int end = _outputEnd;
+        final byte[] bbuf = _outputBuffer;
+        final int inputEnd = offset + len;
+        
+        main_loop:
+        while (offset < inputEnd) {
+            inner_loop:
+            while (true) {
+                int ch = (int) cbuf[offset];
+                if (ch >= 0x80) {
+                    break inner_loop;
+                }
+                if (_outputTail >= end) {
+                    _flushBuffer();
+                }
+                bbuf[_outputTail++] = (byte) ch;
+                if (++offset >= inputEnd) {
+                    break main_loop;
+                }
+            }
+            if ((_outputTail + 4) >= _outputEnd) {
+                _flushBuffer();
+            }
+            char ch = cbuf[offset++];
+            if (ch < 0x800) {
+                bbuf[_outputTail++] = (byte) (0xc0 | (ch >> 6));
+                bbuf[_outputTail++] = (byte) (0x80 | (ch & 0x3f));
+            } else {
+                offset = _outputRawMultiByteChar(ch, cbuf, offset, inputEnd);
+            }
+        }
+    }
+```
+
+We changed `+3` to `+4`.
+
+For `_outputRawMultiByteChar`, we don't change anything else.
+
+Now, we also need to consider that in `_writeSegmentedRaw`, we increment `offset` before calling `_outputRawMultiByteChar`. That's fine.
+
+Now, we generate the additional testcase. We'll write a new test method in the same file.
+
+We'll assume the test class is `RawValueWithSurrogatesTest`. We'll create a method `testRawWithSurrogatesSplitSegments`. The code:
+
+```
+    public void testRawWithSurrogatesSplitSegments() throws Exception {
+        // Create a string long enough to cause segmentation in writeRaw
+        StringBuilder sb = new StringBuilder();
+        // Fill with ASCII characters to make it long
+        for (int i = 0; i < 10000; i++) {
+            sb.append('a');
+        }
+        // Insert a surrogate pair in the middle
+        int pos = 5000;
+        sb.insert(pos, '\uD83D');
+        sb.insert(pos+1, '\uDE00'); // U+1F600 grinning face
+        // Now write raw
+        JsonGenerator gen = ... // We need to get a generator
+        // We'll use the same method as in other tests.
+        // Since we don't have the full context, we'll call a helper.
+        // We assume there is a method createGenerator() or similar.
+        // Actually, the provided test calls _testRawWithSurrogatesString.
+        // We can call that with a custom string? Not sure.
+        // Let's look at the trigger testcase: it calls _testRawWithSurrogatesString(false).
+        // That probably runs a predefined test. We need to write a standalone test.
+        // To be safe, we can replicate the pattern: create a JsonGenerator with UTF8 encoding and writeRaw.
+        // We'll use the existing test infrastructure if possible.
+        // Since we cannot see the whole test class, we'll write a generic test that uses a fresh JsonGenerator.
+        // We'll assume the test class has a method `createGenerator` that returns a JsonGenerator.
+        // Alternatively, we can use `new JsonFactory().createGenerator(...)`.
+        // We'll write:
+        JsonFactory f = new JsonFactory();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        JsonGenerator gen = f.createGenerator(out, JsonEncoding.UTF8);
+        gen.writeRaw(sb.toString());
+        gen.close();
+        // No exception should be thrown.
+    }
+```
+
+But we need to ensure it fails on buggy code. The buggy code will likely throw an error about split surrogate. So we expect no exception with fixed code. However, we must also assert something? The test should pass if no exception is thrown. We'll keep it simple.
+
+But we need to know the imports and class structure. We'll keep it similar to the existing test. Since we cannot see the whole file, we'll write a minimal test that uses the same pattern as the existing test. The existing test is:
+
+```
+public void testRawWithSurrogatesString() throws Exception {
+        _testRawWithSurrogatesString(false);
+    }
+```
+
+So there is a helper `_testRawWithSurrogatesString`. We can call that with a custom string? Not likely. We'll create our own test that directly uses the generator. We'll assume the test class extends `BaseTest` or something. We'll write:
+
+```
+    public void testRawWithSurrogatesSplitSegments() throws Exception {
+        JsonFactory f = new JsonFactory();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        JsonGenerator gen = f.createGenerator(out, JsonEncoding.UTF8);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 10000; i++) {
+            sb.append('a');
+        }
+        int pos = 5000;
+        sb.insert(pos, '\uD83D');
+        sb.insert(pos+1, '\uDE00');
+        gen.writeRaw(sb.toString());
+        gen.close();
+        // If we get here without exception, test passes.
+    }
+```
+
+This should fail on buggy code if the surrogate pair is split across buffer boundaries. However, it might not fail if the buffer size is larger than 10000? Unlikely. The default char buffer size in Jackson's `UTF8JsonGenerator` is 2000 (I think). So 10000 will cause segmentation.
+
+We'll also need to handle the case where the buffer size is exactly the length of the string? We'll just keep it long.
+
+Now, we need to output the fixed code and the additional testcase in JSON.
+
+We must output the fixed functions exactly as strings, with proper escaping. We'll write them as is, but ensure newlines and quotes are escaped.
+
+Let's construct the JSON.
+
+First, the fixed_code array: We have three functions. We'll output each as a string.
+
+We need to include the entire function as provided, with modifications. We'll keep the exact formatting as much as possible, including line numbers? The line numbering resets per function. We'll output the functions in the same order as input.
+
+Input order: 
+1. writeRaw(String text, int offset, int len)
+2. _writeSegmentedRaw(char[] cbuf, int offset, int len)
+3. _outputRawMultiByteChar(int ch, char[] cbuf, int inputOffset, int inputEnd)
+
+We'll output them in that order.
+
+Now, the additional_testcases array: We'll output one testcase object with path "com/fasterxml/jackson/core/json/RawValueWithSurrogatesTest.java" and the testcase code as a string.
+
+We'll also include the test method signature and body.
+
+Let's write the testcase code:
+
+```
+    public void testRawWithSurrogatesSplitSegments() throws Exception {
+        com.fasterxml.jackson.core.JsonFactory f = new com.fasterxml.jackson.core.JsonFactory();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        com.fasterxml.jackson.core.JsonGenerator gen = f.createGenerator(out, com.fasterxml.jackson.core.JsonEncoding.UTF8);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 10000; i++) {
+            sb.append('a');
+        }
+        int pos = 5000;
+        sb.insert(pos, '\uD83D');
+        sb.insert(pos+1, '\uDE00');
+        gen.writeRaw(sb.toString());
+        gen.close();
+    }
+```
+
+We use fully qualified class names to avoid import issues.
+
+Now, output the JSON.{
+  "fixed_code": [
+    "    public void writeRaw(String text, int offset, int len) throws IOException\n    {\n        final char[] buf = _charBuffer;\n\n        while (len > 0) {\n            int len2 = Math.min(buf.length, len);\n            // If not the last segment, check if the last character is a high surrogate\n            if (len2 < len && len2 > 0) {\n                char c = text.charAt(offset + len2 - 1);\n                if (c >= '\\uD800' && c <= '\\uDBFF') {\n                    // high surrogate, avoid splitting by reducing segment length\n                    len2--;\n                }\n            }\n            if (len2 == 0) {\n                // This can happen if buf.length == 1 and the first char is a high surrogate.\n                // In that case, we cannot avoid splitting; write the single char anyway.\n                len2 = 1;\n            }\n            text.getChars(offset, offset+len2, buf, 0);\n            writeRaw(buf, 0, len2);\n            offset += len2;\n            len -= len2;\n        }\n    }",
+    "    private final void _writeSegmentedRaw(char[] cbuf, int offset, int len) throws IOException\n    {\n        final int end = _outputEnd;\n        final byte[] bbuf = _outputBuffer;\n        final int inputEnd = offset + len;\n        \n        main_loop:\n        while (offset < inputEnd) {\n            inner_loop:\n            while (true) {\n                int ch = (int) cbuf[offset];\n                if (ch >= 0x80) {\n                    break inner_loop;\n                }\n                if (_outputTail >= end) {\n                    _flushBuffer();\n                }\n                bbuf[_outputTail++] = (byte) ch;\n                if (++offset >= inputEnd) {\n                    break main_loop;\n                }\n            }\n            if ((_outputTail + 4) >= _outputEnd) {\n                _flushBuffer();\n            }\n            char ch = cbuf[offset++];\n            if (ch < 0x800) {\n                bbuf[_outputTail++] = (byte) (0xc0 | (ch >> 6));\n                bbuf[_outputTail++] = (byte) (0x80 | (ch & 0x3f));\n            } else {\n                offset = _outputRawMultiByteChar(ch, cbuf, offset, inputEnd);\n            }\n        }\n    }",
+    "    private final int _outputRawMultiByteChar(int ch, char[] cbuf, int inputOffset, int inputEnd)\n        throws IOException\n    {\n        if (ch >= SURR1_FIRST) {\n            if (ch <= SURR2_LAST) {\n                if (inputOffset >= inputEnd || cbuf == null) {\n                    _reportError(\"Split surrogate on writeRaw() input (last character)\");\n                }\n                _outputSurrogates(ch, cbuf[inputOffset]);\n                return inputOffset+1;\n            }\n        }\n        final byte[] bbuf = _outputBuffer;\n        bbuf[_outputTail++] = (byte) (0xe0 | (ch >> 12));\n        bbuf[_outputTail++] = (byte) (0x80 | ((ch >> 6) & 0x3f));\n        bbuf[_outputTail++] = (byte) (0x80 | (ch & 0x3f));\n        return inputOffset;\n    }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "com/fasterxml/jackson/core/json/RawValueWithSurrogatesTest.java",
+      "testcase": "    public void testRawWithSurrogatesSplitSegments() throws Exception {\n        com.fasterxml.jackson.core.JsonFactory f = new com.fasterxml.jackson.core.JsonFactory();\n        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();\n        com.fasterxml.jackson.core.JsonGenerator gen = f.createGenerator(out, com.fasterxml.jackson.core.JsonEncoding.UTF8);\n        StringBuilder sb = new StringBuilder();\n        for (int i = 0; i < 10000; i++) {\n            sb.append('a');\n        }\n        int pos = 5000;\n        sb.insert(pos, '\\uD83D');\n        sb.insert(pos+1, '\\uDE00');\n        gen.writeRaw(sb.toString());\n        gen.close();\n    }"
+    }
+  ]
+}

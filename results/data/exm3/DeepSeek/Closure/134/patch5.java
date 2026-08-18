@@ -1,0 +1,20 @@
+    private FunctionType findOverriddenFunction(
+        ObjectType ownerType, String propName) {
+      // First, check to see if the property is implemented
+      // on a superclass.
+      JSType propType = ownerType.getPropertyType(propName);
+      if (propType instanceof FunctionType) {
+        return (FunctionType) propType;
+      }
+      // If it's not, then check to see if it's implemented
+      // on an implemented interface.
+      if (ownerType.isConstructor()) {
+        for (ObjectType iface : ownerType.getCtorImplementedInterfaces()) {
+          propType = iface.getPropertyType(propName);
+          if (propType instanceof FunctionType) {
+            return (FunctionType) propType;
+          }
+        }
+      }
+      return null;
+    }

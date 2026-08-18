@@ -1,0 +1,1 @@
+public static EnumSerializer construct(Class<?> enumClass, SerializationConfig config, BeanDescription beanDesc, JsonFormat.Value format) { EnumValues v = EnumValues.constructFromName(config, (Class<Enum<?>>) enumClass); Boolean serializeAsIndex = _isShapeWrittenUsingIndex(enumClass, format, true); return new EnumSerializer(v, serializeAsIndex); }

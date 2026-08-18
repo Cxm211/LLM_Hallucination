@@ -1,0 +1,17 @@
+void outerHtmlHead(Appendable accum, int depth, Document.OutputSettings out) throws IOException {
+        if (out.syntax() == Syntax.html && !has(PUBLIC_ID) && !has(SYSTEM_ID) && "html".equals(attr(NAME))) {
+            accum.append("<!doctype");
+        } else {
+            accum.append("<!DOCTYPE");
+        }
+        if (has(NAME))
+            accum.append(" ").append(attr(NAME));
+        if (has(PUBLIC_ID)) {
+            accum.append(" PUBLIC \"").append(attr(PUBLIC_ID)).append('"');
+            if (has(SYSTEM_ID))
+                accum.append(" \"").append(attr(SYSTEM_ID)).append('"');
+        } else if (has(SYSTEM_ID)) {
+            accum.append(" SYSTEM \"").append(attr(SYSTEM_ID)).append('"');
+        }
+        accum.append('>');
+    }

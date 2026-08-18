@@ -1,0 +1,3 @@
+    public void writeNull() throws IOException {
+        _append(JsonToken.VALUE_NULL);
+    }

@@ -1,0 +1,84 @@
+// buggy function
+  String toStringHelper(boolean forAnnotations) {
+    if (hasReferenceName()) {
+      return getReferenceName();
+    } else if (prettyPrint) {
+      // Don't pretty print recursively.
+      prettyPrint = false;
+
+      // Use a tree set so that the properties are sorted.
+      Set<String> propertyNames = Sets.newTreeSet();
+      for (ObjectType current = this;
+           current != null && !current.isNativeObjectType() &&
+               propertyNames.size() <= MAX_PRETTY_PRINTED_PROPERTIES;
+           current = current.getImplicitPrototype()) {
+        propertyNames.addAll(current.getOwnPropertyNames());
+      }
+
+      StringBuilder sb = new StringBuilder();
+      sb.append("{");
+
+      int i = 0;
+      for (String property : propertyNames) {
+        if (i > 0) {
+          sb.append(", ");
+        }
+
+        sb.append(property);
+        sb.append(": ");
+        sb.append(getPropertyType(property).toString());
+
+        ++i;
+        if (i == MAX_PRETTY_PRINTED_PROPERTIES) {
+          sb.append(", ...");
+          break;
+        }
+      }
+
+      sb.append("}");
+
+      prettyPrint = true;
+      return sb.toString();
+    } else {
+      return "{...}";
+    }
+  }
+
+// trigger testcase
+// com/google/javascript/rhino/jstype/RecordTypeTest.java::testLongToString
+public void testLongToString() {
+    JSType record = new RecordTypeBuilder(registry)
+        .addProperty("a1", NUMBER_TYPE, null)
+        .addProperty("a2", NUMBER_TYPE, null)
+        .addProperty("a3", NUMBER_TYPE, null)
+        .addProperty("a4", NUMBER_TYPE, null)
+        .addProperty("a5", NUMBER_TYPE, null)
+        .addProperty("a6", NUMBER_TYPE, null)
+        .build();
+    assertEquals("{a1: number, a2: number, a3: number, a4: number, ...}",
+        record.toString());
+    assertEquals(
+        "{a1: number, a2: number, a3: number, a4: number," +
+        " a5: number, a6: number}",
+        record.toAnnotationString());
+  }
+
+// com/google/javascript/rhino/jstype/RecordTypeTest.java::testRecursiveRecord
+public void testRecursiveRecord() {
+    ProxyObjectType loop = new ProxyObjectType(registry, NUMBER_TYPE);
+    JSType record = new RecordTypeBuilder(registry)
+        .addProperty("loop", loop, null)
+        .addProperty("number", NUMBER_TYPE, null)
+        .addProperty("string", STRING_TYPE, null)
+        .build();
+    assertEquals("{loop: number, number: number, string: string}",
+        record.toString());
+
+    loop.setReferencedType(record);
+    assertEquals("{loop: {...}, number: number, string: string}",
+        record.toString());
+    assertEquals("{loop: ?, number: number, string: string}",
+        record.toAnnotationString());
+
+    Asserts.assertEquivalenceOperations(record, loop);
+  }

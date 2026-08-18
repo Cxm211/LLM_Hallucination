@@ -1,0 +1,35 @@
+    CharacterReader(String input) {
+        Validate.notNull(input);
+
+        this.input = input;
+        this.length = input.length();
+    }
+
+    String consumeToEnd() {
+        String data = input.substring(pos, input.length() - 1);
+        pos = input.length();
+        return data;
+    }
+
+// trigger testcase
+@Test public void consumeToEnd() {
+        String in = "one two three";
+        CharacterReader r = new CharacterReader(in);
+        String toEnd = r.consumeToEnd();
+        assertEquals(in, toEnd);
+        assertTrue(r.isEmpty());
+    }
+
+@Test public void handleCarriageReturnAsLineFeed() {
+        String in = "one \r two \r\n three";
+        CharacterReader r = new CharacterReader(in);
+
+        String first = r.consumeTo('\n');
+        assertEquals("one ", first);
+        assertEquals("\n two \n three", r.consumeToEnd());
+    }
+
+@Test public void handlesNewlinesAndWhitespaceInTag() {
+        Document doc = Jsoup.parse("<a \n href=\"one\" \r\n id=\"two\" \f >");
+        assertEquals("<a href=\"one\" id=\"two\"></a>", doc.body().html());
+    }

@@ -1,0 +1,459 @@
+// buggy code
+    private PhonemeBuilder applyFinalRules(final PhonemeBuilder phonemeBuilder,
+                                           final Map<String, List<Rule>> finalRules) {
+        if (finalRules == null) {
+            throw new NullPointerException("finalRules can not be null");
+        }
+        if (finalRules.isEmpty()) {
+            return phonemeBuilder;
+        }
+
+        final Set<Rule.Phoneme> phonemes = new TreeSet<Rule.Phoneme>(Rule.Phoneme.COMPARATOR);
+
+        for (final Rule.Phoneme phoneme : phonemeBuilder.getPhonemes()) {
+            PhonemeBuilder subBuilder = PhonemeBuilder.empty(phoneme.getLanguages());
+            final String phonemeText = phoneme.getPhonemeText().toString();
+
+            for (int i = 0; i < phonemeText.length();) {
+                final RulesApplication rulesApplication =
+                        new RulesApplication(finalRules, phonemeText, subBuilder, i, maxPhonemes).invoke();
+                final boolean found = rulesApplication.isFound();
+                subBuilder = rulesApplication.getPhonemeBuilder();
+
+                if (!found) {
+                    // not found, appending as-is
+                    subBuilder.append(phonemeText.subSequence(i, i + 1));
+                }
+
+                i = rulesApplication.getI();
+            }
+
+            // the phonemes map orders the phonemes only based on their text, but ignores the language set
+            // when adding new phonemes, check for equal phonemes and merge their language set, otherwise
+            // phonemes with the same text but different language set get lost
+            phonemes.addAll(subBuilder.getPhonemes());
+        }
+
+        return new PhonemeBuilder(phonemes);
+    }
+
+        public Phoneme join(final Phoneme right) {
+            return new Phoneme(this.phonemeText.toString() + right.phonemeText.toString(),
+                               this.languages.restrictTo(right.languages));
+        }
+
+// relevant test
+// None::testAllChars
+    public void testAllChars() throws EncoderException {
+        final BeiderMorseEncoder bmpm = createGenericApproxEncoder();
+        for (char c = Character.MIN_VALUE; c < Character.MAX_VALUE; c++) {
+            bmpm.encode(Character.toString(c));
+        }
+    }
+
+// None::testAsciiEncodeNotEmpty1Letter
+    public void testAsciiEncodeNotEmpty1Letter() throws EncoderException {
+        final BeiderMorseEncoder bmpm = createGenericApproxEncoder();
+        for (char c = 'a'; c <= 'z'; c++) {
+            final String value = Character.toString(c);
+            final String valueU = value.toUpperCase();
+            assertNotEmpty(bmpm, value);
+            assertNotEmpty(bmpm, valueU);
+        }
+    }
+
+// None::testAsciiEncodeNotEmpty2Letters
+    public void testAsciiEncodeNotEmpty2Letters() throws EncoderException {
+        final BeiderMorseEncoder bmpm = createGenericApproxEncoder();
+        for (char c1 = 'a'; c1 <= 'z'; c1++) {
+            for (char c2 = 'a'; c2 <= 'z'; c2++) {
+                final String value = new String(new char[] { c1, c2 });
+                final String valueU = value.toUpperCase();
+                assertNotEmpty(bmpm, value);
+                assertNotEmpty(bmpm, valueU);
+            }
+        }
+    }
+
+// None::testEncodeAtzNotEmpty
+    public void testEncodeAtzNotEmpty() throws EncoderException {
+        final BeiderMorseEncoder bmpm = createGenericApproxEncoder();
+        
+        final String[] names = { "\u00e1cz", "\u00e1tz", "Ign\u00e1cz", "Ign\u00e1tz", "Ign\u00e1c" };
+        for (final String name : names) {
+            assertNotEmpty(bmpm, name);
+        }
+    }
+
+// None::testEncodeGna
+    public void testEncodeGna() throws EncoderException {
+        final BeiderMorseEncoder bmpm = createGenericApproxEncoder();
+        bmpm.encode("gna");
+    }
+
+// None::testInvalidLangIllegalArgumentException
+    public void testInvalidLangIllegalArgumentException() {
+        Rule.getInstance(NameType.GENERIC, RuleType.APPROX, "noSuchLanguage");
+    }
+
+// None::testInvalidLangIllegalStateException
+    public void testInvalidLangIllegalStateException() {
+        Lang.loadFromResource("thisIsAMadeUpResourceName", Languages.getInstance(NameType.GENERIC));
+    }
+
+// None::testInvalidLanguageIllegalArgumentException
+    public void testInvalidLanguageIllegalArgumentException() {
+        Languages.getInstance("thereIsNoSuchLanguage");
+    }
+
+// None::testLongestEnglishSurname
+    public void testLongestEnglishSurname() throws EncoderException {
+        final BeiderMorseEncoder bmpm = createGenericApproxEncoder();
+        bmpm.encode("MacGhilleseatheanaich");
+    }
+
+// None::testNegativeIndexForRuleMatchIndexOutOfBoundsException
+    public void testNegativeIndexForRuleMatchIndexOutOfBoundsException() {
+        final Rule r = new Rule("a", "", "", new Rule.Phoneme("", Languages.ANY_LANGUAGE));
+        r.patternAndContextMatches("bob", -1);
+    }
+
+// None::testOOM
+    public void testOOM() throws EncoderException {
+        final String phrase = "200697900'-->&#1913348150;</  bceaeef >aadaabcf\"aedfbff<!--\'-->?>cae"
+                + "cfaaa><?&#<!--</script>&lang&fc;aadeaf?>>&bdquo<    cc =\"abff\"    /></   afe  >"
+                + "<script><!-- f(';<    cf aefbeef = \"bfabadcf\" ebbfeedd = fccabeb >";
+
+        final BeiderMorseEncoder encoder = new BeiderMorseEncoder();
+        encoder.setNameType(NameType.GENERIC);
+        encoder.setRuleType(RuleType.EXACT);
+        encoder.setMaxPhonemes(10);
+
+        final String phonemes = encoder.encode(phrase);
+        assertTrue(phonemes.length() > 0);
+
+        final String[] phonemeArr = phonemes.split("\\|");
+        assertTrue(phonemeArr.length <= 10);
+    }
+
+// None::testSetConcat
+    public void testSetConcat() {
+        final BeiderMorseEncoder bmpm = new BeiderMorseEncoder();
+        bmpm.setConcat(false);
+        assertFalse("Should be able to set concat to false", bmpm.isConcat());
+    }
+
+// None::testSetNameTypeAsh
+    public void testSetNameTypeAsh() {
+        final BeiderMorseEncoder bmpm = new BeiderMorseEncoder();
+        bmpm.setNameType(NameType.ASHKENAZI);
+        assertEquals("Name type should have been set to ash", NameType.ASHKENAZI, bmpm.getNameType());
+    }
+
+// None::testSetRuleTypeExact
+    public void testSetRuleTypeExact() {
+        final BeiderMorseEncoder bmpm = new BeiderMorseEncoder();
+        bmpm.setRuleType(RuleType.EXACT);
+        assertEquals("Rule type should have been set to exact", RuleType.EXACT, bmpm.getRuleType());
+    }
+
+// None::testSetRuleTypeToRulesIllegalArgumentException
+    public void testSetRuleTypeToRulesIllegalArgumentException() {
+        final BeiderMorseEncoder bmpm = new BeiderMorseEncoder();
+        bmpm.setRuleType(RuleType.RULES);
+    }
+
+// None::testSpeedCheck
+    public void testSpeedCheck() throws EncoderException {
+        final BeiderMorseEncoder bmpm = this.createGenericApproxEncoder();
+        final StringBuilder stringBuffer = new StringBuilder();
+        stringBuffer.append(TEST_CHARS[0]);
+        for (int i = 0, j = 1; i < 40; i++, j++) {
+            if (j == TEST_CHARS.length) {
+                j = 0;
+            }
+            bmpm.encode(stringBuffer.toString());
+            stringBuffer.append(TEST_CHARS[j]);
+        }
+    }
+
+// None::testSpeedCheck2
+    public void testSpeedCheck2() throws EncoderException {
+        final BeiderMorseEncoder bmpm = this.createGenericApproxEncoder();
+        final String phrase = "ItstheendoftheworldasweknowitandIfeelfine";
+
+        for (int i = 1; i <= phrase.length(); i++) {
+            bmpm.encode(phrase.subSequence(0, i));
+        }
+    }
+
+// None::testSpeedCheck3
+    public void testSpeedCheck3() throws EncoderException {
+        final BeiderMorseEncoder bmpm = this.createGenericApproxEncoder();
+        final String phrase = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+
+        for (int i = 1; i <= phrase.length(); i++) {
+            bmpm.encode(phrase.subSequence(0, i));
+        }
+    }
+
+// None::testLanguageGuessing
+    public void testLanguageGuessing() {
+        final Languages.LanguageSet guesses = this.lang.guessLanguages(this.name);
+
+        assertTrue("language predicted for name '" + this.name + "' is wrong: " + guesses + " should contain '" + this.language + "'",
+                guesses.contains(this.language));
+
+    }
+
+// None::testSolrGENERIC
+    public void testSolrGENERIC() {
+        Map<String, String> args;
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "GENERIC");
+        assertEquals(encode(args, true, "Angelo"), "YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "EXACT");
+        assertEquals(encode(args, true, "Angelo"), "anZelo|andZelo|angelo|anhelo|anjelo|anxelo");
+        assertEquals(encode(args, true, "D'Angelo"), "(anZelo|andZelo|angelo|anhelo|anjelo|anxelo)-(danZelo|dandZelo|dangelo|danhelo|danjelo|danxelo)");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, true, "Angelo"), "andZelo|angelo|anxelo");
+        assertEquals(encode(args, true, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        assertEquals(encode(args, false, "Angelo"), "YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "EXACT");
+        assertEquals(encode(args, false, "Angelo"), "anZelo|andZelo|angelo|anhelo|anjelo|anxelo");
+        assertEquals(encode(args, false, "D'Angelo"), "(anZelo|andZelo|angelo|anhelo|anjelo|anxelo)-(danZelo|dandZelo|dangelo|danhelo|danjelo|danxelo)");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, false, "Angelo"), "andZelo|angelo|anxelo");
+        assertEquals(encode(args, false, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        assertEquals(encode(args, true, "Angelo"), "YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "APPROX");
+        assertEquals(encode(args, true, "Angelo"), "YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo");
+        assertEquals(encode(args, true, "D'Angelo"), "(YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo)-(dYngYlo|dYngilo|dagilo|dangYlo|dangilo|daniilo|danilo|danxilo|danzilo|dogilo|dongYlo|dongilo|doniilo|donilo|donxilo|donzilo)");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, true, "Angelo"), "angilo|anxilo|anzilo|ongilo|onxilo|onzilo");
+        assertEquals(encode(args, true, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        assertEquals(encode(args, false, "Angelo"), "YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "APPROX");
+        assertEquals(encode(args, false, "Angelo"), "YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo");
+        assertEquals(encode(args, false, "D'Angelo"), "(YngYlo|Yngilo|agilo|angYlo|angilo|aniilo|anilo|anxilo|anzilo|ogilo|ongYlo|ongilo|oniilo|onilo|onxilo|onzilo)-(dYngYlo|dYngilo|dagilo|dangYlo|dangilo|daniilo|danilo|danxilo|danzilo|dogilo|dongYlo|dongilo|doniilo|donilo|donxilo|donzilo)");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, false, "Angelo"), "angilo|anxilo|anzilo|ongilo|onxilo|onzilo");
+        assertEquals(encode(args, false, "1234"), "");
+    }
+
+// None::testSolrASHKENAZI
+    public void testSolrASHKENAZI() {
+        Map<String, String> args;
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "ASHKENAZI");
+        assertEquals(encode(args, true, "Angelo"), "YngYlo|Yngilo|angYlo|angilo|anilo|anxilo|anzilo|ongYlo|ongilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "EXACT");
+        assertEquals(encode(args, true, "Angelo"), "andZelo|angelo|anhelo|anxelo");
+        assertEquals(encode(args, true, "D'Angelo"), "dandZelo|dangelo|danhelo|danxelo");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, true, "Angelo"), "angelo|anxelo");
+        assertEquals(encode(args, true, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "ASHKENAZI");
+        assertEquals(encode(args, false, "Angelo"), "YngYlo|Yngilo|angYlo|angilo|anilo|anxilo|anzilo|ongYlo|ongilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "EXACT");
+        assertEquals(encode(args, false, "Angelo"), "andZelo|angelo|anhelo|anxelo");
+        assertEquals(encode(args, false, "D'Angelo"), "dandZelo|dangelo|danhelo|danxelo");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, false, "Angelo"), "angelo|anxelo");
+        assertEquals(encode(args, false, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "ASHKENAZI");
+        assertEquals(encode(args, true, "Angelo"), "YngYlo|Yngilo|angYlo|angilo|anilo|anxilo|anzilo|ongYlo|ongilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "APPROX");
+        assertEquals(encode(args, true, "Angelo"), "YngYlo|Yngilo|angYlo|angilo|anilo|anxilo|anzilo|ongYlo|ongilo|onilo|onxilo|onzilo");
+        assertEquals(encode(args, true, "D'Angelo"), "dYngYlo|dYngilo|dangYlo|dangilo|danilo|danxilo|danzilo|dongYlo|dongilo|donilo|donxilo|donzilo");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, true, "Angelo"), "angilo|anxilo|ongilo|onxilo");
+        assertEquals(encode(args, true, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "ASHKENAZI");
+        assertEquals(encode(args, false, "Angelo"), "YngYlo|Yngilo|angYlo|angilo|anilo|anxilo|anzilo|ongYlo|ongilo|onilo|onxilo|onzilo");
+        args.put("ruleType", "APPROX");
+        assertEquals(encode(args, false, "Angelo"), "YngYlo|Yngilo|angYlo|angilo|anilo|anxilo|anzilo|ongYlo|ongilo|onilo|onxilo|onzilo");
+        assertEquals(encode(args, false, "D'Angelo"), "dYngYlo|dYngilo|dangYlo|dangilo|danilo|danxilo|danzilo|dongYlo|dongilo|donilo|donxilo|donzilo");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, false, "Angelo"), "angilo|anxilo|ongilo|onxilo");
+        assertEquals(encode(args, false, "1234"), "");
+    }
+
+// None::testSolrSEPHARDIC
+    public void testSolrSEPHARDIC() {
+        Map<String, String> args;
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "SEPHARDIC");
+        assertEquals(encode(args, true, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        args.put("ruleType", "EXACT");
+        assertEquals(encode(args, true, "Angelo"), "anZelo|andZelo|anxelo");
+        assertEquals(encode(args, true, "D'Angelo"), "anZelo|andZelo|anxelo");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, true, "Angelo"), "andZelo|anxelo");
+        assertEquals(encode(args, true, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "SEPHARDIC");
+        assertEquals(encode(args, false, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        args.put("ruleType", "EXACT");
+        assertEquals(encode(args, false, "Angelo"), "anZelo|andZelo|anxelo");
+        assertEquals(encode(args, false, "D'Angelo"), "danZelo|dandZelo|danxelo");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, false, "Angelo"), "andZelo|anxelo");
+        assertEquals(encode(args, false, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "SEPHARDIC");
+        assertEquals(encode(args, true, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        args.put("ruleType", "APPROX");
+        assertEquals(encode(args, true, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        assertEquals(encode(args, true, "D'Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, true, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        assertEquals(encode(args, true, "1234"), "");
+
+        
+        args = new TreeMap<String, String>();
+        args.put("nameType", "SEPHARDIC");
+        assertEquals(encode(args, false, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        args.put("ruleType", "APPROX");
+        assertEquals(encode(args, false, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        assertEquals(encode(args, false, "D'Angelo"), "danhila|danhilu|danzila|danzilu|nhila|nhilu|nzila|nzilu");
+        args.put("languageSet", "italian,greek,spanish");
+        assertEquals(encode(args, false, "Angelo"), "anhila|anhilu|anzila|anzilu|nhila|nhilu|nzila|nzilu");
+        assertEquals(encode(args, false, "1234"), "");
+    }
+
+// org.apache.commons.codec.language.bm.PhoneticEngineRegressionTest::testCompatibilityWithOriginalVersion
+    public void testCompatibilityWithOriginalVersion() {
+        
+        
+
+        Map<String, String> args = new TreeMap<String, String>();
+        args.put("nameType", "GENERIC");
+        args.put("ruleType", "APPROX");
+
+        assertEquals(encode(args, true, "abram"), "Ybram|Ybrom|abram|abran|abrom|abron|avram|avrom|obram|obran|obrom|obron|ovram|ovrom");
+        assertEquals(encode(args, true, "Bendzin"), "bndzn|bntsn|bnzn|vndzn|vntsn");
+
+        args.put("nameType", "ASHKENAZI");
+        args.put("ruleType", "APPROX");
+
+        assertEquals(encode(args, true, "abram"), "Ybram|Ybrom|abram|abrom|avram|avrom|imbram|imbrom|obram|obrom|ombram|ombrom|ovram|ovrom");
+        assertEquals(encode(args, true, "Halpern"), "YlpYrn|Ylpirn|alpYrn|alpirn|olpYrn|olpirn|xalpirn|xolpirn");
+
+    }
+
+// None::testPhonemeComparedToLaterIsNegative
+    public void testPhonemeComparedToLaterIsNegative() {
+        for (final Rule.Phoneme[] phs : makePhonemes()) {
+            for (int i = 0; i < phs.length; i++) {
+                for (int j = i + 1; j < phs.length; j++) {
+                    final int c = Rule.Phoneme.COMPARATOR.compare(phs[i], phs[j]);
+
+                    assertThat("Comparing " + phs[i].getPhonemeText() + " to " + phs[j].getPhonemeText() + " should be negative", Integer.valueOf(c),
+                            new NegativeIntegerBaseMatcher());
+                }
+            }
+        }
+    }
+
+// None::testPhonemeComparedToSelfIsZero
+    public void testPhonemeComparedToSelfIsZero() {
+        for (final Rule.Phoneme[] phs : makePhonemes()) {
+            for (final Rule.Phoneme ph : phs) {
+                assertEquals("Phoneme compared to itself should be zero: " + ph.getPhonemeText(), 0,
+                        Rule.Phoneme.COMPARATOR.compare(ph, ph));
+            }
+        }
+    }
+
+// None::testSubSequenceWorks
+    public void testSubSequenceWorks() {
+        
+
+        final Rule.Phoneme a = new Rule.Phoneme("a", null);
+        final Rule.Phoneme b = new Rule.Phoneme("b", null);
+        final Rule.Phoneme cd = new Rule.Phoneme("cd", null);
+        final Rule.Phoneme ef = new Rule.Phoneme("ef", null);
+        final Rule.Phoneme ghi = new Rule.Phoneme("ghi", null);
+        final Rule.Phoneme jkl = new Rule.Phoneme("jkl", null);
+
+        assertEquals('a', a.getPhonemeText().charAt(0));
+        assertEquals('b', b.getPhonemeText().charAt(0));
+        assertEquals('c', cd.getPhonemeText().charAt(0));
+        assertEquals('d', cd.getPhonemeText().charAt(1));
+        assertEquals('e', ef.getPhonemeText().charAt(0));
+        assertEquals('f', ef.getPhonemeText().charAt(1));
+        assertEquals('g', ghi.getPhonemeText().charAt(0));
+        assertEquals('h', ghi.getPhonemeText().charAt(1));
+        assertEquals('i', ghi.getPhonemeText().charAt(2));
+        assertEquals('j', jkl.getPhonemeText().charAt(0));
+        assertEquals('k', jkl.getPhonemeText().charAt(1));
+        assertEquals('l', jkl.getPhonemeText().charAt(2));
+
+        final Rule.Phoneme a_b = new Rule.Phoneme(a, b);
+        assertEquals('a', a_b.getPhonemeText().charAt(0));
+        assertEquals('b', a_b.getPhonemeText().charAt(1));
+        assertEquals("ab", a_b.getPhonemeText().subSequence(0, 2).toString());
+        assertEquals("a", a_b.getPhonemeText().subSequence(0, 1).toString());
+        assertEquals("b", a_b.getPhonemeText().subSequence(1, 2).toString());
+
+        final Rule.Phoneme cd_ef = new Rule.Phoneme(cd, ef);
+        assertEquals('c', cd_ef.getPhonemeText().charAt(0));
+        assertEquals('d', cd_ef.getPhonemeText().charAt(1));
+        assertEquals('e', cd_ef.getPhonemeText().charAt(2));
+        assertEquals('f', cd_ef.getPhonemeText().charAt(3));
+        assertEquals("c", cd_ef.getPhonemeText().subSequence(0, 1).toString());
+        assertEquals("d", cd_ef.getPhonemeText().subSequence(1, 2).toString());
+        assertEquals("e", cd_ef.getPhonemeText().subSequence(2, 3).toString());
+        assertEquals("f", cd_ef.getPhonemeText().subSequence(3, 4).toString());
+        assertEquals("cd", cd_ef.getPhonemeText().subSequence(0, 2).toString());
+        assertEquals("de", cd_ef.getPhonemeText().subSequence(1, 3).toString());
+        assertEquals("ef", cd_ef.getPhonemeText().subSequence(2, 4).toString());
+        assertEquals("cde", cd_ef.getPhonemeText().subSequence(0, 3).toString());
+        assertEquals("def", cd_ef.getPhonemeText().subSequence(1, 4).toString());
+        assertEquals("cdef", cd_ef.getPhonemeText().subSequence(0, 4).toString());
+
+        final Rule.Phoneme a_b_cd = new Rule.Phoneme(new Rule.Phoneme(a, b), cd);
+        assertEquals('a', a_b_cd.getPhonemeText().charAt(0));
+        assertEquals('b', a_b_cd.getPhonemeText().charAt(1));
+        assertEquals('c', a_b_cd.getPhonemeText().charAt(2));
+        assertEquals('d', a_b_cd.getPhonemeText().charAt(3));
+        assertEquals("a", a_b_cd.getPhonemeText().subSequence(0, 1).toString());
+        assertEquals("b", a_b_cd.getPhonemeText().subSequence(1, 2).toString());
+        assertEquals("c", a_b_cd.getPhonemeText().subSequence(2, 3).toString());
+        assertEquals("d", a_b_cd.getPhonemeText().subSequence(3, 4).toString());
+        assertEquals("ab", a_b_cd.getPhonemeText().subSequence(0, 2).toString());
+        assertEquals("bc", a_b_cd.getPhonemeText().subSequence(1, 3).toString());
+        assertEquals("cd", a_b_cd.getPhonemeText().subSequence(2, 4).toString());
+        assertEquals("abc", a_b_cd.getPhonemeText().subSequence(0, 3).toString());
+        assertEquals("bcd", a_b_cd.getPhonemeText().subSequence(1, 4).toString());
+        assertEquals("abcd", a_b_cd.getPhonemeText().subSequence(0, 4).toString());
+    }

@@ -1,0 +1,2380 @@
+// buggy code
+    private void print(final Object object, final CharSequence value, final int offset, final int len)
+            throws IOException {
+        if (!newRecord) {
+            out.append(format.getDelimiter());
+        }
+        if (format.isQuoteCharacterSet()) {
+            // the original object is needed so can check for Number
+            printAndQuote(object, value, offset, len);
+        } else if (format.isEscapeCharacterSet()) {
+            printAndEscape(value, offset, len);
+        } else {
+            out.append(value, offset, offset + len);
+        }
+        newRecord = false;
+    }
+
+// relevant test
+// org.apache.commons.csv.CSVFileParserTest::testCSVFile
+    public void testCSVFile() throws Exception {
+        String line = readTestData();
+        assertNotNull("file must contain config line", line);
+        final String[] split = line.split(" ");
+        assertTrue(testName + " require 1 param", split.length >= 1);
+        
+        CSVFormat format = CSVFormat.newFormat(',').withQuote('"');
+        boolean checkComments = false;
+        for (int i = 1; i < split.length; i++) {
+            final String option = split[i];
+            final String[] option_parts = option.split("=", 2);
+            if ("IgnoreEmpty".equalsIgnoreCase(option_parts[0])) {
+                format = format.withIgnoreEmptyLines(Boolean.parseBoolean(option_parts[1]));
+            } else if ("IgnoreSpaces".equalsIgnoreCase(option_parts[0])) {
+                format = format.withIgnoreSurroundingSpaces(Boolean.parseBoolean(option_parts[1]));
+            } else if ("CommentStart".equalsIgnoreCase(option_parts[0])) {
+                format = format.withCommentMarker(option_parts[1].charAt(0));
+            } else if ("CheckComments".equalsIgnoreCase(option_parts[0])) {
+                checkComments = true;
+            } else {
+                fail(testName + " unexpected option: " + option);
+            }
+        }
+        line = readTestData(); 
+        assertEquals(testName + " Expected format ", line, format.toString());
+
+        
+        
+        final CSVParser parser = CSVParser.parse(new File(BASE, split[0]), Charset.defaultCharset(), format);
+        for (final CSVRecord record : parser) {
+            String parsed = Arrays.toString(record.values());
+            if (checkComments) {
+                final String comment = record.getComment().replace("\n", "\\n");
+                if (comment != null) {
+                    parsed += "#" + comment;
+                }
+            }
+            final int count = record.size();
+            assertEquals(testName, readTestData(), count + ":" + parsed);
+        }
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVFileParserTest::testCSVUrl
+    public void testCSVUrl() {}
+
+// org.apache.commons.csv.CSVFormatPredefinedTest::testDefault
+    public void testDefault() {
+        test(CSVFormat.DEFAULT, "Default");
+    }
+
+// org.apache.commons.csv.CSVFormatPredefinedTest::testExcel
+    public void testExcel() {
+        test(CSVFormat.EXCEL, "Excel");
+    }
+
+// org.apache.commons.csv.CSVFormatPredefinedTest::testMySQL
+    public void testMySQL() {
+        test(CSVFormat.MYSQL, "MySQL");
+    }
+
+// org.apache.commons.csv.CSVFormatPredefinedTest::testRFC4180
+    public void testRFC4180() {
+        test(CSVFormat.RFC4180, "RFC4180");
+    }
+
+// org.apache.commons.csv.CSVFormatPredefinedTest::testTDF
+    public void testTDF() {
+        test(CSVFormat.TDF, "TDF");
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testDelimiterSameAsCommentStartThrowsException
+    public void testDelimiterSameAsCommentStartThrowsException() {
+        CSVFormat.DEFAULT.withDelimiter('!').withCommentMarker('!');
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testDelimiterSameAsEscapeThrowsException
+    public void testDelimiterSameAsEscapeThrowsException() {
+        CSVFormat.DEFAULT.withDelimiter('!').withEscape('!');
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testDuplicateHeaderElements
+    public void testDuplicateHeaderElements() {
+        CSVFormat.DEFAULT.withHeader("A", "A");
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEquals
+    public void testEquals() {
+        final CSVFormat right = CSVFormat.DEFAULT;
+        final CSVFormat left = copy(right);
+
+        assertFalse(right.equals(null));
+        assertFalse(right.equals("A String Instance"));
+
+        assertEquals(right, right);
+        assertEquals(right, left);
+        assertEquals(left, right);
+
+        assertEquals(right.hashCode(), right.hashCode());
+        assertEquals(right.hashCode(), left.hashCode());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsCommentStart
+    public void testEqualsCommentStart() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withQuote('"')
+                .withCommentMarker('#')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withCommentMarker('!');
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsDelimiter
+    public void testEqualsDelimiter() {
+        final CSVFormat right = CSVFormat.newFormat('!');
+        final CSVFormat left = CSVFormat.newFormat('?');
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsEscape
+    public void testEqualsEscape() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withQuote('"')
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withEscape('!');
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsHeader
+    public void testEqualsHeader() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withRecordSeparator(CR)
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withHeader("One", "Two", "Three")
+                .withIgnoreEmptyLines()
+                .withIgnoreSurroundingSpaces()
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withHeader("Three", "Two", "One");
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsIgnoreEmptyLines
+    public void testEqualsIgnoreEmptyLines() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withIgnoreEmptyLines()
+                .withIgnoreSurroundingSpaces()
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withIgnoreEmptyLines(false);
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsIgnoreSurroundingSpaces
+    public void testEqualsIgnoreSurroundingSpaces() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withIgnoreSurroundingSpaces()
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withIgnoreSurroundingSpaces(false);
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsQuoteChar
+    public void testEqualsQuoteChar() {
+        final CSVFormat right = CSVFormat.newFormat('\'').withQuote('"');
+        final CSVFormat left = right.withQuote('!');
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsQuotePolicy
+    public void testEqualsQuotePolicy() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withQuoteMode(QuoteMode.MINIMAL);
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsRecordSeparator
+    public void testEqualsRecordSeparator() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withRecordSeparator(CR)
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withIgnoreEmptyLines()
+                .withIgnoreSurroundingSpaces()
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL);
+        final CSVFormat left = right
+                .withRecordSeparator(LF);
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsNullString
+    public void testEqualsNullString() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withRecordSeparator(CR)
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withIgnoreEmptyLines()
+                .withIgnoreSurroundingSpaces()
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL)
+                .withNullString("null");
+        final CSVFormat left = right
+                .withNullString("---");
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEqualsSkipHeaderRecord
+    public void testEqualsSkipHeaderRecord() {
+        final CSVFormat right = CSVFormat.newFormat('\'')
+                .withRecordSeparator(CR)
+                .withCommentMarker('#')
+                .withEscape('+')
+                .withIgnoreEmptyLines()
+                .withIgnoreSurroundingSpaces()
+                .withQuote('"')
+                .withQuoteMode(QuoteMode.ALL)
+                .withNullString("null")
+                .withSkipHeaderRecord();
+        final CSVFormat left = right
+                .withSkipHeaderRecord(false);
+
+        assertNotEquals(right, left);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEscapeSameAsCommentStartThrowsException
+    public void testEscapeSameAsCommentStartThrowsException() {
+        CSVFormat.DEFAULT.withEscape('!').withCommentMarker('!');
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testEscapeSameAsCommentStartThrowsExceptionForWrapperType
+    public void testEscapeSameAsCommentStartThrowsExceptionForWrapperType() {
+        
+        CSVFormat.DEFAULT.withEscape(new Character('!')).withCommentMarker(new Character('!'));
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testFormat
+    public void testFormat() {
+        final CSVFormat format = CSVFormat.DEFAULT;
+
+        assertEquals("", format.format());
+        assertEquals("a,b,c", format.format("a", "b", "c"));
+        assertEquals("\"x,y\",z", format.format("x,y", "z"));
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testGetHeader
+    public void testGetHeader() throws Exception {
+        final String[] header = new String[]{"one", "two", "three"};
+        final CSVFormat formatWithHeader = CSVFormat.DEFAULT.withHeader(header);
+        
+        final String[] headerCopy = formatWithHeader.getHeader();
+        headerCopy[0] = "A";
+        headerCopy[1] = "B";
+        headerCopy[2] = "C";
+        assertFalse(Arrays.equals(formatWithHeader.getHeader(), headerCopy));
+        assertNotSame(formatWithHeader.getHeader(), headerCopy);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testNullRecordSeparatorCsv106
+    public void testNullRecordSeparatorCsv106() {
+        final CSVFormat format = CSVFormat.newFormat(';').withSkipHeaderRecord().withHeader("H1", "H2");
+        final String formatStr = format.format("A", "B");
+        assertNotNull(formatStr);
+        assertFalse(formatStr.endsWith("null"));
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testQuoteCharSameAsCommentStartThrowsException
+    public void testQuoteCharSameAsCommentStartThrowsException() {
+        CSVFormat.DEFAULT.withQuote('!').withCommentMarker('!');
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testQuoteCharSameAsCommentStartThrowsExceptionForWrapperType
+    public void testQuoteCharSameAsCommentStartThrowsExceptionForWrapperType() {
+        
+        CSVFormat.DEFAULT.withQuote(new Character('!')).withCommentMarker('!');
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testQuoteCharSameAsDelimiterThrowsException
+    public void testQuoteCharSameAsDelimiterThrowsException() {
+        CSVFormat.DEFAULT.withQuote('!').withDelimiter('!');
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testQuotePolicyNoneWithoutEscapeThrowsException
+    public void testQuotePolicyNoneWithoutEscapeThrowsException() {
+        CSVFormat.newFormat('!').withQuoteMode(QuoteMode.NONE);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testRFC4180
+    public void testRFC4180() {
+        assertEquals(null, RFC4180.getCommentMarker());
+        assertEquals(',', RFC4180.getDelimiter());
+        assertEquals(null, RFC4180.getEscapeCharacter());
+        assertFalse(RFC4180.getIgnoreEmptyLines());
+        assertEquals(Character.valueOf('"'), RFC4180.getQuoteCharacter());
+        assertEquals(null, RFC4180.getQuoteMode());
+        assertEquals("\r\n", RFC4180.getRecordSeparator());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testSerialization
+    public void testSerialization() throws Exception {
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        final ObjectOutputStream oos = new ObjectOutputStream(out);
+        oos.writeObject(CSVFormat.DEFAULT);
+        oos.flush();
+        oos.close();
+
+        final ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(out.toByteArray()));
+        final CSVFormat format = (CSVFormat) in.readObject();
+
+        assertNotNull(format);
+        assertEquals("delimiter", CSVFormat.DEFAULT.getDelimiter(), format.getDelimiter());
+        assertEquals("encapsulator", CSVFormat.DEFAULT.getQuoteCharacter(), format.getQuoteCharacter());
+        assertEquals("comment start", CSVFormat.DEFAULT.getCommentMarker(), format.getCommentMarker());
+        assertEquals("record separator", CSVFormat.DEFAULT.getRecordSeparator(), format.getRecordSeparator());
+        assertEquals("escape", CSVFormat.DEFAULT.getEscapeCharacter(), format.getEscapeCharacter());
+        assertEquals("trim", CSVFormat.DEFAULT.getIgnoreSurroundingSpaces(), format.getIgnoreSurroundingSpaces());
+        assertEquals("empty lines", CSVFormat.DEFAULT.getIgnoreEmptyLines(), format.getIgnoreEmptyLines());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithCommentStart
+    public void testWithCommentStart() throws Exception {
+        final CSVFormat formatWithCommentStart = CSVFormat.DEFAULT.withCommentMarker('#');
+        assertEquals( Character.valueOf('#'), formatWithCommentStart.getCommentMarker());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithCommentStartCRThrowsException
+    public void testWithCommentStartCRThrowsException() {
+        CSVFormat.DEFAULT.withCommentMarker(CR);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithDelimiter
+    public void testWithDelimiter() throws Exception {
+        final CSVFormat formatWithDelimiter = CSVFormat.DEFAULT.withDelimiter('!');
+        assertEquals('!', formatWithDelimiter.getDelimiter());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithDelimiterLFThrowsException
+    public void testWithDelimiterLFThrowsException() {
+        CSVFormat.DEFAULT.withDelimiter(LF);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithEscape
+    public void testWithEscape() throws Exception {
+        final CSVFormat formatWithEscape = CSVFormat.DEFAULT.withEscape('&');
+        assertEquals(Character.valueOf('&'), formatWithEscape.getEscapeCharacter());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithEscapeCRThrowsExceptions
+    public void testWithEscapeCRThrowsExceptions() {
+        CSVFormat.DEFAULT.withEscape(CR);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithHeader
+    public void testWithHeader() throws Exception {
+        final String[] header = new String[]{"one", "two", "three"};
+        
+        final CSVFormat formatWithHeader = CSVFormat.DEFAULT.withHeader(header);
+        assertArrayEquals(header, formatWithHeader.getHeader());
+        assertNotSame(header, formatWithHeader.getHeader());
+        header[0] = "A";
+        header[1] = "B";
+        header[2] = "C";
+        assertFalse(Arrays.equals(formatWithHeader.getHeader(), header));
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testJiraCsv154_withCommentMarker
+    public void testJiraCsv154_withCommentMarker() throws IOException {
+        final String comment = "This is a header comment";
+        final CSVFormat format = CSVFormat.EXCEL.withHeader("H1", "H2").withCommentMarker('#').withHeaderComments(comment);
+        final StringBuilder out = new StringBuilder();
+        final CSVPrinter printer = format.print(out);
+        printer.print("A");
+        printer.print("B");
+        printer.close();
+        final String s = out.toString();
+        Assert.assertTrue(s, s.contains(comment));
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testJiraCsv154_withHeaderComments
+    public void testJiraCsv154_withHeaderComments() throws IOException {
+        final String comment = "This is a header comment";
+        final CSVFormat format = CSVFormat.EXCEL.withHeader("H1", "H2").withHeaderComments(comment).withCommentMarker('#');
+        final StringBuilder out = new StringBuilder();
+        final CSVPrinter printer = format.print(out);
+        printer.print("A");
+        printer.print("B");
+        printer.close();
+        final String s = out.toString();
+        Assert.assertTrue(s, s.contains(comment));
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithIgnoreEmptyLines
+    public void testWithIgnoreEmptyLines() throws Exception {
+        assertFalse(CSVFormat.DEFAULT.withIgnoreEmptyLines(false).getIgnoreEmptyLines());
+        assertTrue(CSVFormat.DEFAULT.withIgnoreEmptyLines().getIgnoreEmptyLines());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithIgnoreSurround
+    public void testWithIgnoreSurround() throws Exception {
+        assertFalse(CSVFormat.DEFAULT.withIgnoreSurroundingSpaces(false).getIgnoreSurroundingSpaces());
+        assertTrue(CSVFormat.DEFAULT.withIgnoreSurroundingSpaces().getIgnoreSurroundingSpaces());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithNullString
+    public void testWithNullString() throws Exception {
+        final CSVFormat formatWithNullString = CSVFormat.DEFAULT.withNullString("null");
+        assertEquals("null", formatWithNullString.getNullString());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithQuoteChar
+    public void testWithQuoteChar() throws Exception {
+        final CSVFormat formatWithQuoteChar = CSVFormat.DEFAULT.withQuote('"');
+        assertEquals(Character.valueOf('"'), formatWithQuoteChar.getQuoteCharacter());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithQuoteLFThrowsException
+    public void testWithQuoteLFThrowsException() {
+        CSVFormat.DEFAULT.withQuote(LF);
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithQuotePolicy
+    public void testWithQuotePolicy() throws Exception {
+        final CSVFormat formatWithQuotePolicy = CSVFormat.DEFAULT.withQuoteMode(QuoteMode.ALL);
+        assertEquals(QuoteMode.ALL, formatWithQuotePolicy.getQuoteMode());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithRecordSeparatorCR
+    public void testWithRecordSeparatorCR() throws Exception {
+        final CSVFormat formatWithRecordSeparator = CSVFormat.DEFAULT.withRecordSeparator(CR);
+        assertEquals(String.valueOf(CR), formatWithRecordSeparator.getRecordSeparator());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithRecordSeparatorLF
+    public void testWithRecordSeparatorLF() throws Exception {
+        final CSVFormat formatWithRecordSeparator = CSVFormat.DEFAULT.withRecordSeparator(LF);
+        assertEquals(String.valueOf(LF), formatWithRecordSeparator.getRecordSeparator());
+    }
+
+// org.apache.commons.csv.CSVFormatTest::testWithRecordSeparatorCRLF
+    public void testWithRecordSeparatorCRLF() throws Exception {
+        final CSVFormat formatWithRecordSeparator = CSVFormat.DEFAULT.withRecordSeparator(CRLF);
+        assertEquals(CRLF, formatWithRecordSeparator.getRecordSeparator());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testBackslashEscaping
+    public void testBackslashEscaping() throws IOException {
+
+        
+        
+        
+
+        final String code = "one,two,three\n" 
+                + "'',''\n" 
+                + "/',/'\n" 
+                + "'/'','/''\n" 
+                + "'''',''''\n" 
+                + "/,,/,\n" 
+                + "//,//\n" 
+                + "'//','//'\n" 
+                + "   8   ,   \"quoted \"\" /\" 
+                + "9,   /\n   \n" 
+                + "";
+        final String[][] res = { { "one", "two", "three" }, 
+                { "", "" }, 
+                { "'", "'" }, 
+                { "'", "'" }, 
+                { "'", "'" }, 
+                { ",", "," }, 
+                { "/", "/" }, 
+                { "/", "/" }, 
+                { "   8   ", "   \"quoted \"\" /\" / string\"   " }, { "9", "   \n   " }, };
+
+        final CSVFormat format = CSVFormat.newFormat(',').withQuote('\'').withRecordSeparator(CRLF).withEscape('/')
+                .withIgnoreEmptyLines();
+
+        final CSVParser parser = CSVParser.parse(code, format);
+        final List<CSVRecord> records = parser.getRecords();
+        assertTrue(records.size() > 0);
+
+        Utils.compare("Records do not match expected result", res, records);
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testBackslashEscaping2
+    public void testBackslashEscaping2() throws IOException {
+
+        
+        
+        
+
+        final String code = "" + " , , \n" 
+                + " \t ,  , \n" 
+                + " 
+                + "";
+        final String[][] res = { { " ", " ", " " }, 
+                { " \t ", "  ", " " }, 
+                { " / ", " , ", " ," }, 
+        };
+
+        final CSVFormat format = CSVFormat.newFormat(',').withRecordSeparator(CRLF).withEscape('/')
+                .withIgnoreEmptyLines();
+
+        final CSVParser parser = CSVParser.parse(code, format);
+        final List<CSVRecord> records = parser.getRecords();
+        assertTrue(records.size() > 0);
+
+        Utils.compare("", res, records);
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testBackslashEscapingOld
+    public void testBackslashEscapingOld() throws IOException {
+        final String code = "one,two,three\n" + "on\\\"e,two\n" + "on\"e,two\n" + "one,\"tw\\\"o\"\n"
+                + "one,\"t\\,wo\"\n" + "one,two,\"th,ree\"\n" + "\"a\\\\\"\n" + "a\\,b\n" + "\"a\\\\,b\"";
+        final String[][] res = { { "one", "two", "three" }, { "on\\\"e", "two" }, { "on\"e", "two" },
+                { "one", "tw\"o" }, { "one", "t\\,wo" }, 
+                { "one", "two", "th,ree" }, { "a\\\\" }, 
+                { "a\\", "b" }, 
+                { "a\\\\,b" } 
+        };
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(res.length, records.size());
+        assertTrue(records.size() > 0);
+        for (int i = 0; i < res.length; i++) {
+            assertArrayEquals(res[i], records.get(i).values());
+        }
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testBOM
+    public void testBOM() throws IOException {
+        final URL url = ClassLoader.getSystemClassLoader().getResource("CSVFileParser/bom.csv");
+        final CSVParser parser = CSVParser.parse(url, Charset.forName("UTF-8"), CSVFormat.EXCEL.withHeader());
+        try {
+            for (final CSVRecord record : parser) {
+                final String string = record.get("Date");
+                Assert.assertNotNull(string);
+                
+            }
+        } finally {
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testBOMInputStream
+    public void testBOMInputStream() {}
+
+// org.apache.commons.csv.CSVParserTest::testCarriageReturnEndings
+    public void testCarriageReturnEndings() throws IOException {
+        final String code = "foo\rbaar,\rhello,world\r,kanu";
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(4, records.size());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testCarriageReturnLineFeedEndings
+    public void testCarriageReturnLineFeedEndings() throws IOException {
+        final String code = "foo\r\nbaar,\r\nhello,world\r\n,kanu";
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(4, records.size());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testClose
+    public void testClose() throws Exception {
+        final Reader in = new StringReader("# comment\na,b,c\n1,2,3\nx,y,z");
+        final CSVParser parser = CSVFormat.DEFAULT.withCommentMarker('#').withHeader().parse(in);
+        final Iterator<CSVRecord> records = parser.iterator();
+        assertTrue(records.hasNext());
+        parser.close();
+        assertFalse(records.hasNext());
+        records.next();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testCSV57
+    public void testCSV57() throws Exception {
+        final CSVParser parser = CSVParser.parse("", CSVFormat.DEFAULT);
+        final List<CSVRecord> list = parser.getRecords();
+        assertNotNull(list);
+        assertEquals(0, list.size());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testDefaultFormat
+    public void testDefaultFormat() throws IOException {
+        final String code = "" + "a,b#\n" 
+                + "\"\n\",\" \",#\n" 
+                + "#,\"\"\n" 
+                + "# Final comment\n"// 4)
+        ;
+        final String[][] res = { { "a", "b#" }, { "\n", " ", "#" }, { "#", "" }, { "# Final comment" } };
+
+        CSVFormat format = CSVFormat.DEFAULT;
+        assertFalse(format.isCommentMarkerSet());
+
+        CSVParser parser = CSVParser.parse(code, format);
+        List<CSVRecord> records = parser.getRecords();
+        assertTrue(records.size() > 0);
+
+        Utils.compare("Failed to parse without comments", res, records);
+
+        final String[][] res_comments = { { "a", "b#" }, { "\n", " ", "#" }, };
+
+        format = CSVFormat.DEFAULT.withCommentMarker('#');
+        parser.close();
+        parser = CSVParser.parse(code, format);
+        records = parser.getRecords();
+
+        Utils.compare("Failed to parse with comments", res_comments, records);
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testEmptyFile
+    public void testEmptyFile() throws Exception {
+        final CSVParser parser = CSVParser.parse("", CSVFormat.DEFAULT);
+        assertNull(parser.nextRecord());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testEmptyLineBehaviourCSV
+    public void testEmptyLineBehaviourCSV() throws Exception {
+        final String[] codes = { "hello,\r\n\r\n\r\n", "hello,\n\n\n", "hello,\"\"\r\n\r\n\r\n", "hello,\"\"\n\n\n" };
+        final String[][] res = { { "hello", "" } 
+        };
+        for (final String code : codes) {
+            final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(res.length, records.size());
+            assertTrue(records.size() > 0);
+            for (int i = 0; i < res.length; i++) {
+                assertArrayEquals(res[i], records.get(i).values());
+            }
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testEmptyLineBehaviourExcel
+    public void testEmptyLineBehaviourExcel() throws Exception {
+        final String[] codes = { "hello,\r\n\r\n\r\n", "hello,\n\n\n", "hello,\"\"\r\n\r\n\r\n", "hello,\"\"\n\n\n" };
+        final String[][] res = { { "hello", "" }, { "" }, 
+                { "" } };
+        for (final String code : codes) {
+            final CSVParser parser = CSVParser.parse(code, CSVFormat.EXCEL);
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(res.length, records.size());
+            assertTrue(records.size() > 0);
+            for (int i = 0; i < res.length; i++) {
+                assertArrayEquals(res[i], records.get(i).values());
+            }
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testStartWithEmptyLinesThenHeaders
+    public void testStartWithEmptyLinesThenHeaders() throws Exception {
+        final String[] codes = {"\r\n\r\n\r\nhello,\r\n\r\n\r\n", "hello,\n\n\n", "hello,\"\"\r\n\r\n\r\n",
+                "hello,\"\"\n\n\n"};
+        final String[][] res = {{"hello", ""}, {""}, 
+                {""}};
+        for (final String code : codes) {
+            final CSVParser parser = CSVParser.parse(code, CSVFormat.EXCEL);
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(res.length, records.size());
+            assertTrue(records.size() > 0);
+            for (int i = 0; i < res.length; i++) {
+                assertArrayEquals(res[i], records.get(i).values());
+            }
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testEndOfFileBehaviorCSV
+    public void testEndOfFileBehaviorCSV() throws Exception {
+        final String[] codes = { "hello,\r\n\r\nworld,\r\n", "hello,\r\n\r\nworld,", "hello,\r\n\r\nworld,\"\"\r\n",
+                "hello,\r\n\r\nworld,\"\"", "hello,\r\n\r\nworld,\n", "hello,\r\n\r\nworld,",
+                "hello,\r\n\r\nworld,\"\"\n", "hello,\r\n\r\nworld,\"\"" };
+        final String[][] res = { { "hello", "" }, 
+                { "world", "" } };
+        for (final String code : codes) {
+            final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(res.length, records.size());
+            assertTrue(records.size() > 0);
+            for (int i = 0; i < res.length; i++) {
+                assertArrayEquals(res[i], records.get(i).values());
+            }
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testEndOfFileBehaviourExcel
+    public void testEndOfFileBehaviourExcel() throws Exception {
+        final String[] codes = { "hello,\r\n\r\nworld,\r\n", "hello,\r\n\r\nworld,", "hello,\r\n\r\nworld,\"\"\r\n",
+                "hello,\r\n\r\nworld,\"\"", "hello,\r\n\r\nworld,\n", "hello,\r\n\r\nworld,",
+                "hello,\r\n\r\nworld,\"\"\n", "hello,\r\n\r\nworld,\"\"" };
+        final String[][] res = { { "hello", "" }, { "" }, 
+                { "world", "" } };
+
+        for (final String code : codes) {
+            final CSVParser parser = CSVParser.parse(code, CSVFormat.EXCEL);
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(res.length, records.size());
+            assertTrue(records.size() > 0);
+            for (int i = 0; i < res.length; i++) {
+                assertArrayEquals(res[i], records.get(i).values());
+            }
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testExcelFormat1
+    public void testExcelFormat1() throws IOException {
+        final String code = "value1,value2,value3,value4\r\na,b,c,d\r\n  x,,,"
+                + "\r\n\r\n\"\"\"hello\"\"\",\"  \"\"world\"\"\",\"abc\ndef\",\r\n";
+        final String[][] res = { { "value1", "value2", "value3", "value4" }, { "a", "b", "c", "d" },
+                { "  x", "", "", "" }, { "" }, { "\"hello\"", "  \"world\"", "abc\ndef", "" } };
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.EXCEL);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(res.length, records.size());
+        assertTrue(records.size() > 0);
+        for (int i = 0; i < res.length; i++) {
+            assertArrayEquals(res[i], records.get(i).values());
+        }
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testExcelFormat2
+    public void testExcelFormat2() throws Exception {
+        final String code = "foo,baar\r\n\r\nhello,\r\n\r\nworld,\r\n";
+        final String[][] res = { { "foo", "baar" }, { "" }, { "hello", "" }, { "" }, { "world", "" } };
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.EXCEL);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(res.length, records.size());
+        assertTrue(records.size() > 0);
+        for (int i = 0; i < res.length; i++) {
+            assertArrayEquals(res[i], records.get(i).values());
+        }
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testExcelHeaderCountLessThanData
+    public void testExcelHeaderCountLessThanData() throws Exception {
+        final String code = "A,B,C,,\r\na,b,c,d,e\r\n";
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.EXCEL.withHeader());
+        try {
+            for (final CSVRecord record : parser.getRecords()) {
+                Assert.assertEquals("a", record.get("A"));
+                Assert.assertEquals("b", record.get("B"));
+                Assert.assertEquals("c", record.get("C"));
+            }
+        } finally {
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testForEach
+    public void testForEach() throws Exception {
+        final List<CSVRecord> records = new ArrayList<CSVRecord>();
+
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+
+        for (final CSVRecord record : CSVFormat.DEFAULT.parse(in)) {
+            records.add(record);
+        }
+
+        assertEquals(3, records.size());
+        assertArrayEquals(new String[] { "a", "b", "c" }, records.get(0).values());
+        assertArrayEquals(new String[] { "1", "2", "3" }, records.get(1).values());
+        assertArrayEquals(new String[] { "x", "y", "z" }, records.get(2).values());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetHeaderMap
+    public void testGetHeaderMap() throws Exception {
+        final CSVParser parser = CSVParser.parse("a,b,c\n1,2,3\nx,y,z", CSVFormat.DEFAULT.withHeader("A", "B", "C"));
+        final Map<String, Integer> headerMap = parser.getHeaderMap();
+        final Iterator<String> columnNames = headerMap.keySet().iterator();
+        
+        Assert.assertEquals("A", columnNames.next());
+        Assert.assertEquals("B", columnNames.next());
+        Assert.assertEquals("C", columnNames.next());
+        final Iterator<CSVRecord> records = parser.iterator();
+
+        
+        for (int i = 0; i < 3; i++) {
+            assertTrue(records.hasNext());
+            final CSVRecord record = records.next();
+            assertEquals(record.get(0), record.get("A"));
+            assertEquals(record.get(1), record.get("B"));
+            assertEquals(record.get(2), record.get("C"));
+        }
+
+        assertFalse(records.hasNext());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testDuplicateHeaders
+    public void testDuplicateHeaders() throws Exception {
+        CSVParser.parse("a,b,a\n1,2,3\nx,y,z", CSVFormat.DEFAULT.withHeader(new String[] {}));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetLine
+    public void testGetLine() throws IOException {
+        final CSVParser parser = CSVParser.parse(CSV_INPUT, CSVFormat.DEFAULT.withIgnoreSurroundingSpaces());
+        for (final String[] re : RESULT) {
+            assertArrayEquals(re, parser.nextRecord().values());
+        }
+
+        assertNull(parser.nextRecord());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetLineNumberWithCR
+    public void testGetLineNumberWithCR() throws Exception {
+        this.validateLineNumbers(String.valueOf(CR));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetLineNumberWithCRLF
+    public void testGetLineNumberWithCRLF() throws Exception {
+        this.validateLineNumbers(CRLF);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetLineNumberWithLF
+    public void testGetLineNumberWithLF() throws Exception {
+        this.validateLineNumbers(String.valueOf(LF));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecordPositionWithCRLF
+    public void testGetRecordPositionWithCRLF() throws Exception {
+        this.validateRecordPosition(CRLF);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecordPositionWithLF
+    public void testGetRecordPositionWithLF() throws Exception {
+        this.validateRecordPosition(String.valueOf(LF));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetOneLine
+    public void testGetOneLine() throws IOException {
+        final CSVParser parser = CSVParser.parse(CSV_INPUT_1, CSVFormat.DEFAULT);
+        final CSVRecord record = parser.getRecords().get(0);
+        assertArrayEquals(RESULT[0], record.values());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetOneLineOneParser
+    public void testGetOneLineOneParser() throws IOException {
+        final PipedWriter writer = new PipedWriter();
+        final PipedReader reader = new PipedReader(writer);
+        final CSVFormat format = CSVFormat.DEFAULT;
+        final CSVParser parser = new CSVParser(reader, format);
+        try {
+            writer.append(CSV_INPUT_1);
+            writer.append(format.getRecordSeparator());
+            final CSVRecord record1 = parser.nextRecord();
+            assertArrayEquals(RESULT[0], record1.values());
+            writer.append(CSV_INPUT_2);
+            writer.append(format.getRecordSeparator());
+            final CSVRecord record2 = parser.nextRecord();
+            assertArrayEquals(RESULT[1], record2.values());
+        } finally {
+            parser.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecordNumberWithCR
+    public void testGetRecordNumberWithCR() throws Exception {
+        this.validateRecordNumbers(String.valueOf(CR));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecordNumberWithCRLF
+    public void testGetRecordNumberWithCRLF() throws Exception {
+        this.validateRecordNumbers(CRLF);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecordNumberWithLF
+    public void testGetRecordNumberWithLF() throws Exception {
+        this.validateRecordNumbers(String.valueOf(LF));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecords
+    public void testGetRecords() throws IOException {
+        final CSVParser parser = CSVParser.parse(CSV_INPUT, CSVFormat.DEFAULT.withIgnoreSurroundingSpaces());
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(RESULT.length, records.size());
+        assertTrue(records.size() > 0);
+        for (int i = 0; i < RESULT.length; i++) {
+            assertArrayEquals(RESULT[i], records.get(i).values());
+        }
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testGetRecordWithMultiLineValues
+    public void testGetRecordWithMultiLineValues() throws Exception {
+        final CSVParser parser = CSVParser.parse("\"a\r\n1\",\"a\r\n2\"" + CRLF + "\"b\r\n1\",\"b\r\n2\"" + CRLF +
+                "\"c\r\n1\",\"c\r\n2\"", CSVFormat.DEFAULT.withRecordSeparator(CRLF));
+        CSVRecord record;
+        assertEquals(0, parser.getRecordNumber());
+        assertEquals(0, parser.getCurrentLineNumber());
+        assertNotNull(record = parser.nextRecord());
+        assertEquals(3, parser.getCurrentLineNumber());
+        assertEquals(1, record.getRecordNumber());
+        assertEquals(1, parser.getRecordNumber());
+        assertNotNull(record = parser.nextRecord());
+        assertEquals(6, parser.getCurrentLineNumber());
+        assertEquals(2, record.getRecordNumber());
+        assertEquals(2, parser.getRecordNumber());
+        assertNotNull(record = parser.nextRecord());
+        assertEquals(8, parser.getCurrentLineNumber());
+        assertEquals(3, record.getRecordNumber());
+        assertEquals(3, parser.getRecordNumber());
+        assertNull(record = parser.nextRecord());
+        assertEquals(8, parser.getCurrentLineNumber());
+        assertEquals(3, parser.getRecordNumber());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testHeader
+    public void testHeader() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader().parse(in).iterator();
+
+        for (int i = 0; i < 2; i++) {
+            assertTrue(records.hasNext());
+            final CSVRecord record = records.next();
+            assertEquals(record.get(0), record.get("a"));
+            assertEquals(record.get(1), record.get("b"));
+            assertEquals(record.get(2), record.get("c"));
+        }
+
+        assertFalse(records.hasNext());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testHeaderMissing
+    public void testHeaderMissing() throws Exception {
+        final Reader in = new StringReader("a,,c\n1,2,3\nx,y,z");
+
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader().parse(in).iterator();
+
+        for (int i = 0; i < 2; i++) {
+            assertTrue(records.hasNext());
+            final CSVRecord record = records.next();
+            assertEquals(record.get(0), record.get("a"));
+            assertEquals(record.get(2), record.get("c"));
+        }
+
+        assertFalse(records.hasNext());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testHeadersMissingException
+    public void testHeadersMissingException() throws Exception {
+        final Reader in = new StringReader("a,,c,,d\n1,2,3,4\nx,y,z,zz");
+        CSVFormat.DEFAULT.withHeader().parse(in).iterator();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testHeadersMissing
+    public void testHeadersMissing() throws Exception {
+        final Reader in = new StringReader("a,,c,,d\n1,2,3,4\nx,y,z,zz");
+        CSVFormat.DEFAULT.withHeader().withAllowMissingColumnNames().parse(in).iterator();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testHeaderMissingWithNull
+    public void testHeaderMissingWithNull() throws Exception {
+        final Reader in = new StringReader("a,,c,,d\n1,2,3,4\nx,y,z,zz");
+        CSVFormat.DEFAULT.withHeader().withNullString("").withAllowMissingColumnNames().parse(in).iterator();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testHeaderComment
+    public void testHeaderComment() throws Exception {
+        final Reader in = new StringReader("# comment\na,b,c\n1,2,3\nx,y,z");
+
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withCommentMarker('#').withHeader().parse(in).iterator();
+
+        for (int i = 0; i < 2; i++) {
+            assertTrue(records.hasNext());
+            final CSVRecord record = records.next();
+            assertEquals(record.get(0), record.get("a"));
+            assertEquals(record.get(1), record.get("b"));
+            assertEquals(record.get(2), record.get("c"));
+        }
+
+        assertFalse(records.hasNext());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testIgnoreEmptyLines
+    public void testIgnoreEmptyLines() throws IOException {
+        final String code = "\nfoo,baar\n\r\n,\n\n,world\r\n\n";
+        
+        
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(3, records.size());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testInvalidFormat
+    public void testInvalidFormat() throws Exception {
+        final CSVFormat invalidFormat = CSVFormat.DEFAULT.withDelimiter(CR);
+        new CSVParser(null, invalidFormat).close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testIterator
+    public void testIterator() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+
+        final Iterator<CSVRecord> iterator = CSVFormat.DEFAULT.parse(in).iterator();
+
+        assertTrue(iterator.hasNext());
+        try {
+            iterator.remove();
+            fail("expected UnsupportedOperationException");
+        } catch (final UnsupportedOperationException expected) {
+            
+        }
+        assertArrayEquals(new String[] { "a", "b", "c" }, iterator.next().values());
+        assertArrayEquals(new String[] { "1", "2", "3" }, iterator.next().values());
+        assertTrue(iterator.hasNext());
+        assertTrue(iterator.hasNext());
+        assertTrue(iterator.hasNext());
+        assertArrayEquals(new String[] { "x", "y", "z" }, iterator.next().values());
+        assertFalse(iterator.hasNext());
+
+        try {
+            iterator.next();
+            fail("NoSuchElementException expected");
+        } catch (final NoSuchElementException e) {
+            
+        }
+    }
+
+// org.apache.commons.csv.CSVParserTest::testLineFeedEndings
+    public void testLineFeedEndings() throws IOException {
+        final String code = "foo\nbaar,\nhello,world\n,kanu";
+        final CSVParser parser = CSVParser.parse(code, CSVFormat.DEFAULT);
+        final List<CSVRecord> records = parser.getRecords();
+        assertEquals(4, records.size());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testMappedButNotSetAsOutlook2007ContactExport
+    public void testMappedButNotSetAsOutlook2007ContactExport() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2\nx,y,z");
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader("A", "B", "C").withSkipHeaderRecord()
+                .parse(in).iterator();
+        CSVRecord record;
+
+        
+        record = records.next();
+        assertTrue(record.isMapped("A"));
+        assertTrue(record.isMapped("B"));
+        assertTrue(record.isMapped("C"));
+        assertTrue(record.isSet("A"));
+        assertTrue(record.isSet("B"));
+        assertFalse(record.isSet("C"));
+        assertEquals("1", record.get("A"));
+        assertEquals("2", record.get("B"));
+        assertFalse(record.isConsistent());
+
+        
+        record = records.next();
+        assertTrue(record.isMapped("A"));
+        assertTrue(record.isMapped("B"));
+        assertTrue(record.isMapped("C"));
+        assertTrue(record.isSet("A"));
+        assertTrue(record.isSet("B"));
+        assertTrue(record.isSet("C"));
+        assertEquals("x", record.get("A"));
+        assertEquals("y", record.get("B"));
+        assertEquals("z", record.get("C"));
+        assertTrue(record.isConsistent());
+
+        assertFalse(records.hasNext());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testMultipleIterators
+    public void testMultipleIterators() throws Exception {
+        final CSVParser parser = CSVParser.parse("a,b,c" + CR + "d,e,f", CSVFormat.DEFAULT);
+
+        final Iterator<CSVRecord> itr1 = parser.iterator();
+        final Iterator<CSVRecord> itr2 = parser.iterator();
+
+        final CSVRecord first = itr1.next();
+        assertEquals("a", first.get(0));
+        assertEquals("b", first.get(1));
+        assertEquals("c", first.get(2));
+
+        final CSVRecord second = itr2.next();
+        assertEquals("d", second.get(0));
+        assertEquals("e", second.get(1));
+        assertEquals("f", second.get(2));
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testNewCSVParserNullReaderFormat
+    public void testNewCSVParserNullReaderFormat() throws Exception {
+        new CSVParser(null, CSVFormat.DEFAULT).close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testNewCSVParserReaderNullFormat
+    public void testNewCSVParserReaderNullFormat() throws Exception {
+        new CSVParser(new StringReader(""), null).close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testNoHeaderMap
+    public void testNoHeaderMap() throws Exception {
+        final CSVParser parser = CSVParser.parse("a,b,c\n1,2,3\nx,y,z", CSVFormat.DEFAULT);
+        Assert.assertNull(parser.getHeaderMap());
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParseFileNullFormat
+    public void testParseFileNullFormat() throws Exception {
+        CSVParser.parse(new File(""), Charset.defaultCharset(), null);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParseNullFileFormat
+    public void testParseNullFileFormat() throws Exception {
+        CSVParser.parse((File) null, Charset.defaultCharset(), CSVFormat.DEFAULT);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParseNullStringFormat
+    public void testParseNullStringFormat() throws Exception {
+        CSVParser.parse((String) null, CSVFormat.DEFAULT);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParseNullUrlCharsetFormat
+    public void testParseNullUrlCharsetFormat() throws Exception {
+        CSVParser.parse((File) null, Charset.defaultCharset(), CSVFormat.DEFAULT);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParserUrlNullCharsetFormat
+    public void testParserUrlNullCharsetFormat() throws Exception {
+        final CSVParser parser = CSVParser.parse(new URL("http://commons.apache.org"), null, CSVFormat.DEFAULT);
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParseStringNullFormat
+    public void testParseStringNullFormat() throws Exception {
+        CSVParser.parse("csv data", null);
+    }
+
+// org.apache.commons.csv.CSVParserTest::testParseUrlCharsetNullFormat
+    public void testParseUrlCharsetNullFormat() throws Exception {
+        final CSVParser parser = CSVParser.parse(new URL("http://commons.apache.org"), Charset.defaultCharset(), null);
+        parser.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testProvidedHeader
+    public void testProvidedHeader() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader("A", "B", "C").parse(in).iterator();
+
+        for (int i = 0; i < 3; i++) {
+            assertTrue(records.hasNext());
+            final CSVRecord record = records.next();
+            assertTrue(record.isMapped("A"));
+            assertTrue(record.isMapped("B"));
+            assertTrue(record.isMapped("C"));
+            assertFalse(record.isMapped("NOT MAPPED"));
+            assertEquals(record.get(0), record.get("A"));
+            assertEquals(record.get(1), record.get("B"));
+            assertEquals(record.get(2), record.get("C"));
+        }
+
+        assertFalse(records.hasNext());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testProvidedHeaderAuto
+    public void testProvidedHeaderAuto() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader().parse(in).iterator();
+
+        for (int i = 0; i < 2; i++) {
+            assertTrue(records.hasNext());
+            final CSVRecord record = records.next();
+            assertTrue(record.isMapped("a"));
+            assertTrue(record.isMapped("b"));
+            assertTrue(record.isMapped("c"));
+            assertFalse(record.isMapped("NOT MAPPED"));
+            assertEquals(record.get(0), record.get("a"));
+            assertEquals(record.get(1), record.get("b"));
+            assertEquals(record.get(2), record.get("c"));
+        }
+
+        assertFalse(records.hasNext());
+    }
+
+// org.apache.commons.csv.CSVParserTest::testRoundtrip
+    public void testRoundtrip() throws Exception {
+        final StringWriter out = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(out, CSVFormat.DEFAULT);
+        final String input = "a,b,c\r\n1,2,3\r\nx,y,z\r\n";
+        for (final CSVRecord record : CSVParser.parse(input, CSVFormat.DEFAULT)) {
+            printer.printRecord(record);
+        }
+        assertEquals(input, out.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVParserTest::testSkipAutoHeader
+    public void testSkipAutoHeader() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader().parse(in).iterator();
+        final CSVRecord record = records.next();
+        assertEquals("1", record.get("a"));
+        assertEquals("2", record.get("b"));
+        assertEquals("3", record.get("c"));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testSkipSetHeader
+    public void testSkipSetHeader() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader("a", "b", "c").withSkipHeaderRecord()
+                .parse(in).iterator();
+        final CSVRecord record = records.next();
+        assertEquals("1", record.get("a"));
+        assertEquals("2", record.get("b"));
+        assertEquals("3", record.get("c"));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testSkipSetAltHeaders
+    public void testSkipSetAltHeaders() throws Exception {
+        final Reader in = new StringReader("a,b,c\n1,2,3\nx,y,z");
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader("X", "Y", "Z").withSkipHeaderRecord()
+                .parse(in).iterator();
+        final CSVRecord record = records.next();
+        assertEquals("1", record.get("X"));
+        assertEquals("2", record.get("Y"));
+        assertEquals("3", record.get("Z"));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testSkipHeaderOverrideDuplicateHeaders
+    public void testSkipHeaderOverrideDuplicateHeaders() throws Exception {
+        final Reader in = new StringReader("a,a,a\n1,2,3\nx,y,z");
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader("X", "Y", "Z").withSkipHeaderRecord()
+                .parse(in).iterator();
+        final CSVRecord record = records.next();
+        assertEquals("1", record.get("X"));
+        assertEquals("2", record.get("Y"));
+        assertEquals("3", record.get("Z"));
+    }
+
+// org.apache.commons.csv.CSVParserTest::testIgnoreCaseHeaderMapping
+    public void testIgnoreCaseHeaderMapping() throws Exception {
+        final Reader in = new StringReader("1,2,3");
+        final Iterator<CSVRecord> records = CSVFormat.DEFAULT.withHeader("One", "TWO", "three").withIgnoreHeaderCase()
+                .parse(in).iterator();
+        final CSVRecord record = records.next();
+        assertEquals("1", record.get("one"));
+        assertEquals("2", record.get("two"));
+        assertEquals("3", record.get("THREE"));
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testDisabledComment
+    public void testDisabledComment() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printComment("This is a comment");
+
+        assertEquals("", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testExcelPrintAllArrayOfArrays
+    public void testExcelPrintAllArrayOfArrays() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.EXCEL);
+        printer.printRecords((Object[]) new String[][] { { "r1c1", "r1c2" }, { "r2c1", "r2c2" } });
+        assertEquals("r1c1,r1c2" + recordSeparator + "r2c1,r2c2" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testExcelPrintAllArrayOfLists
+    public void testExcelPrintAllArrayOfLists() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.EXCEL);
+        printer.printRecords((Object[]) new List[] { Arrays.asList("r1c1", "r1c2"), Arrays.asList("r2c1", "r2c2") });
+        assertEquals("r1c1,r1c2" + recordSeparator + "r2c1,r2c2" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testExcelPrintAllIterableOfArrays
+    public void testExcelPrintAllIterableOfArrays() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.EXCEL);
+        printer.printRecords(Arrays.asList(new String[][] { { "r1c1", "r1c2" }, { "r2c1", "r2c2" } }));
+        assertEquals("r1c1,r1c2" + recordSeparator + "r2c1,r2c2" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testExcelPrintAllIterableOfLists
+    public void testExcelPrintAllIterableOfLists() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.EXCEL);
+        printer.printRecords(
+                Arrays.asList(new List[] { Arrays.asList("r1c1", "r1c2"), Arrays.asList("r2c1", "r2c2") }));
+        assertEquals("r1c1,r1c2" + recordSeparator + "r2c1,r2c2" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testExcelPrinter1
+    public void testExcelPrinter1() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.EXCEL);
+        printer.printRecord("a", "b");
+        assertEquals("a,b" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testExcelPrinter2
+    public void testExcelPrinter2() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.EXCEL);
+        printer.printRecord("a,b", "b");
+        assertEquals("\"a,b\",b" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testJdbcPrinter
+    public void testJdbcPrinter() throws IOException, ClassNotFoundException, SQLException {
+        final StringWriter sw = new StringWriter();
+        final Connection connection = geH2Connection();
+        try {
+            setUpTable(connection);
+            final Statement stmt = connection.createStatement();
+            final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+            printer.printRecords(stmt.executeQuery("select ID, NAME from TEST"));
+            assertEquals("1,r1" + recordSeparator + "2,r2" + recordSeparator, sw.toString());
+            printer.close();
+        } finally {
+            connection.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testJdbcPrinterWithResultSet
+    public void testJdbcPrinterWithResultSet() throws IOException, ClassNotFoundException, SQLException {
+        final StringWriter sw = new StringWriter();
+        Class.forName("org.h2.Driver");
+        final Connection connection = geH2Connection();
+        try {
+            setUpTable(connection);
+            @SuppressWarnings("resource")
+            
+            final Statement stmt = connection.createStatement();
+            @SuppressWarnings("resource")
+            
+            final ResultSet resultSet = stmt.executeQuery("select ID, NAME from TEST");
+            final CSVPrinter printer = CSVFormat.DEFAULT.withHeader(resultSet).print(sw);
+            printer.printRecords(resultSet);
+            assertEquals("ID,NAME" + recordSeparator + "1,r1" + recordSeparator + "2,r2" + recordSeparator,
+                    sw.toString());
+            printer.close();
+        } finally {
+            connection.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testJdbcPrinterWithResultSetMetaData
+    public void testJdbcPrinterWithResultSetMetaData() throws IOException, ClassNotFoundException, SQLException {
+        final StringWriter sw = new StringWriter();
+        Class.forName("org.h2.Driver");
+        final Connection connection = geH2Connection();
+        try {
+            setUpTable(connection);
+            @SuppressWarnings("resource")
+            
+            final Statement stmt = connection.createStatement();
+            @SuppressWarnings("resource")
+            
+            final ResultSet resultSet = stmt.executeQuery("select ID, NAME from TEST");
+            final CSVPrinter printer = CSVFormat.DEFAULT.withHeader(resultSet.getMetaData()).print(sw);
+            printer.printRecords(resultSet);
+            assertEquals("ID,NAME" + recordSeparator + "1,r1" + recordSeparator + "2,r2" + recordSeparator,
+                    sw.toString());
+            printer.close();
+        } finally {
+            connection.close();
+        }
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testMultiLineComment
+    public void testMultiLineComment() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withCommentMarker('#'));
+        printer.printComment("This is a comment\non multiple lines");
+
+        assertEquals("# This is a comment" + recordSeparator + "# on multiple lines" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testMySqlNullStringDefault
+    public void testMySqlNullStringDefault() throws IOException {
+        assertEquals("\\N", CSVFormat.MYSQL.getNullString());
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testMySqlNullOutput
+    public void testMySqlNullOutput() throws IOException {
+        Object[] s = new String[] { "NULL", null };
+        CSVFormat format = CSVFormat.MYSQL.withQuote('"').withNullString("NULL").withQuoteMode(QuoteMode.NON_NUMERIC);
+        StringWriter writer = new StringWriter();
+        CSVPrinter printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        String expected = "\"NULL\"\tNULL\n";
+        assertEquals(expected, writer.toString());
+        String[] record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(new Object[2], record0);
+
+        s = new String[] { "\\N", null };
+        format = CSVFormat.MYSQL.withNullString("\\N");
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\\\\N\t\\N\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "\\N", "A" };
+        format = CSVFormat.MYSQL.withNullString("\\N");
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\\\\N\tA\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "\n", "A" };
+        format = CSVFormat.MYSQL.withNullString("\\N");
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\\n\tA\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "", null };
+        format = CSVFormat.MYSQL.withNullString("NULL");
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\tNULL\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "", null };
+        format = CSVFormat.MYSQL;
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\t\\N\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "\\N", "", "\u000e,\\\r" };
+        format = CSVFormat.MYSQL;
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\\\\N\t\t\u000e,\\\\\\r\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "NULL", "\\\r" };
+        format = CSVFormat.MYSQL;
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "NULL\t\\\\\\r\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+
+        s = new String[] { "\\\r" };
+        format = CSVFormat.MYSQL;
+        writer = new StringWriter();
+        printer = new CSVPrinter(writer, format);
+        printer.printRecord(s);
+        printer.close();
+        expected = "\\\\\\r\n";
+        assertEquals(expected, writer.toString());
+        record0 = toFirstRecordValues(expected, format);
+        assertArrayEquals(expectNulls(s, format), record0);
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter1
+    public void testPrinter1() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a", "b");
+        assertEquals("a,b" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter2
+    public void testPrinter2() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a,b", "b");
+        assertEquals("\"a,b\",b" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter3
+    public void testPrinter3() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a, b", "b ");
+        assertEquals("\"a, b\",\"b \"" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter4
+    public void testPrinter4() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a", "b\"c");
+        assertEquals("a,\"b\"\"c\"" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter5
+    public void testPrinter5() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a", "b\nc");
+        assertEquals("a,\"b\nc\"" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter6
+    public void testPrinter6() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a", "b\r\nc");
+        assertEquals("a,\"b\r\nc\"" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrinter7
+    public void testPrinter7() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a", "b\\c");
+        assertEquals("a,b\\c" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrint
+    public void testPrint() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = CSVFormat.DEFAULT.print(sw);
+        printer.printRecord("a", "b\\c");
+        assertEquals("a,b\\c" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrintNullValues
+    public void testPrintNullValues() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT);
+        printer.printRecord("a", null, "b");
+        assertEquals("a,,b" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPrintCustomNullValues
+    public void testPrintCustomNullValues() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withNullString("NULL"));
+        printer.printRecord("a", null, "b");
+        assertEquals("a,NULL,b" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testParseCustomNullValues
+    public void testParseCustomNullValues() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVFormat format = CSVFormat.DEFAULT.withNullString("NULL");
+        final CSVPrinter printer = new CSVPrinter(sw, format);
+        printer.printRecord("a", null, "b");
+        printer.close();
+        final String csvString = sw.toString();
+        assertEquals("a,NULL,b" + recordSeparator, csvString);
+        final Iterable<CSVRecord> iterable = format.parse(new StringReader(csvString));
+        final Iterator<CSVRecord> iterator = iterable.iterator();
+        final CSVRecord record = iterator.next();
+        assertEquals("a", record.get(0));
+        assertEquals(null, record.get(1));
+        assertEquals("b", record.get(2));
+        assertFalse(iterator.hasNext());
+        ((CSVParser) iterable).close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testQuoteAll
+    public void testQuoteAll() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuoteMode(QuoteMode.ALL));
+        printer.printRecord("a", "b\nc", "d");
+        assertEquals("\"a\",\"b\nc\",\"d\"" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testQuoteNonNumeric
+    public void testQuoteNonNumeric() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuoteMode(QuoteMode.NON_NUMERIC));
+        printer.printRecord("a", "b\nc", Integer.valueOf(1));
+        assertEquals("\"a\",\"b\nc\",1" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testRandomDefault
+    public void testRandomDefault() throws Exception {
+        doRandom(CSVFormat.DEFAULT, ITERATIONS_FOR_RANDOM_TEST);
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testRandomExcel
+    public void testRandomExcel() throws Exception {
+        doRandom(CSVFormat.EXCEL, ITERATIONS_FOR_RANDOM_TEST);
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testRandomMySql
+    public void testRandomMySql() throws Exception {
+        doRandom(CSVFormat.MYSQL, ITERATIONS_FOR_RANDOM_TEST);
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testRandomTdf
+    public void testRandomTdf() throws Exception {
+        doRandom(CSVFormat.TDF, ITERATIONS_FOR_RANDOM_TEST);
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testRandomRfc4180
+    public void testRandomRfc4180() throws Exception {
+        doRandom(CSVFormat.RFC4180, ITERATIONS_FOR_RANDOM_TEST);
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPlainQuoted
+    public void testPlainQuoted() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote('\''));
+        printer.print("abc");
+        assertEquals("abc", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testSingleLineComment
+    public void testSingleLineComment() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withCommentMarker('#'));
+        printer.printComment("This is a comment");
+
+        assertEquals("# This is a comment" + recordSeparator, sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testSingleQuoteQuoted
+    public void testSingleQuoteQuoted() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote('\''));
+        printer.print("a'b'c");
+        printer.print("xyz");
+        assertEquals("'a''b''c',xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testDelimeterQuoted
+    public void testDelimeterQuoted() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote('\''));
+        printer.print("a,b,c");
+        printer.print("xyz");
+        assertEquals("'a,b,c',xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testDelimeterQuoteNONE
+    public void testDelimeterQuoteNONE() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVFormat format = CSVFormat.DEFAULT.withEscape('!').withQuoteMode(QuoteMode.NONE);
+        final CSVPrinter printer = new CSVPrinter(sw, format);
+        printer.print("a,b,c");
+        printer.print("xyz");
+        assertEquals("a!,b!,c,xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testEOLQuoted
+    public void testEOLQuoted() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote('\''));
+        printer.print("a\rb\nc");
+        printer.print("x\by\fz");
+        assertEquals("'a\rb\nc',x\by\fz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testEscapeBackslash
+    public void testEscapeBackslash() throws IOException {
+        StringWriter sw = new StringWriter();
+        final char quoteChar = '\'';
+        final String eol = "\r\n";
+        CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(quoteChar));
+        printer.print("\\");
+        printer.close();
+        assertEquals("'\\'", sw.toString());
+
+        sw = new StringWriter();
+        printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(quoteChar));
+        printer.print("\\\r");
+        printer.close();
+        assertEquals("'\\\r'", sw.toString());
+
+        sw = new StringWriter();
+        printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(quoteChar));
+        printer.print("X\\\r");
+        printer.close();
+        assertEquals("'X\\\r'", sw.toString());
+
+        sw = new StringWriter();
+        printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(quoteChar));
+        printer.printRecord(new Object[] { "\\\r" });
+        printer.close();
+        assertEquals("'\\\r'" + eol, sw.toString());
+
+        sw = new StringWriter();
+        printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(quoteChar));
+        printer.print("\\\\");
+        printer.close();
+        assertEquals("'\\\\'", sw.toString());
+
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPlainEscaped
+    public void testPlainEscaped() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null).withEscape('!'));
+        printer.print("abc");
+        printer.print("xyz");
+        assertEquals("abc,xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testDelimiterEscaped
+    public void testDelimiterEscaped() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withEscape('!').withQuote(null));
+        printer.print("a,b,c");
+        printer.print("xyz");
+        assertEquals("a!,b!,c,xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testEOLEscaped
+    public void testEOLEscaped() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null).withEscape('!'));
+        printer.print("a\rb\nc");
+        printer.print("x\fy\bz");
+        assertEquals("a!rb!nc,x\fy\bz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testPlainPlain
+    public void testPlainPlain() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null));
+        printer.print("abc");
+        printer.print("xyz");
+        assertEquals("abc,xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testDelimiterPlain
+    public void testDelimiterPlain() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null));
+        printer.print("a,b,c");
+        printer.print("xyz");
+        assertEquals("a,b,c,xyz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testHeader
+    public void testHeader() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null).withHeader("C1", "C2", "C3"));
+        printer.printRecord("a", "b", "c");
+        printer.printRecord("x", "y", "z");
+        assertEquals("C1,C2,C3\r\na,b,c\r\nx,y,z\r\n", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testHeaderNotSet
+    public void testHeaderNotSet() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null));
+        printer.printRecord("a", "b", "c");
+        printer.printRecord("x", "y", "z");
+        assertEquals("a,b,c\r\nx,y,z\r\n", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testSkipHeaderRecordTrue
+    public void testSkipHeaderRecordTrue() throws IOException {
+        
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw,
+                CSVFormat.DEFAULT.withQuote(null).withHeader("C1", "C2", "C3").withSkipHeaderRecord(true));
+        printer.printRecord("a", "b", "c");
+        printer.printRecord("x", "y", "z");
+        assertEquals("a,b,c\r\nx,y,z\r\n", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testSkipHeaderRecordFalse
+    public void testSkipHeaderRecordFalse() throws IOException {
+        
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw,
+                CSVFormat.DEFAULT.withQuote(null).withHeader("C1", "C2", "C3").withSkipHeaderRecord(false));
+        printer.printRecord("a", "b", "c");
+        printer.printRecord("x", "y", "z");
+        assertEquals("C1,C2,C3\r\na,b,c\r\nx,y,z\r\n", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testHeaderCommentExcel
+    public void testHeaderCommentExcel() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final Date now = new Date();
+        final CSVFormat format = CSVFormat.EXCEL;
+        final CSVPrinter csvPrinter = printWithHeaderComments(sw, now, format);
+        assertEquals("# Generated by Apache Commons CSV 1.1\r\n# " + now + "\r\nCol1,Col2\r\nA,B\r\nC,D\r\n",
+                sw.toString());
+        csvPrinter.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testHeaderCommentTdf
+    public void testHeaderCommentTdf() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final Date now = new Date();
+        final CSVFormat format = CSVFormat.TDF;
+        final CSVPrinter csvPrinter = printWithHeaderComments(sw, now, format);
+        assertEquals("# Generated by Apache Commons CSV 1.1\r\n# " + now + "\r\nCol1\tCol2\r\nA\tB\r\nC\tD\r\n",
+                sw.toString());
+        csvPrinter.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testEOLPlain
+    public void testEOLPlain() throws IOException {
+        final StringWriter sw = new StringWriter();
+        final CSVPrinter printer = new CSVPrinter(sw, CSVFormat.DEFAULT.withQuote(null));
+        printer.print("a\rb\nc");
+        printer.print("x\fy\bz");
+        assertEquals("a\rb\nc,x\fy\bz", sw.toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testInvalidFormat
+    public void testInvalidFormat() throws Exception {
+        final CSVFormat invalidFormat = CSVFormat.DEFAULT.withDelimiter(CR);
+        new CSVPrinter(new StringWriter(), invalidFormat).close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testNewCSVPrinterNullAppendableFormat
+    public void testNewCSVPrinterNullAppendableFormat() throws Exception {
+        new CSVPrinter(null, CSVFormat.DEFAULT).close();
+    }
+
+// org.apache.commons.csv.CSVPrinterTest::testNewCsvPrinterAppendableNullFormat
+    public void testNewCsvPrinterAppendableNullFormat() throws Exception {
+        new CSVPrinter(new StringWriter(), null).close();
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetInt
+    public void testGetInt() {
+        assertEquals(values[0], record.get(0));
+        assertEquals(values[1], record.get(1));
+        assertEquals(values[2], record.get(2));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetString
+    public void testGetString() {
+        assertEquals(values[0], recordWithHeader.get("first"));
+        assertEquals(values[1], recordWithHeader.get("second"));
+        assertEquals(values[2], recordWithHeader.get("third"));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetStringInconsistentRecord
+    public void testGetStringInconsistentRecord() {
+        header.put("fourth", Integer.valueOf(4));
+        recordWithHeader.get("fourth");
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetStringNoHeader
+    public void testGetStringNoHeader() {
+        record.get("first");
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetUnmappedEnum
+    public void testGetUnmappedEnum() {
+        assertNull(recordWithHeader.get(EnumFixture.UNKNOWN_COLUMN));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetUnmappedName
+    public void testGetUnmappedName() {
+        assertNull(recordWithHeader.get("fourth"));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetUnmappedNegativeInt
+    public void testGetUnmappedNegativeInt() {
+        assertNull(recordWithHeader.get(Integer.MIN_VALUE));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testGetUnmappedPositiveInt
+    public void testGetUnmappedPositiveInt() {
+        assertNull(recordWithHeader.get(Integer.MAX_VALUE));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testIsConsistent
+    public void testIsConsistent() {
+        assertTrue(record.isConsistent());
+        assertTrue(recordWithHeader.isConsistent());
+
+        header.put("fourth", Integer.valueOf(4));
+        assertFalse(recordWithHeader.isConsistent());
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testIsMapped
+    public void testIsMapped() {
+        assertFalse(record.isMapped("first"));
+        assertTrue(recordWithHeader.isMapped("first"));
+        assertFalse(recordWithHeader.isMapped("fourth"));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testIsSet
+    public void testIsSet() {
+        assertFalse(record.isSet("first"));
+        assertTrue(recordWithHeader.isSet("first"));
+        assertFalse(recordWithHeader.isSet("fourth"));
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testIterator
+    public void testIterator() {
+        int i = 0;
+        for (final String value : record) {
+            assertEquals(values[i], value);
+            i++;
+        }
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testPutInMap
+    public void testPutInMap() {
+        final Map<String, String> map = new ConcurrentHashMap<String, String>();
+        this.recordWithHeader.putIn(map);
+        this.validateMap(map, false);
+        
+        final TreeMap<String, String> map2 = recordWithHeader.putIn(new TreeMap<String, String>());
+        this.validateMap(map2, false);
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testRemoveAndAddColumns
+    public void testRemoveAndAddColumns() throws IOException {
+        
+        final CSVPrinter printer = new CSVPrinter(new StringBuilder(), CSVFormat.DEFAULT);
+        final Map<String, String> map = recordWithHeader.toMap();
+        map.remove("OldColumn");
+        map.put("ZColumn", "NewValue");
+        
+        final ArrayList<String> list = new ArrayList<String>(map.values());
+        Collections.sort(list);
+        printer.printRecord(list);
+        Assert.assertEquals("A,B,C,NewValue" + CSVFormat.DEFAULT.getRecordSeparator(), printer.getOut().toString());
+        printer.close();
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testToMap
+    public void testToMap() {
+        final Map<String, String> map = this.recordWithHeader.toMap();
+        this.validateMap(map, true);
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testToMapWithShortRecord
+    public void testToMapWithShortRecord() throws Exception {
+       final CSVParser parser =  CSVParser.parse("a,b", CSVFormat.DEFAULT.withHeader("A", "B", "C"));
+       final CSVRecord shortRec = parser.iterator().next();
+       shortRec.toMap();
+    }
+
+// org.apache.commons.csv.CSVRecordTest::testToMapWithNoHeader
+    public void testToMapWithNoHeader() throws Exception {
+       final CSVParser parser =  CSVParser.parse("a,b", CSVFormat.newFormat(','));
+       final CSVRecord shortRec = parser.iterator().next();
+       final Map<String, String> map = shortRec.toMap();
+       assertNotNull("Map is not null.", map);
+       assertTrue("Map is empty.", map.isEmpty());
+    }
+
+// org.apache.commons.csv.LexerTest::testSurroundingSpacesAreDeleted
+    public void testSurroundingSpacesAreDeleted() throws IOException {
+        final String code = "noSpaces,  leadingSpaces,trailingSpaces  ,  surroundingSpaces  ,  ,,";
+        final Lexer parser = getLexer(code, CSVFormat.DEFAULT.withIgnoreSurroundingSpaces());
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "noSpaces"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "leadingSpaces"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "trailingSpaces"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "surroundingSpaces"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+    }
+
+// org.apache.commons.csv.LexerTest::testSurroundingTabsAreDeleted
+    public void testSurroundingTabsAreDeleted() throws IOException {
+        final String code = "noTabs,\tleadingTab,trailingTab\t,\tsurroundingTabs\t,\t\t,,";
+        final Lexer parser = getLexer(code, CSVFormat.DEFAULT.withIgnoreSurroundingSpaces());
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "noTabs"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "leadingTab"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "trailingTab"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "surroundingTabs"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+    }
+
+// org.apache.commons.csv.LexerTest::testIgnoreEmptyLines
+    public void testIgnoreEmptyLines() throws IOException {
+        final String code =
+                "first,line,\n"+
+                "\n"+
+                "\n"+
+                "second,line\n"+
+                "\n"+
+                "\n"+
+                "third line \n"+
+                "\n"+
+                "\n"+
+                "last, line \n"+
+                "\n"+
+                "\n"+
+                "\n";
+        final CSVFormat format = CSVFormat.DEFAULT.withIgnoreEmptyLines();
+        final Lexer parser = getLexer(code, format);
+
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "first"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "line"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "second"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "line"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "third line "));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "last"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, " line "));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+    }
+
+// org.apache.commons.csv.LexerTest::testComments
+    public void testComments() throws IOException {
+        final String code =
+                "first,line,\n"+
+                "second,line,tokenWith#no-comment\n"+
+                "# comment line \n"+
+                "third,line,#no-comment\n"+
+                "# penultimate comment\n"+
+                "# Final comment\n";
+        final CSVFormat format = CSVFormat.DEFAULT.withCommentMarker('#');
+        final Lexer parser = getLexer(code, format);
+
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "first"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "line"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "second"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "line"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "tokenWith#no-comment"));
+        assertThat(parser.nextToken(new Token()), matches(COMMENT, "comment line"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "third"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "line"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "#no-comment"));
+        assertThat(parser.nextToken(new Token()), matches(COMMENT, "penultimate comment"));
+        assertThat(parser.nextToken(new Token()), matches(COMMENT, "Final comment"));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+    }
+
+// org.apache.commons.csv.LexerTest::testCommentsAndEmptyLines
+    public void testCommentsAndEmptyLines() throws IOException {
+        final String code =
+                "1,2,3,\n"+                
+                "\n"+                      
+                "\n"+                      
+                "a,b x,c#no-comment\n"+    
+                "#foo\n"+                  
+                "\n"+                      
+                "\n"+                      
+                "d,e,#no-comment\n"+       
+                "\n"+                      
+                "\n"+                      
+                "# penultimate comment\n"+ 
+                "\n"+                      
+                "\n"+                      
+                "# Final comment\n";       
+        final CSVFormat format = CSVFormat.DEFAULT.withCommentMarker('#').withIgnoreEmptyLines(false);
+        assertFalse("Should not ignore empty lines", format.getIgnoreEmptyLines());
+
+        final Lexer parser = getLexer(code, format);
+
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "1"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "2"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "3"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "b x"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "c#no-comment")); 
+        assertThat(parser.nextToken(new Token()), matches(COMMENT, "foo"));           
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "d"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "e"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "#no-comment"));  
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(COMMENT, "penultimate comment"));              
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, ""));             
+        assertThat(parser.nextToken(new Token()), matches(COMMENT, "Final comment"));              
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+
+    }
+
+// org.apache.commons.csv.LexerTest::testBackslashWithoutEscaping
+    public void testBackslashWithoutEscaping() throws IOException {
+        
+        final String code = "a,\\,,b\\\n\\,,";
+        final CSVFormat format = CSVFormat.DEFAULT;
+        assertFalse(format.isEscapeCharacterSet());
+        final Lexer parser = getLexer(code, format);
+
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "\\"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b\\"));
+        
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "\\"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(EOF, ""));
+    }
+
+// org.apache.commons.csv.LexerTest::testBackslashWithEscaping
+    public void testBackslashWithEscaping() throws IOException {
+        
+        final String code = "a,\\,,b\\\\\n\\,,\\\nc,d\\\r\ne";
+        final CSVFormat format = formatWithEscaping.withIgnoreEmptyLines(false);
+        assertTrue(format.isEscapeCharacterSet());
+        final Lexer parser = getLexer(code, format);
+
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ","));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b\\"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ","));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "\nc"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "d\r"));
+        assertThat(parser.nextToken(new Token()), matches(EOF, "e"));
+    }
+
+// org.apache.commons.csv.LexerTest::testNextToken4
+    public void testNextToken4() throws IOException {
+        
+        final String code = "a,\"foo\",b\na,   \" foo\",b\na,\"foo \"  ,b\na,  \" foo \"  ,b";
+        final Lexer parser = getLexer(code, CSVFormat.DEFAULT.withIgnoreSurroundingSpaces());
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "foo"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, " foo"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "foo "));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, " foo "));
+
+        assertThat(parser.nextToken(new Token()), matches(EOF, "b"));
+    }
+
+// org.apache.commons.csv.LexerTest::testNextToken5
+    public void testNextToken5() throws IOException {
+        final String code = "a,\"foo\n\",b\n\"foo\n  baar ,,,\"\n\"\n\t \n\"";
+        final Lexer parser = getLexer(code, CSVFormat.DEFAULT);
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "foo\n"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "foo\n  baar ,,,"));
+        assertThat(parser.nextToken(new Token()), matches(EOF, "\n\t \n"));
+
+    }
+
+// org.apache.commons.csv.LexerTest::testNextToken6
+    public void testNextToken6() throws IOException {
+        
+        final String code = "a;'b and '' more\n'\n!comment;;;;\n;;";
+        final CSVFormat format = CSVFormat.DEFAULT.withQuote('\'').withCommentMarker('!').withDelimiter(';');
+        final Lexer parser = getLexer(code, format);
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "a"));
+        assertThat(parser.nextToken(new Token()), matches(EORECORD, "b and ' more\n"));
+    }
+
+// org.apache.commons.csv.LexerTest::testDelimiterIsWhitespace
+    public void testDelimiterIsWhitespace() throws IOException {
+        final String code = "one\ttwo\t\tfour \t five\t six";
+        final Lexer parser = getLexer(code, CSVFormat.TDF);
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "one"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "two"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, ""));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "four"));
+        assertThat(parser.nextToken(new Token()), matches(TOKEN, "five"));
+        assertThat(parser.nextToken(new Token()), matches(EOF, "six"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedCR
+    public void testEscapedCR() throws Exception {
+        final Lexer lexer = getLexer("character\\" + CR + "Escaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + CR + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testCR
+    public void testCR() throws Exception {
+        final Lexer lexer = getLexer("character" + CR + "NotEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character"));
+        assertThat(lexer.nextToken(new Token()), hasContent("NotEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedLF
+    public void testEscapedLF() throws Exception {
+        final Lexer lexer = getLexer("character\\" + LF + "Escaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + LF + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testLF
+    public void testLF() throws Exception {
+        final Lexer lexer = getLexer("character" + LF + "NotEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character"));
+        assertThat(lexer.nextToken(new Token()), hasContent("NotEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedTab
+    public void testEscapedTab() throws Exception {
+        final Lexer lexer = getLexer("character\\" + TAB + "Escaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + TAB + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testTab
+    public void testTab() throws Exception {
+        final Lexer lexer = getLexer("character" + TAB + "NotEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + TAB + "NotEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedBackspace
+    public void testEscapedBackspace() throws Exception {
+        final Lexer lexer = getLexer("character\\" + BACKSPACE + "Escaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + BACKSPACE + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testBackspace
+    public void testBackspace() throws Exception {
+        final Lexer lexer = getLexer("character" + BACKSPACE + "NotEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + BACKSPACE + "NotEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedFF
+    public void testEscapedFF() throws Exception {
+        final Lexer lexer = getLexer("character\\" + FF + "Escaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + FF + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testFF
+    public void testFF() throws Exception {
+        final Lexer lexer = getLexer("character" + FF + "NotEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + FF + "NotEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedMySqlNullValue
+    public void testEscapedMySqlNullValue() throws Exception {
+        
+        final Lexer lexer = getLexer("character\\NEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character\\NEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedCharacter
+    public void testEscapedCharacter() throws Exception {
+        final Lexer lexer = getLexer("character\\aEscaped", formatWithEscaping);
+        assertThat(lexer.nextToken(new Token()), hasContent("character\\aEscaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedControlCharacter
+    public void testEscapedControlCharacter() throws Exception {
+        
+        final Lexer lexer = getLexer("character!rEscaped", CSVFormat.DEFAULT.withEscape('!'));
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + CR + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapedControlCharacter2
+    public void testEscapedControlCharacter2() throws Exception {
+        final Lexer lexer = getLexer("character\\rEscaped", CSVFormat.DEFAULT.withEscape('\\'));
+        assertThat(lexer.nextToken(new Token()), hasContent("character" + CR + "Escaped"));
+    }
+
+// org.apache.commons.csv.LexerTest::testEscapingAtEOF
+    public void testEscapingAtEOF() throws Exception {
+        final String code = "escaping at EOF is evil\\";
+        final Lexer lexer = getLexer(code, formatWithEscaping);
+
+        lexer.nextToken(new Token());
+    }

@@ -1,0 +1,481 @@
+We are given a buggy function `integrate` from a class (likely an adaptive step size Runge-Kutta integrator) and one trigger test case. The test case is `testTooLargeFirstStep` from DormandPrince853IntegratorTest. The test uses an integrator with infinite time bounds and sets step size control to very tight tolerances, and integrates a simple ODE. The test includes assertions about the time being within bounds. The bug likely causes the integration to step outside the time bounds, violating the assertions.
+
+Let's analyze the buggy function:
+
+The function `integrate` is a complex adaptive step size ODE integrator. The bug likely relates to step size control when the first step is too large and gets rejected, leading to an incorrect adjustment? But the test is named `testTooLargeFirstStep`. Let's look at the test: It sets the integrator with min time 0, max time infinity, and NaN for absolute and relative tolerances? Actually, the constructor call: `new DormandPrince853Integrator(0, Double.POSITIVE_INFINITY, Double.NaN, Double.NaN)`. According to typical Apache Commons Math, this constructor is `DormandPrince853Integrator(double minStep, double maxStep, double scalAbsoluteTolerance, double scalRelativeTolerance)`. So minStep=0, maxStep=infinity, scalAbsoluteTolerance=NaN, scalRelativeTolerance=NaN. Then `integ.setStepSizeControl(0, 1.0, 1.0e-6, 1.0e-8)` sets the step size control parameters? Wait, there is `setStepSizeControl` method? Actually, `AdaptiveStepsizeIntegrator` has `setStepSizeControl`? In Commons Math 3.x, there is `AdaptiveStepsizeIntegrator` with methods `setStepSizeControl`. The parameters are likely `minStep`, `maxStep`, `absoluteTolerance`, `relativeTolerance`. So after construction, the tolerances are set to finite values (1e-6 and 1e-8). The initial tolerances from constructor are NaN but they get overwritten.
+
+The ODE is y' = -100 y, from t=0 to t=0.001, initial y=1. So it's a simple exponential decay.
+
+The test asserts that the time argument in computeDerivatives is within [start, end] (with a small epsilon). So the bug could be that during integration, the time might go slightly outside due to floating point rounding or step size control issues.
+
+Looking at the integrate function, there is a loop that tries to keep error < 1.0. The step size is adjusted. At the end of each successful step, `stepStart = acceptStep(...)` which returns the new step start time. And there is logic for adjusting step size for next step, and checking if the next step would go beyond the final time.
+
+Potential bug: In the step rejection logic, when error >= 1.0, they compute a factor and set `hNew = filterStep(stepSize * factor, forward, false);`. Then they loop again. However, note that `stepSize` is the size of the attempted step (which failed). `hNew` is the new proposed step size. But they continue the while loop, and at the next iteration, they compute `if (firstTime || !fsal)`. Since firstTime is set to false after first attempt, and fsal? Possibly false? The code uses `fsal` (First Same As Last) property. For Dormand-Prince 8(5,3), fsal is true? Actually, DormandPrince853Integrator extends EmbeddedRungeKuttaIntegrator and sets fsal to true. So after first failed step, `firstTime` is false and `fsal` is true, so they skip the first stage computation? Wait: The condition `if (firstTime || !fsal)`. If fsal is true, then after first time, `!fsal` is false, so the condition is false, meaning they skip computing derivatives for yDotK[0]. But after a rejected step, they need to recompute the first stage? Actually, if fsal is true, then the last stage of the previous step becomes the first stage of the next step. In the code, after a successful step, they do `if (fsal) { System.arraycopy(yDotTmp, 0, yDotK[0], 0, y0.length); }` to copy the last evaluation into yDotK[0]. However, when a step is rejected, they do not copy anything into yDotK[0]. So if fsal is true, and the step is rejected, the yDotK[0] still contains the derivative from the previous successful step (or from the initial compute if first step?). Let's see: At the start of integration, before the loop, they compute yDotK[0] only if firstTime or !fsal. Since firstTime is true initially, they compute yDotK[0]. Then they try a step. If that step fails (error >= 1.0), they reduce step size and loop again. At that point, firstTime is false, and fsal is true, so they skip computing yDotK[0]. But they haven't updated yDotK[0] to reflect the new step start? Actually, after a rejected step, the state y hasn't changed; we are still at stepStart. So the derivative at stepStart should still be the same as before. So it's correct to reuse yDotK[0] from the previous computation. However, there is a subtlety: The step size changed, so the internal stages might be different? But for the first stage, it's just the derivative at stepStart, independent of step size. So reusing is fine.
+
+But there is another potential bug: When the step is rejected, they set `hNew = filterStep(stepSize * factor, forward, false);`. However, note that `stepSize` is the size of the attempted step (which failed). But `stepSize` is also used in the computation of the stages (in the loop for k=1..stages). That's fine because we are still trying to compute a step of size stepSize. However, after reducing the step size, we set `hNew` but we do not update `stepSize` until the next iteration of the while loop? Actually, the while loop condition is `while (error >= 1.0)`. Inside the loop, they compute using `stepSize` (which is the current attempt). They compute error. If error >= 1.0, they compute factor and set `hNew`. Then they go back to the top of the while loop. But note: At the top of the while loop, they do not set `stepSize = hNew` before computing the stages again. Wait, look at the code:
+
+```
+      double error = 10;
+      while (error >= 1.0) {
+
+        if (firstTime || !fsal) {
+          // first stage
+          computeDerivatives(stepStart, y, yDotK[0]);
+        }
+
+        if (firstTime) {
+          ... // initialize step
+          firstTime = false;
+        }
+
+        stepSize = hNew;   // <--- This line is inside the while loop, but after the first stage and initialization.
+```
+
+So at the beginning of the while loop, `stepSize` still holds the previous step size (from previous iteration). They compute the first stage (if needed) using the old stepSize? Actually, the first stage does not depend on stepSize. Then they have `if (firstTime)` block which sets `hNew` from initializeStep. But after the first iteration, firstTime is false, so they skip that block. Then they set `stepSize = hNew`. But note: `hNew` was set in the previous iteration (either from initializeStep or from the rejection factor). So at the start of the while loop (after first iteration), `stepSize` is still the old step size? Actually, they set `stepSize = hNew` after the first stage and initialization check, but before computing the other stages. So for the second iteration onward, `stepSize` gets updated to the new reduced step size before computing the stages. That seems correct.
+
+But there is a subtle bug: At the very first iteration, `hNew` is initialized by `initializeStep` inside the `if (firstTime)` block. Then `stepSize = hNew` is executed. So the first attempt uses that stepSize. If it fails, they compute factor and set `hNew = filterStep(stepSize * factor, forward, false);`. Then they loop back. Now firstTime is false, so they skip the first stage? Actually, they still compute first stage if `!fsal`. If fsal is true, they skip. Then they set `stepSize = hNew` (which is the reduced step size). Then they compute the stages using the new stepSize. That seems fine.
+
+However, there is a potential bug in the handling of the step size after a rejected step when fsal is true. After a rejected step, they did not copy yDotTmp to yDotK[0] because that copy only happens after a successful step. But as argued, yDotK[0] still holds the derivative at stepStart, which hasn't changed. So it's fine.
+
+Now, why does the test fail? The test asserts that the time in computeDerivatives is within [start, end]. Possibly the integration steps beyond end? Let's examine the logic for the last step. There is a condition `if (filteredNextIsLast) { hNew = t - stepStart; }`. This ensures that the next step exactly reaches the final time. But there could be floating point rounding causing the step to slightly overshoot? Or the stepStart may be updated incorrectly.
+
+Another possibility: The bug is in the `acceptStep` method (not shown). But we are only allowed to modify the given function(s). The buggy function given is `integrate`. We must fix the bug within this function. So we need to identify the bug in the provided code.
+
+Let's search for known issues in Apache Commons Math for DormandPrince853Integrator. There is a known bug about step size control when the first step is too large and gets rejected, causing the integrator to use a step size of zero? Actually, there is a bug report: "DormandPrince853Integrator fails when the first step is rejected" (MATH-1076). The fix is to ensure that after a step rejection, the first stage derivative is recomputed if fsal is false? But the provided code already does that via condition `if (firstTime || !fsal)`. However, after a rejected step, firstTime is false, and if fsal is true, then they skip recomputing the first stage. That could be a problem if the derivative at stepStart changes due to the step rejection? But the state y hasn't changed, so derivative should be the same. However, there is a subtlety: The step rejection might happen because the error is too large, but the derivative at stepStart is still valid. So reusing is fine.
+
+Maybe the bug is in the `initializeStep` method? That method might compute an initial step size that is too large and leads to an error >=1, but then the step reduction factor may cause the step size to become zero or negative? The `filterStep` method likely ensures the step size is within bounds.
+
+Let's examine the test more closely: It sets minStep=0, maxStep=infinity. The tolerances are set to 1e-6 and 1e-8. The ODE is stiff (lambda = -100). The initial step size chosen by initializeStep might be large (since the derivative is -100, maybe the initial step is based on the norm of yDot). Possibly the initial step is too large, error >=1, then step is reduced. The test passes after fix? Actually the test is a trigger test case that fails on the buggy version. So the buggy version causes an assertion failure (time out of bounds). So the fix must ensure that the time stays within bounds.
+
+Looking at the code, the time for derivative computations is `stepStart + c[k-1] * stepSize`. The c array contains the nodes of the Butcher tableau. They are between 0 and 1. So the time should be within [stepStart, stepStart+stepSize]. Since stepStart is initially 0, and stepSize is adjusted, the time should never exceed the final time if the step size control works properly. However, there is a case when the step is accepted and `stepStart` is updated via `acceptStep`. The `acceptStep` method might adjust the step start to the time of an event? But there are no events in the test.
+
+Maybe the bug is that when the step is rejected, the stepSize is reduced, but the c[k-1] * stepSize might cause floating point rounding such that the time slightly exceeds stepStart+stepSize? Unlikely.
+
+Another possibility: The condition for last step: `final boolean nextIsLast = forward ? (nextT >= t) : (nextT <= t);` and then `if (filteredNextIsLast) { hNew = t - stepStart; }`. But note that `hNew` might be set to a negative value if stepStart > t? Actually, forward integration: t > stepStart. So t-stepStart is positive. However, due to floating point rounding, stepStart might be very close to t, and t-stepStart might be very small, possibly zero or negative due to rounding? They use `filteredNextIsLast` to decide. But `filteredNextIsLast` is computed using `filteredNextT = stepStart + hNew` and comparing with t. If `filteredNextIsLast` is true, they set `hNew = t - stepStart`. This ensures that the next step exactly reaches t (assuming exact arithmetic). However, if stepStart is already very close to t, then t-stepStart might be zero or negative due to rounding. They should ensure that hNew is positive (for forward integration). The `filterStep` method might handle that, but we don't see it.
+
+Maybe the bug is that when the step is rejected, the `stepSize` variable is used in the computation of the error, but after rejection, they set `hNew` but do not reset `stepSize` for the next iteration? Actually they do: at the beginning of the next iteration, they set `stepSize = hNew` after the first stage. So that's fine.
+
+Let's search for a known bug in Apache Commons Math 3.6.1: There is an issue with DormandPrince853Integrator where the first step rejection leads to a zero step size and infinite loop? Actually, I recall a bug fix in the `EmbeddedRungeKuttaIntegrator.integrate` method regarding the handling of `firstTime` and `fsal`. In some versions, after a step rejection, the first stage derivative was not recomputed for FSAL methods, but it should be because the step size changed? Wait, for FSAL methods, the last stage of the previous step is the same as the first stage of the next step. But after a rejected step, there is no previous step (the step hasn't been accepted), so the derivative at the current point is still valid. However, there is a subtlety: the first stage derivative yDotK[0] is computed at the beginning of the step. If the step is rejected and we reduce the step size, we are still at the same point, so yDotK[0] remains valid. So no need to recompute.
+
+Maybe the bug is in the `initializeStep` method: it uses the derivative yDotK[0] and y to compute an initial step size. But if the step is rejected and we loop again, we skip the `initializeStep` block because firstTime is false. That's fine because we already have an initial step size from the previous attempt? Actually, after a rejection, we set hNew to a reduced step size. But we might want to recompute the initial step size based on the new step size? No, we just use the reduced step size.
+
+Wait, there is a critical bug: At the start of the while loop, if firstTime is false and fsal is true, they skip computing yDotK[0]. However, what if the step was rejected and we are trying again with a new step size? The derivative at stepStart is still the same, so it's fine. But there is a scenario: After a successful step, they copy yDotTmp to yDotK[0] (if fsal). Then for the next step, they skip computing yDotK[0] because fsal is true and firstTime is false. That is correct because yDotK[0] is already set to the derivative at the new step start (from the last stage of previous step). However, if that next step fails (error >=1.0), they reduce step size and loop again. At that point, yDotK[0] is still valid (derivative at stepStart). So still fine.
+
+But the test failure indicates that the time goes out of bounds. Perhaps the issue is with the condition for last step: when the next step would overshoot, they set hNew = t - stepStart. However, due to floating point errors, stepStart might be slightly less than t, but t - stepStart might be negative? Actually, if stepStart is very close to t, say stepStart = 0.000999999999999, t=0.001, then t-stepStart is positive but very small. However, if stepStart becomes greater than t due to rounding? That could happen if stepStart is updated incorrectly. The `acceptStep` method returns the new stepStart. It might return a value slightly beyond t? Possibly due to event handling? But there are no events.
+
+Maybe the bug is in the loop condition `while (error >= 1.0)`. They use `error >= 1.0`. If error is exactly 1.0, they continue. That could be okay.
+
+Let's examine the provided code more carefully for potential off-by-one or missing updates.
+
+After a step is accepted, they do:
+
+```
+      stepStart = acceptStep(interpolator, y, yDotTmp, t);
+      System.arraycopy(y, 0, yTmp, 0, y.length);
+
+      if (!isLastStep) {
+
+          // prepare next step
+          interpolator.storeTime(stepStart);
+
+          if (fsal) {
+              // save the last evaluation for the next step
+              System.arraycopy(yDotTmp, 0, yDotK[0], 0, y0.length);
+          }
+
+          // stepsize control for next step
+          final double factor =
+              FastMath.min(maxGrowth, FastMath.max(minReduction, safety * FastMath.pow(error, exp)));
+          final double  scaledH    = stepSize * factor;
+          final double  nextT      = stepStart + scaledH;
+          final boolean nextIsLast = forward ? (nextT >= t) : (nextT <= t);
+          hNew = filterStep(scaledH, forward, nextIsLast);
+
+          final double  filteredNextT      = stepStart + hNew;
+          final boolean filteredNextIsLast = forward ? (filteredNextT >= t) : (filteredNextT <= t);
+          if (filteredNextIsLast) {
+              hNew = t - stepStart;
+          }
+
+      }
+```
+
+Note: `error` is the error from the accepted step. They use that error to compute factor for the next step. That's standard.
+
+Now, consider the case where the accepted step brings us very close to t. Then `nextIsLast` might be true because `nextT >= t`. Then `hNew = filterStep(scaledH, forward, nextIsLast);` might reduce the step size to something <= scaledH. Then they compute `filteredNextT = stepStart + hNew`. If `filteredNextT >= t` (which is likely since we already had nextIsLast true), they set `hNew = t - stepStart`. This ensures that the next step exactly reaches t. However, what if `stepStart` is already equal to t? That shouldn't happen because if stepStart == t, then isLastStep would be true? Actually, `acceptStep` returns the new stepStart, which might be exactly t if the step reached the end. Then `isLastStep` would be set inside `acceptStep`? The `isLastStep` flag is set by `acceptStep`? In the code, `isLastStep` is set to false before the loop, and `acceptStep` might set it to true if the step reaches the final time. So if stepStart becomes t, then `isLastStep` becomes true, and we exit the loop. So the above block is only executed if `!isLastStep`. So stepStart < t.
+
+But there is a potential bug: When `filteredNextIsLast` is true, they set `hNew = t - stepStart`. However, if `t - stepStart` is zero or negative due to floating point rounding, that could cause problems. They should ensure that `hNew` is positive (for forward integration) and not zero. The `filterStep` method likely ensures that the step size is at least minStep. But minStep is 0 in the test, so zero step size is allowed? That could cause infinite loop.
+
+Maybe the bug is that when the step is rejected, they reduce the step size, but if the step size becomes too small (less than minStep), `filterStep` might set it to minStep (0). Then the step size becomes zero, and the time does not advance, causing an infinite loop? But the test would timeout, not fail assertion. The test fails because time goes out of bounds, not infinite loop.
+
+Let's look at the assertion: `Assert.assertTrue(t >= FastMath.nextAfter(start, Double.NEGATIVE_INFINITY));` and `Assert.assertTrue(t <= FastMath.nextAfter(end, Double.POSITIVE_INFINITY));`. They allow a tiny epsilon beyond start and end using nextAfter. So the time must be within [start - epsilon, end + epsilon]. The failure likely because t is slightly less than start or slightly greater than end. Since start=0, t<0 is impossible because integration forward. So t might be > end. That is, the integration goes beyond the end time.
+
+How could that happen? Possibly the step size overshoots due to floating point rounding when computing `stepStart + stepSize`. In the derivative computation, they compute `stepStart + c[k-1] * stepSize`. If stepStart + stepSize > t due to rounding, but the step is accepted, then stepStart becomes > t? Actually, the step is accepted only if the step does not go beyond t? The `acceptStep` method should ensure that the step does not go beyond t. But we don't see that.
+
+Maybe the bug is in the condition for last step: They compute `nextIsLast` using `nextT >= t`. If `nextT` is slightly greater than t due to rounding, they set `nextIsLast` to true. Then they call `filterStep(scaledH, forward, nextIsLast)`. The `filterStep` method might clamp the step size to not exceed the remaining time? Actually, the documentation for `filterStep` says: "Filter the integration step. ... If nextIsLast is true, then the step is adjusted so that the final time is reached exactly." So likely `filterStep` returns a step size that ensures stepStart + hNew does not exceed t. Then they compute `filteredNextT` and if `filteredNextIsLast` they set `hNew = t - stepStart`. However, note that `filteredNextT` is computed as `stepStart + hNew`. If `hNew` already ensures `filteredNextT <= t` (for forward), then `filteredNextIsLast` might be false if `filteredNextT < t`. But they want to set it exactly to t. So they check if `filteredNextT >= t`? Actually, they check `filteredNextIsLast = forward ? (filteredNextT >= t) : (filteredNextT <= t);`. If true, they set `hNew = t - stepStart`. But if `filteredNextT` is already greater than or equal to t, then setting `hNew = t - stepStart` would make it smaller, but `filteredNextT` was computed with the previous hNew, so after setting hNew to t-stepStart, the new step size is exactly the remaining time. That seems correct.
+
+But there is a potential flaw: They compute `filteredNextIsLast` using the same hNew that they are about to possibly change. So they check if the current hNew would cause overshoot, and if so, they reduce it to exactly reach t. However, what if `filteredNextT` is already exactly equal to t? Then they set hNew = t - stepStart, which is the same as hNew, so no change. If `filteredNextT` is greater than t due to rounding, they reduce it. That's fine.
+
+But why would the integration go beyond t? Possibly because the step size is not adjusted correctly when the step is accepted and we are very close to t. Let's simulate: Suppose we are at stepStart, and we compute a step of size stepSize that brings us to stepStart+stepSize. If stepStart+stepSize is slightly greater than t, the step might still be accepted because the error is small, and `acceptStep` might not clip the step. Then stepStart becomes stepStart+stepSize > t. That would cause the derivative evaluations to have t > end. So the bug might be that the integrator does not ensure that the step size does not exceed the remaining time before performing the step.
+
+In the code, before computing a step, they have a while loop for error control, but they do not check if the proposed stepSize would go beyond t. They only check after the step is accepted, when preparing the next step. However, the current step might overshoot t. They should limit the step size to not exceed t - stepStart before attempting the step. This is a common practice: if the remaining distance is smaller than the proposed step, reduce the step to exactly reach the end.
+
+Look at the code: At the beginning of the main integration loop, they have:
+
+```
+      // iterate over step size, ensuring local normalized error is smaller than 1
+      double error = 10;
+      while (error >= 1.0) {
+```
+
+There is no check that stepSize <= t - stepStart (for forward). They only adjust stepSize based on error. So they might attempt a step that goes beyond t. Then after computing the step, they compute error and if error < 1.0, they accept the step, even if it overshoots t. That would cause the time to go beyond the end.
+
+Indeed, that is likely the bug. The fix is to limit the step size to not exceed the remaining time before attempting the step. In many adaptive step size integrators, before starting the error control loop, they compute the step size as min(proposedStep, remainingTime). But note that the step size is adjusted inside the error control loop; if the step is too large error-wise, they reduce it. But they should also ensure that the step size does not exceed the remaining time. So we need to add a check before setting stepSize = hNew, or inside the while loop before computing stages.
+
+Look at the code: They set `stepSize = hNew` inside the while loop. But hNew is computed from the previous iteration or from initialization. They should limit hNew by the remaining time. However, note that the remaining time changes after each step. At the start of the while loop, we are at stepStart. The remaining time is t - stepStart. So we should ensure that stepSize <= t - stepStart (for forward). But also, if stepSize is very small, that's fine.
+
+So we need to add: before using stepSize, possibly adjust it to not exceed remaining time. However, we must be careful: If we limit stepSize to remaining time, and then the error is too large, we might need to reduce it further. That's fine.
+
+Where to add the limit? Typically, right after `stepSize = hNew`, we can do:
+
+```
+if (forward) {
+    stepSize = FastMath.min(stepSize, t - stepStart);
+} else {
+    stepSize = FastMath.max(stepSize, t - stepStart);
+}
+```
+
+But note that stepStart is constant during the while loop (since we haven't advanced). So we can compute the remaining time. However, we must also consider that if stepSize is limited to remaining time, then the step will be the last step. But we still need to perform error control on that step. If error is too large, we reduce stepSize further, which is still <= remaining time. That's fine.
+
+But we also have to handle the case where stepSize becomes zero or negative. For forward integration, if stepStart == t, we should not be in the loop because isLastStep would be true. But due to floating point, stepStart might be slightly less than t, and t - stepStart might be very small positive. That's okay.
+
+Now, there is a nuance: The step size might be limited by the remaining time, but the error control loop might reduce it further. That's acceptable.
+
+But we also have to consider that after a step is accepted, we update stepStart. Then for the next step, we compute hNew based on error from previous step, and we again limit it to remaining time.
+
+However, in the current code, after a step is accepted, they compute hNew for the next step, and then they have a check:
+
+```
+          final double  filteredNextT      = stepStart + hNew;
+          final boolean filteredNextIsLast = forward ? (filteredNextT >= t) : (filteredNextT <= t);
+          if (filteredNextIsLast) {
+              hNew = t - stepStart;
+          }
+```
+
+This already attempts to limit the next step to not exceed t. But this is after the step has been accepted, for the next step. However, the bug might be that the current step (the one just accepted) could have overshot t because they didn't limit stepSize before computing it. So we need to limit stepSize inside the error control loop as well.
+
+Therefore, we should add a limitation of stepSize to remaining time at the point where stepSize is set (inside the while loop). But note that stepSize is set as `stepSize = hNew` after the first stage and initialization. We should limit it there.
+
+Alternatively, we could limit hNew before assigning to stepSize. But hNew might be computed from `initializeStep` or from the rejection factor. We should limit it to remaining time.
+
+Let's add a helper variable `remainingTime = t - stepStart` (for forward). Then before setting stepSize, do:
+
+```
+stepSize = hNew;
+if (forward) {
+    stepSize = FastMath.min(stepSize, t - stepStart);
+} else {
+    stepSize = FastMath.max(stepSize, t - stepStart);
+}
+```
+
+But careful: In backward integration, t < stepStart, so remaining time is negative. To move towards t, stepSize should be negative. So we want stepSize <= t - stepStart (since t-stepStart is negative, and stepSize should be negative and not more negative than that? Actually, if we are going backward, we want stepSize to be negative, and we want stepStart + stepSize >= t (since t is smaller). So stepSize should be >= t - stepStart (which is negative). So we take max.
+
+Let's implement:
+
+```
+double maxStep = forward ? t - stepStart : t - stepStart; // negative for backward
+if (forward) {
+    stepSize = FastMath.min(stepSize, maxStep);
+} else {
+    stepSize = FastMath.max(stepSize, maxStep);
+}
+```
+
+But note: if we are exactly at t, then maxStep = 0. Then stepSize will be limited to 0, which might cause problems. But if stepStart == t, then we should have exited already. So it's safe.
+
+Now, we also need to ensure that stepSize is not zero when we need to compute stages? If stepSize becomes zero, then the loop might divide by zero? The Butcher tableau coefficients c are multiplied by stepSize. If stepSize is zero, then the time for stages is stepStart, which is fine. But the error might be zero? However, we should avoid zero step size because it could cause infinite loop. The `filterStep` method should handle minStep. In the test, minStep=0, so zero is allowed. But if stepSize is zero, then the step does not advance, and we might never reach t. But if stepStart is already at t, then isLastStep should be true. So we need to ensure that if stepSize becomes zero and stepStart < t, we should at least take a tiny step. The `filterStep` method might enforce a minimum step size of minStep (which is 0). So zero step size could happen. That might be a problem.
+
+But the bug is about overshooting, not zero step. So limiting stepSize to remaining time should prevent overshoot.
+
+Now, we also need to consider the case where the step is limited to remaining time, and then error < 1.0, so we accept the step. That step will exactly reach t (if stepSize == remainingTime). That's good.
+
+But note: In the code, after accepting the step, they call `stepStart = acceptStep(...)`. The `acceptStep` method might adjust the step start if there are events. For our test, it should return stepStart + stepSize (or something). So stepStart becomes stepStart + stepSize. If stepSize was limited to remaining time, then stepStart becomes t. Then isLastStep becomes true.
+
+Now, we must also update the logic for preparing next step: they compute hNew for next step, but if stepStart == t, then isLastStep is true, so they skip that block.
+
+Therefore, the fix is to add step size limitation inside the while loop.
+
+But wait: There is already a similar limitation after the step is accepted for the next step. However, the current step could overshoot because no limitation is applied before computing the step. So we should add limitation before computing the stages.
+
+Let's find the exact location. In the while loop, after setting `stepSize = hNew`, we can add:
+
+```
+// limit step size to remaining time
+if (forward) {
+    stepSize = FastMath.min(stepSize, t - stepStart);
+} else {
+    stepSize = FastMath.max(stepSize, t - stepStart);
+}
+```
+
+But note: `stepStart` is the start of the current step, which is constant during the while loop. So we can compute `remainingTime = t - stepStart`. However, we must be careful: `stepSize` might become negative for forward integration? Actually, for forward, t > stepStart, so t-stepStart is positive. So stepSize should be positive. If stepSize becomes negative due to some bug, we might want to clamp it to positive? But filterStep should ensure stepSize >= minStep (which is 0). So stepSize should be non-negative. So limiting to t-stepStart will keep it positive.
+
+For backward integration, t < stepStart, so t-stepStart is negative. stepSize should be negative, and we want stepSize >= t-stepStart (since t-stepStart is negative, and we want to not go beyond t). So stepSize should be at least as negative as t-stepStart? Actually, if stepSize is more negative than t-stepStart, then stepStart + stepSize < t, which overshoots. So we want stepSize to be >= t-stepStart (i.e., less negative). So we take max.
+
+Now, after limiting stepSize, we should also update hNew? Because if we reduced stepSize due to remaining time, then hNew should reflect that for the next iteration? Actually, hNew is the proposed step size for the next attempt if this one fails. But if we limited stepSize to remaining time, and the step fails (error >=1), then we need to reduce stepSize further. However, the stepSize we used is already the limited one. When we compute the factor and set hNew = filterStep(stepSize * factor, ...), we should use the limited stepSize? That's fine because stepSize is the attempted step size. So we don't need to change hNew before the while loop.
+
+But note: At the beginning of the while loop, we have `stepSize = hNew`. Then we limit stepSize to remaining time. So if hNew was larger than remaining time, stepSize becomes remaining time. Then if the step succeeds (error <1), we accept it and it exactly reaches t. If the step fails, we compute factor based on stepSize (which is remaining time) and reduce it. That's fine.
+
+However, there is a subtlety: When we limit stepSize to remaining time, we might have stepSize very small. The error might be very small, so the step is accepted. But what if the error is still >=1? Then we reduce stepSize further, but stepSize is already the maximum allowed to reach t. Reducing it further is fine because we can take a smaller step and then another step later. So we don't need to worry.
+
+Now, we must also consider that after limiting stepSize, the step might be exactly the last step. But we don't set any flag; the `acceptStep` method will detect that and set isLastStep.
+
+Therefore, the fix is to add the step size limitation inside the while loop before using stepSize to compute stages.
+
+Let's write the code modification. We'll insert after `stepSize = hNew;` and before the comment `// next stages`. But we must also consider that the stepSize might be set to zero if remaining time is zero. That's okay because then stepStart == t, but we shouldn't be in the loop. Actually, if remaining time is zero, then stepStart == t, and the integration should have ended. So we should check if stepSize becomes zero? Maybe we should avoid that by ensuring we exit if stepStart == t. But the loop condition `while (error >= 1.0)` would still run. If stepSize is zero, then the derivative computations are at stepStart, and yTmp = y, so error might be zero? Probably error will be zero because there is no change. Then error < 1.0, so the step is accepted, and stepStart remains the same? Actually, stepStart doesn't change because stepSize=0. That could cause infinite loop. But that situation should not occur because if stepStart == t, then `isLastStep` should be true and we wouldn't be in the main loop. So we need to ensure that we don't attempt a step of size zero when stepStart < t but remaining time is zero due to floating point rounding? For example, if t - stepStart is negative due to rounding, then stepStart > t. That should not happen because we haven't overshot yet. So we should clamp stepSize to be positive (for forward) and non-zero if possible. But the `filterStep` method might handle that.
+
+Given the complexity, perhaps the known bug fix is different. Let's search memory: I recall a bug in Apache Commons Math 3.6.1 in DormandPrince853Integrator where the step size was not limited to the remaining time, causing overshoot. The fix was to add a check in the integrate method. Indeed, looking at the source code of EmbeddedRungeKuttaIntegrator.integrate in later versions, they have:
+
+```
+if (forward) {
+    stepSize = Math.min(stepSize, t - stepStart);
+} else {
+    stepSize = Math.max(stepSize, t - stepStart);
+}
+```
+
+placed inside the error control loop. So that is exactly what we propose.
+
+Thus, we will add that fix.
+
+Now, we need to provide the fixed code for the entire function. Also, we might need to fix other functions? The input only gives one function: the integrate method. So we only need to fix that.
+
+But note: The bug might also involve other functions like `acceptStep` or `filterStep`, but we cannot change them. The fix within integrate should be sufficient to prevent overshoot.
+
+Let's write the fixed integrate function. We'll insert the limitation code after `stepSize = hNew;` and before the loop over stages.
+
+Also, we should ensure that we don't modify stepSize if stepSize is infinite? Not likely.
+
+Now, we need to generate additional trigger testcases. The requirement: generate minimal number of new testcases that fail on buggy version and pass on fixed version, covering different behaviors/branches not already exercised by the provided trigger.
+
+The provided trigger tests a scenario where the first step is too large and gets rejected? Actually, the test is named `testTooLargeFirstStep`. It likely causes the bug where overshoot occurs. After our fix, it should pass.
+
+We need to create new testcases that cover other branches/behaviors. For example:
+1. Backward integration.
+2. Integration with events?
+But we cannot rely on external classes not provided. We must create testcases that are similar in style to the provided test (i.e., using DormandPrince853Integrator and FirstOrderDifferentialEquations). We can vary parameters: minStep, maxStep, tolerances, ODEs, forward/backward, etc.
+
+We should aim for minimal number but maximize coverage. Let's think about the branches in the integrate function:
+- The condition `if (firstTime || !fsal)`
+- The condition `if (firstTime)` block for initializing step.
+- The error estimation and step rejection.
+- The step acceptance and preparation for next step.
+- The condition `if (fsal)` for copying derivatives.
+- The condition for last step (`nextIsLast`, `filteredNextIsLast`).
+- The forward vs backward integration.
+
+The provided test uses forward integration, with a simple ODE, and likely causes a step rejection because the initial step is too large? Actually, the initial step might be too large, but the test passes after fix? The test fails on buggy version. So it already covers the case where first step is too large and gets rejected? Possibly.
+
+We need to cover cases not covered:
+- Backward integration.
+- Integration where the step is accepted without rejection.
+- Integration where multiple rejections occur.
+- Integration where the step size grows (maxGrowth).
+- Integration with vector tolerances (vs scalar tolerances). The code has branches for `vecAbsoluteTolerance == null`.
+- Integration with fsal false? DormandPrince853Integrator has fsal true, but there are other integrators that might have fsal false. However, we are limited to the same class? The test uses DormandPrince853Integrator. But we can also test with another EmbeddedRungeKuttaIntegrator that has fsal false? But we don't have the class definitions. So we should stick to DormandPrince853Integrator, which has fsal true.
+
+We can create a test for backward integration. That will exercise the backward path.
+
+We can create a test with vector tolerances. The provided test uses scalar tolerances (setStepSizeControl with two doubles? Actually, the method `setStepSizeControl` likely sets scalar tolerances. But we can set vector tolerances using another method? In Commons Math, there is `setStepSizeControl(double[] absoluteTolerance, double[] relativeTolerance)`. We can use that.
+
+We can create a test where the step size increases (maxGrowth). But that might be covered by normal integration.
+
+We need to ensure the new testcases fail on buggy version. Since the bug is about overshooting, any integration that goes near the end time might overshoot if the step size is not limited. So we can design tests that integrate to a final time and assert that the time never goes beyond. We can use the same assertion pattern as the provided test.
+
+Let's create two additional testcases:
+1. Backward integration: integrate from 0 to -0.001 with an ODE, and assert time stays within.
+2. Integration with vector tolerances: use a two-dimensional ODE and set vector tolerances.
+
+We must write them as JUnit tests in the same style, and place them in the same file path as the provided trigger: `org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java`. However, we are only allowed to output the testcase code, not modify the entire file. We can output a test method that can be added to that file.
+
+The provided trigger test is a method in that class. So we can output new test methods for the same class.
+
+Thus, we will output two additional testcases with paths same as the trigger: `org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java`.
+
+But note: The output format requires the path exactly as one of the provided trigger testcases. The provided trigger path is: `org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java::testTooLargeFirstStep`. Actually, the given path in the trigger is: `org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java::testTooLargeFirstStep`. But in the output, we need to specify the path without the method name? The instruction says: "Each testcase must have a corresponding path end with .java. The path must be one of the exact file paths of the provided trigger testcases." So the file path is `org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java`. We'll use that.
+
+Now, we need to ensure the testcases are minimal and fail on buggy version. Let's design:
+
+Test 1: Backward integration with a stiff ODE that might cause large steps.
+
+We'll integrate from t=0 to t=-0.001 with y' = 100*y (positive growth) so that the solution grows, and the integrator might take large steps. We'll set tight tolerances to force small steps, but the initial step might be large and get rejected. We'll assert that time stays within [end, start] (since backward).
+
+Test 2: Integration with vector tolerances. Use a 2D ODE, set absolute tolerance array and relative tolerance array. Integrate forward and assert time bounds.
+
+We'll also add assertions that the time in computeDerivatives is within bounds.
+
+Now, we need to write the test methods in Java. We'll mimic the style of the provided test.
+
+Let's write:
+
+Test 1:
+```
+@Test
+public void testTooLargeFirstStepBackward() {
+    AdaptiveStepsizeIntegrator integ =
+            new DormandPrince853Integrator(0, Double.POSITIVE_INFINITY, Double.NaN, Double.NaN);
+    final double start = 0.0;
+    final double end   = -0.001;
+    FirstOrderDifferentialEquations equations = new FirstOrderDifferentialEquations() {
+        public int getDimension() {
+            return 1;
+        }
+        public void computeDerivatives(double t, double[] y, double[] yDot) {
+            Assert.assertTrue(t <= FastMath.nextAfter(start, Double.POSITIVE_INFINITY));
+            Assert.assertTrue(t >= FastMath.nextAfter(end, Double.NEGATIVE_INFINITY));
+            yDot[0] = 100.0 * y[0];
+        }
+    };
+    integ.setStepSizeControl(0, 1.0, 1.0e-6, 1.0e-8);
+    integ.integrate(equations, start, new double[] { 1.0 }, end, new double[1]);
+}
+```
+
+Note: For backward integration, the condition in assertions: t should be between end and start. Since end < start, we assert t >= end and t <= start.
+
+We use `FastMath.nextAfter` to allow tiny epsilon.
+
+Test 2:
+```
+@Test
+public void testVectorTolerances() {
+    AdaptiveStepsizeIntegrator integ =
+            new DormandPrince853Integrator(0, Double.POSITIVE_INFINITY, Double.NaN, Double.NaN);
+    final double start = 0.0;
+    final double end   = 0.01;
+    FirstOrderDifferentialEquations equations = new FirstOrderDifferentialEquations() {
+        public int getDimension() {
+            return 2;
+        }
+        public void computeDerivatives(double t, double[] y, double[] yDot) {
+            Assert.assertTrue(t >= FastMath.nextAfter(start, Double.NEGATIVE_INFINITY));
+            Assert.assertTrue(t <= FastMath.nextAfter(end, Double.POSITIVE_INFINITY));
+            yDot[0] = -10.0 * y[0];
+            yDot[1] = -100.0 * y[1];
+        }
+    };
+    double[] absTol = new double[] {1.0e-8, 1.0e-8};
+    double[] relTol = new double[] {1.0e-6, 1.0e-6};
+    integ.setStepSizeControl(absTol, relTol);
+    integ.integrate(equations, start, new double[] { 1.0, 1.0 }, end, new double[2]);
+}
+```
+
+But note: The method `setStepSizeControl` with two arrays might not exist. In Commons Math, there is `setStepSizeControl(double[] absoluteTolerance, double[] relativeTolerance)` in AdaptiveStepsizeIntegrator. We'll assume it does.
+
+Alternatively, we can use the constructor that takes vector tolerances? There is a constructor `DormandPrince853Integrator(double minStep, double maxStep, double[] vecAbsoluteTolerance, double[] vecRelativeTolerance)`. So we could use that. But the test uses the constructor with NaN scalars and then sets step size control. We'll stick to the same pattern.
+
+We need to ensure the test fails on buggy version. The buggy version may overshoot in backward integration as well. So the assertion on time may fail.
+
+Now, we have two additional testcases.
+
+We should also consider covering the case where fsal is false? But DormandPrince853Integrator has fsal true, so we cannot change that. But there might be other integrators that use this same integrate method? The integrate method is from a superclass (EmbeddedRungeKuttaIntegrator). So it could be used by other integrators with fsal false. However, we are only allowed to generate testcases for the same class? The trigger test uses DormandPrince853IntegratorTest. So we can add tests for that class. We cannot change the integrator type. So fsal is always true for DormandPrince853Integrator. So we cannot test fsal false.
+
+Thus, two testcases are sufficient.
+
+Now, we must output the fixed code and the additional testcases.
+
+We need to write the fixed integrate function exactly, with the added lines.
+
+Let's produce the fixed code. We'll copy the entire function and insert the step size limitation.
+
+We'll add after `stepSize = hNew;` and before the comment `// next stages`.
+
+We'll add:
+
+```
+        // limit step size to remaining time
+        if (forward) {
+            stepSize = FastMath.min(stepSize, t - stepStart);
+        } else {
+            stepSize = FastMath.max(stepSize, t - stepStart);
+        }
+```
+
+Make sure to import FastMath if not already. The function already uses FastMath, so it's fine.
+
+Now, we also need to consider that stepSize might become exactly zero. If stepSize becomes zero, then the subsequent computations might cause division by zero? Not in this code. But if stepSize is zero, then the step does not advance, and the error might be zero. That could cause an infinite loop if error < 1.0 and stepStart does not change. However, if stepSize is zero, then stepStart + stepSize = stepStart, so we haven't moved. But the condition for last step: if stepStart == t, then isLastStep should be true. If stepStart < t and stepSize=0, then we are stuck. But this shouldn't happen because if stepSize is limited to t-stepStart, and t-stepStart is positive, stepSize will be positive unless t-stepStart is zero. So only when stepStart == t, stepSize becomes zero. But if stepStart == t, we should have exited earlier. So to be safe, we could avoid setting stepSize to zero by using a tiny epsilon? But the existing code already has a similar check in `filterStep` for next step. We'll leave as is.
+
+Now, we output the fixed function as a single string with escaped newlines.
+
+We must also output the two additional testcases.
+
+Let's construct the JSON.
+
+First, fixed_code array: contains one string: the fixed integrate method.
+
+We need to include the entire function as given, with our addition.
+
+Let's write the fixed function with line numbers? Not necessary.
+
+We'll produce the string by copying the original and inserting the lines.
+
+Original lines from the buggy function (from the given source). We'll insert after:
+
+```
+        stepSize = hNew;
+
+        // next stages
+```
+
+We change to:
+
+```
+        stepSize = hNew;
+
+        // limit step size to remaining time
+        if (forward) {
+            stepSize = FastMath.min(stepSize, t - stepStart);
+        } else {
+            stepSize = FastMath.max(stepSize, t - stepStart);
+        }
+
+        // next stages
+```
+
+Make sure indentation matches.
+
+Now, we also need to consider that the variable `t` is the final time passed as parameter. It's already in scope.
+
+Now, we output the fixed code.
+
+Additionally, we need to ensure that we haven't introduced any syntax errors.
+
+Now, for the testcases, we output two objects.
+
+Let's write the JSON.
+
+Note: We must escape double quotes and newlines properly in JSON strings.
+
+We'll use a Python-like approach in our mind: replace newlines with \n and quotes with \".
+
+But we can write it as a literal in the JSON.
+
+We'll produce the final output.{
+  "fixed_code": [
+    "  public void integrate(final ExpandableStatefulODE equations, final double t)\n      throws MathIllegalStateException, MathIllegalArgumentException {\n\n    sanityChecks(equations, t);\n    setEquations(equations);\n    final boolean forward = t > equations.getTime();\n\n    // create some internal working arrays\n    final double[] y0  = equations.getCompleteState();\n    final double[] y = y0.clone();\n    final int stages = c.length + 1;\n    final double[][] yDotK = new double[stages][y.length];\n    final double[] yTmp    = y0.clone();\n    final double[] yDotTmp = new double[y.length];\n\n    // set up an interpolator sharing the integrator arrays\n    final RungeKuttaStepInterpolator interpolator = (RungeKuttaStepInterpolator) prototype.copy();\n    interpolator.reinitialize(this, yTmp, yDotK, forward,\n                              equations.getPrimaryMapper(), equations.getSecondaryMappers());\n    interpolator.storeTime(equations.getTime());\n\n    // set up integration control objects\n    stepStart         = equations.getTime();\n    double  hNew      = 0;\n    boolean firstTime = true;\n    initIntegration(equations.getTime(), y0, t);\n\n    // main integration loop\n    isLastStep = false;\n    do {\n\n      interpolator.shift();\n\n      // iterate over step size, ensuring local normalized error is smaller than 1\n      double error = 10;\n      while (error >= 1.0) {\n\n        if (firstTime || !fsal) {\n          // first stage\n          computeDerivatives(stepStart, y, yDotK[0]);\n        }\n\n        if (firstTime) {\n          final double[] scale = new double[mainSetDimension];\n          if (vecAbsoluteTolerance == null) {\n              for (int i = 0; i < scale.length; ++i) {\n                scale[i] = scalAbsoluteTolerance + scalRelativeTolerance * FastMath.abs(y[i]);\n              }\n          } else {\n              for (int i = 0; i < scale.length; ++i) {\n                scale[i] = vecAbsoluteTolerance[i] + vecRelativeTolerance[i] * FastMath.abs(y[i]);\n              }\n          }\n          hNew = initializeStep(forward, getOrder(), scale,\n                                stepStart, y, yDotK[0], yTmp, yDotK[1]);\n          firstTime = false;\n        }\n\n        stepSize = hNew;\n\n        // limit step size to remaining time\n        if (forward) {\n            stepSize = FastMath.min(stepSize, t - stepStart);\n        } else {\n            stepSize = FastMath.max(stepSize, t - stepStart);\n        }\n\n        // next stages\n        for (int k = 1; k < stages; ++k) {\n\n          for (int j = 0; j < y0.length; ++j) {\n            double sum = a[k-1][0] * yDotK[0][j];\n            for (int l = 1; l < k; ++l) {\n              sum += a[k-1][l] * yDotK[l][j];\n            }\n            yTmp[j] = y[j] + stepSize * sum;\n          }\n\n          computeDerivatives(stepStart + c[k-1] * stepSize, yTmp, yDotK[k]);\n\n        }\n\n        // estimate the state at the end of the step\n        for (int j = 0; j < y0.length; ++j) {\n          double sum    = b[0] * yDotK[0][j];\n          for (int l = 1; l < stages; ++l) {\n            sum    += b[l] * yDotK[l][j];\n          }\n          yTmp[j] = y[j] + stepSize * sum;\n        }\n\n        // estimate the error at the end of the step\n        error = estimateError(yDotK, y, yTmp, stepSize);\n        if (error >= 1.0) {\n          // reject the step and attempt to reduce error by stepsize control\n          final double factor =\n              FastMath.min(maxGrowth,\n                           FastMath.max(minReduction, safety * FastMath.pow(error, exp)));\n          hNew = filterStep(stepSize * factor, forward, false);\n        }\n\n      }\n\n      // local error is small enough: accept the step, trigger events and step handlers\n      interpolator.storeTime(stepStart + stepSize);\n      System.arraycopy(yTmp, 0, y, 0, y0.length);\n      System.arraycopy(yDotK[stages - 1], 0, yDotTmp, 0, y0.length);\n      stepStart = acceptStep(interpolator, y, yDotTmp, t);\n      System.arraycopy(y, 0, yTmp, 0, y.length);\n\n      if (!isLastStep) {\n\n          // prepare next step\n          interpolator.storeTime(stepStart);\n\n          if (fsal) {\n              // save the last evaluation for the next step\n              System.arraycopy(yDotTmp, 0, yDotK[0], 0, y0.length);\n          }\n\n          // stepsize control for next step\n          final double factor =\n              FastMath.min(maxGrowth, FastMath.max(minReduction, safety * FastMath.pow(error, exp)));\n          final double  scaledH    = stepSize * factor;\n          final double  nextT      = stepStart + scaledH;\n          final boolean nextIsLast = forward ? (nextT >= t) : (nextT <= t);\n          hNew = filterStep(scaledH, forward, nextIsLast);\n\n          final double  filteredNextT      = stepStart + hNew;\n          final boolean filteredNextIsLast = forward ? (filteredNextT >= t) : (filteredNextT <= t);\n          if (filteredNextIsLast) {\n              hNew = t - stepStart;\n          }\n\n      }\n\n    } while (!isLastStep);\n\n    // dispatch results\n    equations.setTime(stepStart);\n    equations.setCompleteState(y);\n\n    resetInternalState();\n\n  }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java",
+      "testcase": "@Test\n  public void testTooLargeFirstStepBackward() {\n\n      AdaptiveStepsizeIntegrator integ =\n              new DormandPrince853Integrator(0, Double.POSITIVE_INFINITY, Double.NaN, Double.NaN);\n      final double start = 0.0;\n      final double end   = -0.001;\n      FirstOrderDifferentialEquations equations = new FirstOrderDifferentialEquations() {\n\n          public int getDimension() {\n              return 1;\n          }\n\n          public void computeDerivatives(double t, double[] y, double[] yDot) {\n              Assert.assertTrue(t <= FastMath.nextAfter(start, Double.POSITIVE_INFINITY));\n              Assert.assertTrue(t >= FastMath.nextAfter(end, Double.NEGATIVE_INFINITY));\n              yDot[0] = 100.0 * y[0];\n          }\n\n      };\n\n      integ.setStepSizeControl(0, 1.0, 1.0e-6, 1.0e-8);\n      integ.integrate(equations, start, new double[] { 1.0 }, end, new double[1]);\n\n  }"
+    },
+    {
+      "path": "org/apache/commons/math/ode/nonstiff/DormandPrince853IntegratorTest.java",
+      "testcase": "@Test\n  public void testVectorTolerances() {\n\n      AdaptiveStepsizeIntegrator integ =\n              new DormandPrince853Integrator(0, Double.POSITIVE_INFINITY, Double.NaN, Double.NaN);\n      final double start = 0.0;\n      final double end   = 0.01;\n      FirstOrderDifferentialEquations equations = new FirstOrderDifferentialEquations() {\n\n          public int getDimension() {\n              return 2;\n          }\n\n          public void computeDerivatives(double t, double[] y, double[] yDot) {\n              Assert.assertTrue(t >= FastMath.nextAfter(start, Double.NEGATIVE_INFINITY));\n              Assert.assertTrue(t <= FastMath.nextAfter(end, Double.POSITIVE_INFINITY));\n              yDot[0] = -10.0 * y[0];\n              yDot[1] = -100.0 * y[1];\n          }\n\n      };\n\n      double[] absTol = new double[] {1.0e-8, 1.0e-8};\n      double[] relTol = new double[] {1.0e-6, 1.0e-6};\n      integ.setStepSizeControl(absTol, relTol);\n      integ.integrate(equations, start, new double[] { 1.0, 1.0 }, end, new double[2]);\n\n  }"
+    }
+  ]
+}

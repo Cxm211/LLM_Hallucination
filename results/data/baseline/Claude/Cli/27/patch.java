@@ -1,0 +1,20 @@
+public void setSelected(Option option) throws AlreadySelectedException
+    {
+        if (option == null)
+        {
+            // reset the option previously selected
+            selected = null;
+            return;
+        }
+        
+        // if no option has already been selected then set the
+        // selected member variable
+        if (selected == null)
+        {
+            selected = option.getOpt();
+        }
+        else
+        {
+            throw new AlreadySelectedException(this, option);
+        }
+    }

@@ -1,0 +1,60 @@
+public JavaType constructSpecializedType(JavaType baseType, Class<?> subclass)
+    {
+        final Class<?> rawBase = baseType.getRawClass();
+        if (rawBase == subclass) {
+            return baseType;
+        }
+
+        JavaType newType;
+
+        do { 
+            if (rawBase == Object.class) {
+                newType = _fromClass(null, subclass, TypeBindings.emptyBindings());
+                break;
+            }
+            if (!rawBase.isAssignableFrom(subclass)) {
+                throw new IllegalArgumentException(String.format(
+                        "Class %s not subtype of %s", subclass.getName(), baseType));
+            }
+
+            if (baseType.getBindings().isEmpty()) {
+                newType = _fromClass(null, subclass, TypeBindings.emptyBindings());     
+                break;
+            }
+            if (baseType.isContainerType()) {
+                if (baseType.isMapLikeType()) {
+                    if ((subclass == HashMap.class)
+                            || (subclass == LinkedHashMap.class)
+                            || (subclass == EnumMap.class)
+                            || (subclass == TreeMap.class)) {
+                        newType = _fromClass(null, subclass,
+                                TypeBindings.create(subclass, baseType.getKeyType(), baseType.getContentType()));
+                        break;
+                    }
+                } else if (baseType.isCollectionLikeType()) {
+                    if ((subclass == ArrayList.class)
+                            || (subclass == LinkedList.class)
+                            || (subclass == HashSet.class)
+                            || (subclass == TreeSet.class)) {
+                        newType = _fromClass(null, subclass,
+                                TypeBindings.create(subclass, baseType.getContentType()));
+                        break;
+                    }
+                    if ((rawBase == EnumSet.class) && (subclass == EnumSet.class)) {
+                        return baseType;
+                    }
+                }
+            }
+            int typeParamCount = subclass.getTypeParameters().length;
+            if (typeParamCount == 0) {
+                newType = _fromClass(null, subclass, TypeBindings.emptyBindings());     
+                break;
+            }
+            TypeBindings tb = _bindingsForSubtype(baseType, typeParamCount, subclass);
+            newType = _fromClass(null, subclass, tb);
+
+        } while (false);
+
+        newType = newType.withHandlersFrom(baseType);
+        return newType;
+    }

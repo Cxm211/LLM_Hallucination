@@ -1,0 +1,16 @@
+// ===== FIXED org.apache.commons.compress.archivers.sevenz.SevenZOutputFile :: writeBits(DataOutput, BitSet, int) [lines 634-648] from /Users/grace/Documents/Paper/BugFixing/Interpretation/defects4j_fixed/Compress/Compress-21-fixed/src/main/java/org/apache/commons/compress/archivers/sevenz/SevenZOutputFile.java =====
+    private void writeBits(final DataOutput header, final BitSet bits, final int length) throws IOException {
+        int cache = 0;
+        int shift = 7;
+        for (int i = 0; i < length; i++) {
+            cache |= ((bits.get(i) ? 1 : 0) << shift);
+            if (--shift < 0) {
+                header.write(cache);
+                shift = 7;
+                cache = 0;
+            }
+        }
+        if (shift != 7) {
+            header.write(cache);
+        }
+    }

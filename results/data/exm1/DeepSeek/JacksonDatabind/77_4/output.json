@@ -1,0 +1,231 @@
+We are given buggy source code containing two functions:
+
+1. `createBeanDeserializer` in a class (likely `BasicDeserializerFactory` or similar).
+2. `isIgnorableType` in a class (likely `BasicSerializerFactory` or `BasicDeserializerFactory`, but the code is provided as a snippet; we need to determine the bug and fix it.
+
+The buggy code is:
+
+```java
+public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,
+        JavaType type, BeanDescription beanDesc)
+    throws JsonMappingException
+{
+    final DeserializationConfig config = ctxt.getConfig();
+    // We may also have custom overrides:
+    JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);
+    if (custom != null) {
+        return custom;
+    }
+    /* One more thing to check: do we have an exception type
+     * (Throwable or its sub-classes)? If so, need slightly
+     * different handling.
+     */
+    if (type.isThrowable()) {
+        return buildThrowableDeserializer(ctxt, type, beanDesc);
+    }
+    /* Or, for abstract types, may have alternate means for resolution
+     * (defaulting, materialization)
+     */
+    // 29-Nov-2015, tatu: Also, filter out calls to primitive types, they are
+    //    not something we could materialize anything for
+    if (type.isAbstract() && !type.isPrimitive()) {
+        // Let's make it possible to materialize abstract types.
+        JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);
+        if (concreteType != null) {
+            /* important: introspect actual implementation (abstract class or
+             * interface doesn't have constructors, for one)
+             */
+            beanDesc = config.introspect(concreteType);
+            return buildBeanDeserializer(ctxt, concreteType, beanDesc);
+        }
+    }
+
+    // Otherwise, may want to check handlers for standard types, from superclass:
+    @SuppressWarnings("unchecked")
+    JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);
+    if (deser != null) {
+        return deser;
+    }
+
+    // Otherwise: could the class be a Bean class? If not, bail out
+    if (!isPotentialBeanType(type.getRawClass())) {
+        return null;
+    }
+    // For checks like [databind#1599]
+    // Use generic bean introspection to build deserializer
+    return buildBeanDeserializer(ctxt, type, beanDesc);
+}
+```
+
+And:
+
+```java
+protected boolean isIgnorableType(DeserializationConfig config, BeanDescription beanDesc,
+        Class<?> type, Map<Class<?>,Boolean> ignoredTypes)
+{
+    Boolean status = ignoredTypes.get(type);
+    if (status != null) {
+        return status.booleanValue();
+    }
+    BeanDescription desc = config.introspectClassAnnotations(type);
+    status = config.getAnnotationIntrospector().isIgnorableType(desc.getClassInfo());
+    // We default to 'false', i.e. not ignorable
+    return (status == null) ? false : status.booleanValue(); 
+}
+```
+
+We are also given many test methods. The task is to determine which test methods actually expose the bug in these functions. However, note that the provided test methods are from various test classes; many may not be related to these buggy functions at all. The bug likely relates to deserialization or type handling. The bug in `createBeanDeserializer` might be that it checks `type.isAbstract() && !type.isPrimitive()` but should also check for `type.isThrowable()` first? Actually, it does check throwable before abstract, that seems fine. Another potential bug: The check `if (type.isAbstract() && !type.isPrimitive())` may incorrectly handle abstract types that are also throwable? But throwable is already handled. Or the bug might be in `isIgnorableType`: it takes a `BeanDescription beanDesc` parameter but doesn't use it; it creates a new introspection. Maybe it should use `beanDesc` instead of `config.introspectClassAnnotations(type)`. That could cause performance issues or incorrect behavior. But is there a test that triggers this? The test methods that are given cover many areas; we need to see if any of them fail due to this bug.
+
+Let's look at the test methods that are listed. Most are from `com.fasterxml.jackson.databind.ser.*` tests, which are serialization tests, not deserialization. The buggy functions are in deserialization, so serialization tests likely do not trigger deserialization bugs. However, some tests might involve both serialization and deserialization, e.g., through `writeAndMap` which serializes then deserializes. But many tests are serialization only. Also, the buggy functions are provided in the context of "JacksonDatabind/77_4/input.java", which might be a specific issue. We need to identify which of the listed test methods actually call `createBeanDeserializer` or `isIgnorableType` in a way that exposes the bug.
+
+Given the large list, it's impractical to analyze each one in detail. Perhaps the bug is a known issue. The code snippet includes `createBeanDeserializer` and `isIgnorableType`. The `isIgnorableType` function seems to ignore the `beanDesc` parameter and creates a new `BeanDescription` via `config.introspectClassAnnotations(type)`. That is inefficient and possibly incorrect because it ignores annotations that might be present in the provided `beanDesc`. But is it a bug? Possibly. But we need to see which test methods fail because of it.
+
+Another observation: In `createBeanDeserializer`, the logic for abstract types does not handle the case where the type is an interface that is also a `Throwable`? But that is already handled earlier. Also note that after the abstract type handling, it calls `findStdDeserializer` and then `isPotentialBeanType`. The bug might be that `isPotentialBeanType` returns false for some types that should be handled. However, that is internal.
+
+Given the difficulty, perhaps the intended bug is in `isIgnorableType` not using the provided `beanDesc`. If we look at the test methods, many involve introspection and bean property discovery. For example, `testVisibilityFeatures` might involve bean description and perhaps calls `isIgnorableType`? But that seems unlikely.
+
+Alternatively, the bug might be in `createBeanDeserializer` regarding primitive types: `type.isPrimitive()` is used, but for abstract types that are not primitive, it tries to materialize. But what about abstract types that are primitive wrappers? Not sure.
+
+Given the context, I suspect the bug is in `isIgnorableType` where it ignores the passed `beanDesc` and re-introspects. This could cause incorrect caching or missing annotations. But to find which test triggers it, we need to see which test calls a method that eventually calls `isIgnorableType`. That might be something like `testWithView` or `testPerClassAutoDetection`? Hard to say.
+
+Maybe the bug is that `isIgnorableType` in the buggy code does not update the `ignoredTypes` map after computing, causing repeated introspection? Actually, it does not store the result back into `ignoredTypes`. That is a bug: it computes but does not cache. Looking at the code:
+
+```java
+protected boolean isIgnorableType(DeserializationConfig config, BeanDescription beanDesc,
+        Class<?> type, Map<Class<?>,Boolean> ignoredTypes)
+{
+    Boolean status = ignoredTypes.get(type);
+    if (status != null) {
+        return status.booleanValue();
+    }
+    BeanDescription desc = config.introspectClassAnnotations(type);
+    status = config.getAnnotationIntrospector().isIgnorableType(desc.getClassInfo());
+    // We default to 'false', i.e. not ignorable
+    return (status == null) ? false : status.booleanValue(); 
+}
+```
+
+It retrieves from the map, but if not present, it computes and returns but does not put the result back into the map. That means subsequent calls for the same type will introspect again. This is a performance bug, not a correctness bug unless the introspection could change? But introspection is deterministic. However, it might cause issues if the map is used elsewhere? Usually, the map is a cache, so missing the put could cause repeated work but not incorrect behavior.
+
+But maybe the bug is that it uses `config.introspectClassAnnotations(type)` instead of the passed `beanDesc`. That could cause different results if `beanDesc` has some modifications or mixin info. For example, in `testPerClassAutoDetection`, there are mix-ins that affect ignorable types? Possibly.
+
+Given the complexity, perhaps the bug is in `createBeanDeserializer` where the order of checks is wrong. Specifically, it checks for abstract types after custom and throwable. But what if the type is an abstract type that is also a throwable? It's fine. But what about abstract types that have a standard deserializer? It checks `findStdDeserializer` after materialization, but if the abstract type has a standard deserializer (e.g., for `Number`), it should be used before materialization? Actually, the order seems logical: custom, throwable, abstract materialization, then standard, then bean. But maybe for some abstract types like `Number`, `findStdDeserializer` would find a deserializer, but the abstract check might materialize it before, causing a different deserializer to be used. That could be a bug.
+
+Let's think about the test methods that involve numbers or throwables? There is `testExceptionWithSimpleMapper`, `testExceptionWithMapperAndGenerator`, `testExceptionWithGeneratorMapping` which involve exceptions. Also `testSimple` for exception serialization (not deserialization). But `createBeanDeserializer` is used for deserialization of exception types. The test `testExceptionWithSimpleMapper` serializes, but maybe it also does something? Not sure.
+
+Another thought: The bug might be related to the `isPotentialBeanType` method, but that is not provided.
+
+Given the instructions, we need to output the list of test methods that actually trigger the bug. Since we cannot run the tests, we must rely on reasoning. Possibly none of these test methods directly call these buggy functions because they are all serialization tests? But some tests involve deserialization, e.g., `testEmptyBean`, `testEmptyBean539`, which are serialization tests, not deserialization. Actually, `testEmptyBean` uses `mapper.writeValueAsString`, which is serialization only. So those do not trigger deserialization.
+
+Wait, the test methods provided are all from serialization test classes (`com.fasterxml.jackson.databind.ser.*`). There are no deserialization tests. So how could they trigger a bug in deserialization code? Unless the serialization process internally uses deserialization for type resolution? Unlikely. The buggy functions are part of deserialization factory. The serialization tests probably do not call these methods. Therefore, the correct answer might be that no test methods trigger the bug; the trigger list is empty.
+
+But the task says "determine which testcase methods actually expose the bug." If none do, we output an empty list. However, there might be tests that indirectly trigger deserialization, e.g., `writeAndMap` function which serializes and then deserializes. Many tests use `writeAndMap` which does both:
+
+```java
+protected Map<String,Object> writeAndMap(ObjectMapper m, Object value) throws Exception {
+    String json = m.writeValueAsString(value);
+    @SuppressWarnings("unchecked")
+    Map<String,Object> result = m.readValue(json, Map.class);
+    return result;
+}
+```
+
+So `writeAndMap` calls `readValue`, which triggers deserialization, and thus could call `createBeanDeserializer` for the Map class and its values. So tests that use `writeAndMap` could potentially trigger the bug if the deserialization of some type involves `createBeanDeserializer`. The bug in `createBeanDeserializer` could affect how certain types are deserialized, leading to different results.
+
+Similarly, `serializeAsString` might also involve deserialization if it uses `writeValueAsString` only, no deserialization. But `writeAndMap` does both.
+
+Let's list tests that use `writeAndMap`:
+
+From the list:
+- `testMapperShortcutMethods`: uses writeAndMap.
+- `testEmptyBeanCollection`: uses writeAndMap.
+- `testNullBeanCollection`: writeAndMap.
+- `testEmptyBeanEnumMap`: writeAndMap.
+- `testNullBeanEnumMap`: writeAndMap.
+- `testAnnotationsDisabled`: writeAndMap.
+- `testProviderConfig`: writeAndMap.
+- `testGlobalAutoDetection`: writeAndMap.
+- `testPerClassAutoDetection`: writeAndMap.
+- `testPerClassAutoDetectionForIsGetter`: writeAndMap.
+- `testLinked`: writeAndMap.
+- `testLocation`: writeAndMap.
+- `testSimpleJsonValue`: uses MAPPER.writeValueAsString, not writeAndMap.
+- Many others use MAPPER.writeValueAsString or other means.
+
+So many tests use `writeAndMap`. Among these, which ones could be affected by the bug? The bug in `isIgnorableType` might affect property detection, and tests that use `writeAndMap` with objects that have ignorable types could be affected. But we don't know which types are ignorable.
+
+Perhaps the bug is more subtle: In `createBeanDeserializer`, the check `if (type.isAbstract() && !type.isPrimitive())` might incorrectly handle abstract types that are also primitive? No, primitives are never abstract. Another issue: the `materializeAbstractType` might return a concrete type that is the same as the abstract type? Then it would recurse? But that is guarded.
+
+Given the difficulty, I think the most likely bug is the missing cache put in `isIgnorableType`. However, that bug is minor and might not cause any test to fail because the cache is only for performance. So no test would fail.
+
+Maybe the bug is that `isIgnorableType` takes a `BeanDescription beanDesc` but doesn't use it, so if the passed beanDesc has different information (like from mixins), the ignored status might be incorrect. Some tests with mixins could fail. For example, `testPerClassAutoDetection` uses mixins via annotations? Actually, it uses `@JsonAutoDetect` annotations on the classes. The `isIgnorableType` might be called during property introspection, and if it ignores the beanDesc, it might not take mixins into account. But `config.introspectClassAnnotations` does consider mixins because it uses the config's annotation introspector. So probably fine.
+
+Another thought: In `createBeanDeserializer`, after `buildBeanDeserializer` is called, but there might be an issue with the return value: if `isPotentialBeanType` returns false, it returns null, which might cause issues downstream. But that is intentional.
+
+I'll look at the specific test: `testMapperShortcutMethods`. It uses `writeAndMap(new FieldBean())`. `FieldBean` has fields with different access modifiers. The test expects the map to have three entries. The bug in `isIgnorableType` might not affect this. The bug in `createBeanDeserializer` would affect deserialization of FieldBean, but it's being serialized first, then deserialized as Map. The deserialization is for Map, not FieldBean. So `createBeanDeserializer` for FieldBean is not called. So this test does not trigger the bug.
+
+All tests that write a POJO and then read as Map will deserialize the Map and its values as generic Objects. The deserialization of the POJO itself does not happen; only the Map deserialization. So `createBeanDeserializer` for the POJO is not invoked. The deserialization of Map might use `createBeanDeserializer` for Map type? That goes through different path.
+
+Thus, I suspect none of these tests actually call `createBeanDeserializer` or `isIgnorableType` in a way that the bug manifests. The bug might be latent and not exposed by any of the given tests.
+
+Given the instructions, we must output a JSON with trigger_method list and fixed_code. The fixed_code should be the corrected versions of both functions.
+
+Let's fix the likely bug:
+
+1. In `isIgnorableType`, use the provided `beanDesc` instead of re-introspecting, and also put the result into `ignoredTypes` map.
+
+2. In `createBeanDeserializer`, the bug might be that after materializing abstract type, it returns `buildBeanDeserializer` directly without checking `findStdDeserializer` for the concrete type? That could miss standard deserializers for materialized types. But the order is: custom, throwable, abstract (materialize and build), then standard, then bean. If materialization succeeds, it returns the bean deserializer immediately. That might skip standard deserializers for the concrete type. For example, if you have an abstract type that can be materialized to `String`, there is a standard deserializer for String, but it would generate a bean deserializer instead, which might fail. So the fix should be to check for standard deserializer on the concrete type before building bean deserializer. Or perhaps the materialization should only be done if the type is not a well-known type? Actually, the standard deserializer check occurs after materialization, but for the concrete type, it never gets checked because the code returns immediately. So we need to move the standard deserializer check before the abstract materialization, or after materialization, check the concrete type for standard deserializer.
+
+Looking at the original code from Jackson source, the correct order is: custom, throwable, abstract (materialize), standard, bean. But after materialization, it returns the bean deserializer for the concrete type. However, the concrete type might have a standard deserializer (e.g., if it's a String, Enum, etc.). So the fix should be: after materialization, we should find std deserializer for the concrete type or build bean deserializer. Typically, the code does:
+
+```java
+if (concreteType != null) {
+    beanDesc = config.introspect(concreteType);
+    return buildBeanDeserializer(ctxt, concreteType, beanDesc);
+}
+```
+
+But this might not handle all cases. An improvement would be to also check for a std deserializer for the concrete type. However, the standard deserializer for the abstract type was already checked? No, it was not checked before materialization. Actually, the standard deserializer check is after materialization, but it is for the original type, not the concrete. If we materialize, we never check std for the concrete. So we could do:
+
+```java
+if (concreteType != null) {
+    beanDesc = config.introspect(concreteType);
+    JsonDeserializer<?> concreteDeser = findStdDeserializer(ctxt, concreteType, beanDesc);
+    if (concreteDeser != null) {
+        return concreteDeser;
+    }
+    return buildBeanDeserializer(ctxt, concreteType, beanDesc);
+}
+```
+
+That might be a bug.
+
+Given that the provided source shows the buggy version, and the issue number might be [databind#77_4]? Actually, the filename is `JacksonDatabind/77_4/input.java`. That suggests it's related to issue #77 or something. Possibly the bug is exactly that: after materializing an abstract type, it doesn't check for standard deserializers for the concrete type, leading to errors when the concrete type has a registered serializer/deserializer.
+
+Thus, we need to fix `createBeanDeserializer` to check for standard deserializer after materialization.
+
+Also, fix `isIgnorableType` to use the provided `beanDesc` and cache.
+
+Now, which test methods trigger this bug? Possibly any test that involves an abstract type that gets materialized to a concrete type that has a standard deserializer. For example, `testEmptyBean539`? It uses `EmptyBean` which might be abstract? Not sure. Or `testTypedRootValueSerialization` tests? Those use interfaces. `testTypedSerialization` uses `Issue822Interface` which is an interface, and it writes it with a writer for the interface. That uses serialization, not deserialization. For deserialization, there might be tests like `testForwardRef` which involves deserialization of abstract types. But that test is in `com.fasterxml.jackson.databind.struct.TestForwardReference`, not in the given list. The given list is only serialization tests.
+
+Given the above, it's likely that none of the given test methods trigger the bug because they are all serialization-only tests. The test methods are from `com.fasterxml.jackson.databind.ser.*` packages, which are serializers. The bug is in deserialization code. So the trigger list should be empty.
+
+I'll proceed with that.
+
+Output: {"trigger_method": [], "fixed_code": ["fixed createBeanDeserializer", "fixed isIgnorableType"]}
+
+Now produce the fixed code. We'll need to write the full corrected functions. We'll include the fixes:
+
+For `createBeanDeserializer`: after materializing, check for standard deserializer first.
+
+For `isIgnorableType`: use the passed `beanDesc` and also update the cache map.
+
+We'll output both functions as strings in the JSON array.
+
+Let's write them.{
+  "trigger_method": [],
+  "fixed_code": [
+    "public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n        // We may also have custom overrides:\n        JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);\n        if (custom != null) {\n            return custom;\n        }\n        /* One more thing to check: do we have an exception type\n         * (Throwable or its sub-classes)? If so, need slightly\n         * different handling.\n         */\n        if (type.isThrowable()) {\n            return buildThrowableDeserializer(ctxt, type, beanDesc);\n        }\n        /* Or, for abstract types, may have alternate means for resolution\n         * (defaulting, materialization)\n         */\n        // 29-Nov-2015, tatu: Also, filter out calls to primitive types, they are\n        //    not something we could materialize anything for\n        if (type.isAbstract() && !type.isPrimitive()) {\n            // Let's make it possible to materialize abstract types.\n            JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);\n            if (concreteType != null) {\n                /* important: introspect actual implementation (abstract class or\n                 * interface doesn't have constructors, for one)\n                 */\n                beanDesc = config.introspect(concreteType);\n                // first check for standard deserializer for concrete type\n                JsonDeserializer<?> concreteDeser = findStdDeserializer(ctxt, concreteType, beanDesc);\n                if (concreteDeser != null) {\n                    return (JsonDeserializer<Object>) concreteDeser;\n                }\n                return buildBeanDeserializer(ctxt, concreteType, beanDesc);\n            }\n        }\n\n        // Otherwise, may want to check handlers for standard types, from superclass:\n        @SuppressWarnings(\"unchecked\")\n        JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n\n        // Otherwise: could the class be a Bean class? If not, bail out\n        if (!isPotentialBeanType(type.getRawClass())) {\n            return null;\n        }\n        // For checks like [databind#1599]\n        // Use generic bean introspection to build deserializer\n        return buildBeanDeserializer(ctxt, type, beanDesc);\n    }",
+    "protected boolean isIgnorableType(DeserializationConfig config, BeanDescription beanDesc,\n            Class<?> type, Map<Class<?>,Boolean> ignoredTypes)\n    {\n        Boolean status = ignoredTypes.get(type);\n        if (status != null) {\n            return status.booleanValue();\n        }\n        // use the provided beanDesc if possible, otherwise introspect\n        AnnotatedClass classInfo = (beanDesc != null) ? beanDesc.getClassInfo() : null;\n        if (classInfo == null) {\n            BeanDescription desc = config.introspectClassAnnotations(type);\n            classInfo = desc.getClassInfo();\n        }\n        status = config.getAnnotationIntrospector().isIgnorableType(classInfo);\n        // We default to 'false', i.e. not ignorable\n        boolean result = (status == null) ? false : status.booleanValue();\n        ignoredTypes.put(type, result);\n        return result;\n    }"
+  ]
+}

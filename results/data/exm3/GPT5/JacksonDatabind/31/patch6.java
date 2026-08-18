@@ -1,0 +1,3 @@
+public void writeNumber(int i) throws IOException {
+        _appendValue(JsonToken.VALUE_NUMBER_INT, Integer.valueOf(i));
+    }

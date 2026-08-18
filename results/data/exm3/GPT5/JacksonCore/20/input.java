@@ -1,0 +1,55 @@
+// buggy function
+    public void writeEmbeddedObject(Object object) throws IOException {
+        // 01-Sep-2016, tatu: As per [core#318], handle small number of cases
+        throw new JsonGenerationException("No native support for writing embedded objects",
+                this);
+    }
+
+// trigger testcase
+// com/fasterxml/jackson/core/base64/Base64GenerationTest.java::testBinaryAsEmbeddedObject
+public void testBinaryAsEmbeddedObject() throws Exception
+    {
+        JsonGenerator g;
+
+        StringWriter sw = new StringWriter();
+        g = JSON_F.createGenerator(sw);
+        g.writeEmbeddedObject(WIKIPEDIA_BASE64_AS_BYTES);
+        g.close();
+        assertEquals(quote(WIKIPEDIA_BASE64_ENCODED), sw.toString());
+
+        ByteArrayOutputStream bytes =  new ByteArrayOutputStream(100);
+        g = JSON_F.createGenerator(bytes);
+        g.writeEmbeddedObject(WIKIPEDIA_BASE64_AS_BYTES);
+        g.close();
+        assertEquals(quote(WIKIPEDIA_BASE64_ENCODED), bytes.toString("UTF-8"));
+    }
+
+// com/fasterxml/jackson/core/main/TestGeneratorMisc.java::testAsEmbedded
+public void testAsEmbedded() throws Exception
+    {
+        JsonGenerator g;
+
+        StringWriter sw = new StringWriter();
+        g = JSON_F.createGenerator(sw);
+        g.writeEmbeddedObject(null);
+        g.close();
+        assertEquals("null", sw.toString());
+
+        ByteArrayOutputStream bytes =  new ByteArrayOutputStream(100);
+        g = JSON_F.createGenerator(bytes);
+        g.writeEmbeddedObject(null);
+        g.close();
+        assertEquals("null", bytes.toString("UTF-8"));
+
+        // also, for fun, try illegal unknown thingy
+
+        try {
+            g = JSON_F.createGenerator(bytes);
+            // try writing a Class object
+            g.writeEmbeddedObject(getClass());
+            fail("Expected an exception");
+            g.close(); // never gets here
+        } catch (JsonGenerationException e) {
+            verifyException(e, "No native support for");
+        }
+    }

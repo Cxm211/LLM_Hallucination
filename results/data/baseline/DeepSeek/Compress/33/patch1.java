@@ -1,0 +1,9 @@
+public void close() throws IOException {
+    if (in != null) {
+        try {
+            in.close();
+        } finally {
+            in = null;
+        }
+    }
+}

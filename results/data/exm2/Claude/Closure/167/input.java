@@ -1,0 +1,225 @@
+  private FlowScope caseEquality(Node left, Node right, FlowScope blindScope,
+      Function<TypePair, TypePair> merging) {
+    // left type
+    JSType leftType = getTypeIfRefinable(left, blindScope);
+    boolean leftIsRefineable;
+    if (leftType != null) {
+      leftIsRefineable = true;
+    } else {
+      leftIsRefineable = false;
+      leftType = left.getJSType();
+    }
+
+    // right type
+    JSType rightType = getTypeIfRefinable(right, blindScope);
+    boolean rightIsRefineable;
+    if (rightType != null) {
+      rightIsRefineable = true;
+    } else {
+      rightIsRefineable = false;
+      rightType = right.getJSType();
+    }
+
+    // merged types
+    TypePair merged = merging.apply(new TypePair(leftType, rightType));
+
+    // creating new scope
+    if (merged != null) {
+      return maybeRestrictTwoNames(
+          blindScope,
+          left, leftIsRefineable, merged.typeA,
+          right, rightIsRefineable, merged.typeB);
+    }
+    return blindScope;
+  }
+
+  private FlowScope caseAndOrNotShortCircuiting(Node left, Node right,
+        FlowScope blindScope, boolean condition) {
+    // left type
+    JSType leftType = getTypeIfRefinable(left, blindScope);
+    boolean leftIsRefineable;
+    if (leftType != null) {
+      leftIsRefineable = true;
+    } else {
+      leftIsRefineable = false;
+      leftType = left.getJSType();
+      blindScope = firstPreciserScopeKnowingConditionOutcome(
+          left, blindScope, condition);
+    }
+
+    // restricting left type
+    JSType restrictedLeftType = (leftType == null) ? null :
+        leftType.getRestrictedTypeGivenToBooleanOutcome(condition);
+    if (restrictedLeftType == null) {
+      return firstPreciserScopeKnowingConditionOutcome(
+          right, blindScope, condition);
+    }
+
+    // right type
+    JSType rightType = getTypeIfRefinable(right, blindScope);
+    boolean rightIsRefineable;
+    if (rightType != null) {
+      rightIsRefineable = true;
+    } else {
+      rightIsRefineable = false;
+      rightType = right.getJSType();
+      blindScope = firstPreciserScopeKnowingConditionOutcome(
+          right, blindScope, condition);
+    }
+
+    if (condition) {
+      JSType restrictedRightType = (rightType == null) ? null :
+          rightType.getRestrictedTypeGivenToBooleanOutcome(condition);
+
+      // creating new scope
+      return maybeRestrictTwoNames(
+          blindScope,
+          left, leftIsRefineable, restrictedLeftType,
+          right, rightIsRefineable, restrictedRightType);
+    }
+    return blindScope;
+  }
+
+  private FlowScope maybeRestrictName(
+      FlowScope blindScope, Node node, JSType originalType, JSType restrictedType) {
+    if (restrictedType != null && !restrictedType.equals(originalType)) {
+      FlowScope informed = blindScope.createChildFlowScope();
+      declareNameInScope(informed, node, restrictedType);
+      return informed;
+    }
+    return blindScope;
+  }
+
+  private FlowScope maybeRestrictTwoNames(
+      FlowScope blindScope,
+      Node left, boolean leftIsRefineable, JSType restrictedLeftType,
+      Node right, boolean rightIsRefineable, JSType restrictedRightType) {
+    boolean shouldRefineLeft =
+        leftIsRefineable && restrictedLeftType != null;
+    boolean shouldRefineRight =
+        rightIsRefineable && restrictedRightType != null;
+    if (shouldRefineLeft || shouldRefineRight) {
+      FlowScope informed = blindScope.createChildFlowScope();
+      if (shouldRefineLeft) {
+        declareNameInScope(informed, left, restrictedLeftType);
+      }
+      if (shouldRefineRight) {
+        declareNameInScope(informed, right, restrictedRightType);
+      }
+      return informed;
+    }
+    return blindScope;
+  }
+
+  private FlowScope caseNameOrGetProp(Node name, FlowScope blindScope,
+      boolean outcome) {
+    JSType type = getTypeIfRefinable(name, blindScope);
+    if (type != null) {
+      JSType restrictedType =
+          type.getRestrictedTypeGivenToBooleanOutcome(outcome);
+      FlowScope informed = blindScope.createChildFlowScope();
+      declareNameInScope(informed, name, restrictedType);
+      return informed;
+    }
+    return blindScope;
+  }
+
+  public JSType getRestrictedTypeGivenToBooleanOutcome(boolean outcome) {
+
+    BooleanLiteralSet literals = getPossibleToBooleanOutcomes();
+    if (literals.contains(outcome)) {
+      return this;
+    } else {
+      return getNativeType(JSTypeNative.NO_TYPE);
+    }
+  }
+
+// trigger testcase
+public void testIssue783() throws Exception {
+    testTypes(
+        "/** @constructor */" +
+        "var Type = function () {" +
+        "  /** @type {Type} */" +
+        "  this.me_ = this;" +
+        "};" +
+        "Type.prototype.doIt = function() {" +
+        "  var me = this.me_;" +
+        "  for (var i = 0; i < me.unknownProp; i++) {}" +
+        "};",
+        "Property unknownProp never defined on Type");
+  }
+
+public void testMissingProperty20() throws Exception {
+    testTypes(
+        "/** @param {Object} x */" +
+        "function f(x) { if (x.foo) { } else { x.foo(); } }",
+        "Property foo never defined on Object");
+  }
+
+public void testRestrictedTypeGivenToBoolean() {
+    // simple cases
+    assertTypeEquals(BOOLEAN_TYPE,
+        BOOLEAN_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(BOOLEAN_TYPE,
+        BOOLEAN_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(NO_TYPE,
+        NULL_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(NULL_TYPE,
+        NULL_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(NUMBER_TYPE,
+        NUMBER_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(NUMBER_TYPE,
+        NUMBER_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(STRING_TYPE,
+        STRING_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(STRING_TYPE,
+        STRING_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(STRING_OBJECT_TYPE,
+        STRING_OBJECT_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(NO_TYPE,
+        STRING_OBJECT_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(NO_TYPE,
+        VOID_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(VOID_TYPE,
+        VOID_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(NO_OBJECT_TYPE,
+        NO_OBJECT_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(NO_TYPE,
+        NO_OBJECT_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(NO_TYPE,
+        NO_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(NO_TYPE,
+        NO_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(ALL_TYPE,
+        ALL_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(ALL_TYPE,
+        ALL_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    assertTypeEquals(CHECKED_UNKNOWN_TYPE,
+        UNKNOWN_TYPE.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(UNKNOWN_TYPE,
+        UNKNOWN_TYPE.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    // unions
+    UnionType nullableStringValue =
+        (UnionType) createNullableType(STRING_TYPE);
+    assertTypeEquals(STRING_TYPE,
+        nullableStringValue.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(nullableStringValue,
+        nullableStringValue.getRestrictedTypeGivenToBooleanOutcome(false));
+
+    UnionType nullableStringObject =
+        (UnionType) createNullableType(STRING_OBJECT_TYPE);
+    assertTypeEquals(STRING_OBJECT_TYPE,
+        nullableStringObject.getRestrictedTypeGivenToBooleanOutcome(true));
+    assertTypeEquals(NULL_TYPE,
+        nullableStringObject.getRestrictedTypeGivenToBooleanOutcome(false));
+  }

@@ -1,0 +1,59 @@
+public JavaType refineDeserializationType(final MapperConfig<?> config,
+            final Annotated a, final JavaType baseType) throws JsonMappingException
+    {
+        JavaType type = baseType;
+        final TypeFactory tf = config.getTypeFactory();
+
+        final JsonDeserialize jsonDeser = _findAnnotation(a, JsonDeserialize.class);
+        
+        // Ok: start by refining the main type itself; common to all types
+        final Class<?> valueClass = (jsonDeser == null) ? null : _classIfExplicit(jsonDeser.as());
+        if ((valueClass != null) && !type.hasRawClass(valueClass)) {
+            try {
+                type = tf.constructSpecializedType(type, valueClass);
+            } catch (IllegalArgumentException iae) {
+                final String aName = (a == null) ? "unknown" : a.getName();
+                throw new JsonMappingException(null,
+                        String.format("Failed to narrow type %s with annotation (value %s), from '%s': %s",
+                                type, valueClass.getName(), aName, iae.getMessage()),
+                                iae);
+            }
+        }
+        // Then further processing for container types
+
+        // First, key type (for Maps, Map-like types):
+        if (type.isMapLikeType()) {
+            JavaType keyType = type.getKeyType();
+            final Class<?> keyClass = (jsonDeser == null) ? null : _classIfExplicit(jsonDeser.keyAs());
+            if (keyClass != null) {
+                try {
+                    keyType = tf.constructSpecializedType(keyType, keyClass);
+                    type = ((MapLikeType) type).withKeyType(keyType);
+                } catch (IllegalArgumentException iae) {
+                    final String aName = (a == null) ? "unknown" : a.getName();
+                    throw new JsonMappingException(null,
+                            String.format("Failed to narrow key type of %s with concrete-type annotation (value %s), from '%s': %s",
+                                    type, keyClass.getName(), aName, iae.getMessage()),
+                                    iae);
+                }
+            }
+        }
+        JavaType contentType = type.getContentType();
+        if (contentType != null) { // collection[like], map[like], array, reference
+            // And then value types for all containers:
+            final Class<?> contentClass = (jsonDeser == null) ? null : _classIfExplicit(jsonDeser.contentAs());
+            if (contentClass != null) {
+                try {
+                    contentType = tf.constructSpecializedType(contentType, contentClass);
+                    type = type.withContentType(contentType);
+                } catch (IllegalArgumentException iae) {
+                    final String aName = (a == null) ? "unknown" : a.getName();
+                    throw new JsonMappingException(null,
+                            String.format("Failed to narrow value type of %s with concrete-type annotation (value %s), from '%s': %s",
+                                    type, contentClass.getName(), aName, iae.getMessage()),
+                            iae);
+                }
+            }
+        }
+        return type;
+    }

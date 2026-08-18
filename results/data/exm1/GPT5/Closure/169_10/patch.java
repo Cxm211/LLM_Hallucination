@@ -1,0 +1,28 @@
+boolean hasEqualParameters(ArrowType that, boolean tolerateUnknowns) {
+    Node thisParam = parameters.getFirstChild();
+    Node otherParam = that.parameters.getFirstChild();
+    while (thisParam != null && otherParam != null) {
+      JSType thisParamType = thisParam.getJSType();
+      JSType otherParamType = otherParam.getJSType();
+      if (thisParamType != null && otherParamType != null) {
+        // Both parameter lists give a type for this param, it should be equal
+        if (!thisParamType.checkEquivalenceHelper(
+                otherParamType, tolerateUnknowns)) {
+          return false;
+        }
+      } else if (thisParamType == null && otherParamType == null) {
+        // both unspecified, ok
+      } else {
+        // One side specified and the other not. Treat as unequal unless we are
+        // tolerating unknowns.
+        if (!tolerateUnknowns) {
+          return false;
+        }
+      }
+      thisParam = thisParam.getNext();
+      otherParam = otherParam.getNext();
+    }
+    // One of the parameters is null, so the types are only equal if both
+    // parameter lists are null (they are equal).
+    return thisParam == otherParam;
+  }

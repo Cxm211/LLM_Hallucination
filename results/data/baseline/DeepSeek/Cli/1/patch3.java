@@ -1,0 +1,16 @@
+    void addOption(Option opt)
+    {
+        hashcodeMap.put(new Integer(opt.hashCode()), opt);
+        String key = opt.getKey();
+        if (key == null)
+        {
+            key = opt.getLongOpt();
+        }
+        else
+        {
+            if (opt.getLongOpt() != null) {
+                names.put(opt.getLongOpt(), key);
+            }
+        }
+        options.put(key, opt);
+    }

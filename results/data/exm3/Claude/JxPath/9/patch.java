@@ -1,0 +1,4 @@
+public CoreOperationCompare(Expression arg1, Expression arg2) {
+
+    super(new Expression[] { arg1, arg2 });
+}

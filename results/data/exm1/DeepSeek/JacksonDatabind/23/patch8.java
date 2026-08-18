@@ -1,0 +1,1 @@
+public FloatSerializer() { super(Float.class); }

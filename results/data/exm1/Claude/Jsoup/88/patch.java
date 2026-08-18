@@ -1,0 +1,5 @@
+public String getValue() {
+        if (val == null)
+            return "";
+        return val;
+    }

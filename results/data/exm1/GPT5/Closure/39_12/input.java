@@ -1,0 +1,4759 @@
+// buggy code
+  String toStringHelper(boolean forAnnotations) {
+    if (hasReferenceName()) {
+      return getReferenceName();
+    } else if (prettyPrint) {
+      // Don't pretty print recursively.
+      prettyPrint = false;
+
+      // Use a tree set so that the properties are sorted.
+      Set<String> propertyNames = Sets.newTreeSet();
+      for (ObjectType current = this;
+           current != null && !current.isNativeObjectType() &&
+               propertyNames.size() <= MAX_PRETTY_PRINTED_PROPERTIES;
+           current = current.getImplicitPrototype()) {
+        propertyNames.addAll(current.getOwnPropertyNames());
+      }
+
+      StringBuilder sb = new StringBuilder();
+      sb.append("{");
+
+      int i = 0;
+      for (String property : propertyNames) {
+        if (i > 0) {
+          sb.append(", ");
+        }
+
+        sb.append(property);
+        sb.append(": ");
+        sb.append(getPropertyType(property).toString());
+
+        ++i;
+        if (i == MAX_PRETTY_PRINTED_PROPERTIES) {
+          sb.append(", ...");
+          break;
+        }
+      }
+
+      sb.append("}");
+
+      prettyPrint = true;
+      return sb.toString();
+    } else {
+      return "{...}";
+    }
+  }
+
+// relevant test
+// com.google.javascript.jscomp.NodeUtilTest::testMayHaveSideEffects
+  public void testMayHaveSideEffects() {
+    assertSideEffect(true, "i++");
+    assertSideEffect(true, "[b, [a, i++]]");
+    assertSideEffect(true, "i=3");
+    assertSideEffect(true, "[0, i=3]");
+    assertSideEffect(true, "b()");
+    assertSideEffect(true, "[1, b()]");
+    assertSideEffect(true, "b.b=4");
+    assertSideEffect(true, "b.b--");
+    assertSideEffect(true, "i--");
+    assertSideEffect(true, "a[0][i=4]");
+    assertSideEffect(true, "a += 3");
+    assertSideEffect(true, "a, b, z += 4");
+    assertSideEffect(true, "a ? c : d++");
+    assertSideEffect(true, "a + c++");
+    assertSideEffect(true, "a + c - d()");
+    assertSideEffect(true, "a + c - d()");
+
+    assertSideEffect(true, "function foo() {}");
+    assertSideEffect(true, "while(true);");
+    assertSideEffect(true, "if(true){a()}");
+
+    assertSideEffect(false, "if(true){a}");
+    assertSideEffect(false, "(function() { })");
+    assertSideEffect(false, "(function() { i++ })");
+    assertSideEffect(false, "[function a(){}]");
+
+    assertSideEffect(false, "a");
+    assertSideEffect(false, "[b, c [d, [e]]]");
+    assertSideEffect(false, "({a: x, b: y, c: z})");
+    assertSideEffect(false, "/abc/gi");
+    assertSideEffect(false, "'a'");
+    assertSideEffect(false, "0");
+    assertSideEffect(false, "a + c");
+    assertSideEffect(false, "'c' + a[0]");
+    assertSideEffect(false, "a[0][1]");
+    assertSideEffect(false, "'a' + c");
+    assertSideEffect(false, "'a' + a.name");
+    assertSideEffect(false, "1, 2, 3");
+    assertSideEffect(false, "a, b, 3");
+    assertSideEffect(false, "(function(a, b) {  })");
+    assertSideEffect(false, "a ? c : d");
+    assertSideEffect(false, "'1' + navigator.userAgent");
+
+    assertSideEffect(false, "new RegExp('foobar', 'i')");
+    assertSideEffect(true, "new RegExp(SomethingWacky(), 'i')");
+    assertSideEffect(false, "new Array()");
+    assertSideEffect(false, "new Array");
+    assertSideEffect(false, "new Array(4)");
+    assertSideEffect(false, "new Array('a', 'b', 'c')");
+    assertSideEffect(true, "new SomeClassINeverHeardOf()");
+    assertSideEffect(true, "new SomeClassINeverHeardOf()");
+
+    assertSideEffect(false, "({}).foo = 4");
+    assertSideEffect(false, "([]).foo = 4");
+    assertSideEffect(false, "(function() {}).foo = 4");
+
+    assertSideEffect(true, "this.foo = 4");
+    assertSideEffect(true, "a.foo = 4");
+    assertSideEffect(true, "(function() { return n; })().foo = 4");
+    assertSideEffect(true, "([]).foo = bar()");
+
+    assertSideEffect(false, "undefined");
+    assertSideEffect(false, "void 0");
+    assertSideEffect(true, "void foo()");
+    assertSideEffect(false, "-Infinity");
+    assertSideEffect(false, "Infinity");
+    assertSideEffect(false, "NaN");
+
+    assertSideEffect(false, "({}||[]).foo = 2;");
+    assertSideEffect(false, "(true ? {} : []).foo = 2;");
+    assertSideEffect(false, "({},[]).foo = 2;");
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testObjectMethodSideEffects
+  public void testObjectMethodSideEffects() {
+    
+    assertSideEffect(false, "o.toString()");
+    assertSideEffect(false, "o.valueOf()");
+
+    
+    assertSideEffect(true, "o.watch()");
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRegExpSideEffect
+  public void testRegExpSideEffect() {
+    
+    assertSideEffect(false, "/abc/gi", true);
+    assertSideEffect(false, "/abc/gi", false);
+
+    
+    
+    
+    assertSideEffect(true, "(/abc/gi).test('')", true);
+    assertSideEffect(false, "(/abc/gi).test('')", false);
+    assertSideEffect(true, "(/abc/gi).test(a)", true);
+    assertSideEffect(false, "(/abc/gi).test(b)", false);
+
+    assertSideEffect(true, "(/abc/gi).exec('')", true);
+    assertSideEffect(false, "(/abc/gi).exec('')", false);
+
+    
+    assertSideEffect(true, "(/abc/gi).foo('')", true);
+    assertSideEffect(true, "(/abc/gi).foo('')", false);
+
+    
+    assertSideEffect(true, "''.match('a')", true);
+    assertSideEffect(false, "''.match('a')", false);
+    assertSideEffect(true, "''.match(/(a)/)", true);
+    assertSideEffect(false, "''.match(/(a)/)", false);
+
+    assertSideEffect(true, "''.replace('a')", true);
+    assertSideEffect(false, "''.replace('a')", false);
+
+    assertSideEffect(true, "''.search('a')", true);
+    assertSideEffect(false, "''.search('a')", false);
+
+    assertSideEffect(true, "''.split('a')", true);
+    assertSideEffect(false, "''.split('a')", false);
+
+    
+    assertSideEffect(true, "''.foo('a')", true);
+    assertSideEffect(true, "''.foo('a')", false);
+
+    
+    
+    
+    
+    assertSideEffect(true, "''.match(a)", true);
+    assertSideEffect(true, "''.match(a)", false);
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testMayEffectMutableState
+  public void testMayEffectMutableState() {
+    assertMutableState(true, "i++");
+    assertMutableState(true, "[b, [a, i++]]");
+    assertMutableState(true, "i=3");
+    assertMutableState(true, "[0, i=3]");
+    assertMutableState(true, "b()");
+    assertMutableState(true, "void b()");
+    assertMutableState(true, "[1, b()]");
+    assertMutableState(true, "b.b=4");
+    assertMutableState(true, "b.b--");
+    assertMutableState(true, "i--");
+    assertMutableState(true, "a[0][i=4]");
+    assertMutableState(true, "a += 3");
+    assertMutableState(true, "a, b, z += 4");
+    assertMutableState(true, "a ? c : d++");
+    assertMutableState(true, "a + c++");
+    assertMutableState(true, "a + c - d()");
+    assertMutableState(true, "a + c - d()");
+
+    assertMutableState(true, "function foo() {}");
+    assertMutableState(true, "while(true);");
+    assertMutableState(true, "if(true){a()}");
+
+    assertMutableState(false, "if(true){a}");
+    assertMutableState(true, "(function() { })");
+    assertMutableState(true, "(function() { i++ })");
+    assertMutableState(true, "[function a(){}]");
+
+    assertMutableState(false, "a");
+    assertMutableState(true, "[b, c [d, [e]]]");
+    assertMutableState(true, "({a: x, b: y, c: z})");
+    
+    
+    assertMutableState(true, "/abc/gi");
+    assertMutableState(false, "'a'");
+    assertMutableState(false, "0");
+    assertMutableState(false, "a + c");
+    assertMutableState(false, "'c' + a[0]");
+    assertMutableState(false, "a[0][1]");
+    assertMutableState(false, "'a' + c");
+    assertMutableState(false, "'a' + a.name");
+    assertMutableState(false, "1, 2, 3");
+    assertMutableState(false, "a, b, 3");
+    assertMutableState(true, "(function(a, b) {  })");
+    assertMutableState(false, "a ? c : d");
+    assertMutableState(false, "'1' + navigator.userAgent");
+
+    assertMutableState(true, "new RegExp('foobar', 'i')");
+    assertMutableState(true, "new RegExp(SomethingWacky(), 'i')");
+    assertMutableState(true, "new Array()");
+    assertMutableState(true, "new Array");
+    assertMutableState(true, "new Array(4)");
+    assertMutableState(true, "new Array('a', 'b', 'c')");
+    assertMutableState(true, "new SomeClassINeverHeardOf()");
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsFunctionExpression
+  public void testIsFunctionExpression() {
+    assertContainsAnonFunc(true, "(function(){})");
+    assertContainsAnonFunc(true, "[function a(){}]");
+    assertContainsAnonFunc(false, "{x: function a(){}}");
+    assertContainsAnonFunc(true, "(function a(){})()");
+    assertContainsAnonFunc(true, "x = function a(){};");
+    assertContainsAnonFunc(true, "var x = function a(){};");
+    assertContainsAnonFunc(true, "if (function a(){});");
+    assertContainsAnonFunc(true, "while (function a(){});");
+    assertContainsAnonFunc(true, "do; while (function a(){});");
+    assertContainsAnonFunc(true, "for (function a(){};;);");
+    assertContainsAnonFunc(true, "for (;function a(){};);");
+    assertContainsAnonFunc(true, "for (;;function a(){});");
+    assertContainsAnonFunc(true, "for (p in function a(){});");
+    assertContainsAnonFunc(true, "with (function a(){}) {}");
+    assertContainsAnonFunc(false, "function a(){}");
+    assertContainsAnonFunc(false, "if (x) function a(){};");
+    assertContainsAnonFunc(false, "if (x) { function a(){} }");
+    assertContainsAnonFunc(false, "if (x); else function a(){};");
+    assertContainsAnonFunc(false, "while (x) function a(){};");
+    assertContainsAnonFunc(false, "do function a(){} while (0);");
+    assertContainsAnonFunc(false, "for (;;) function a(){}");
+    assertContainsAnonFunc(false, "for (p in o) function a(){};");
+    assertContainsAnonFunc(false, "with (x) function a(){}");
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testContainsType
+  public void testContainsType() {
+    assertTrue(NodeUtil.containsType(
+        parse("this"), Token.THIS));
+    assertTrue(NodeUtil.containsType(
+        parse("function foo(){}(this)"), Token.THIS));
+    assertTrue(NodeUtil.containsType(
+        parse("b?this:null"), Token.THIS));
+
+    assertFalse(NodeUtil.containsType(
+        parse("a"), Token.THIS));
+    assertFalse(NodeUtil.containsType(
+        parse("function foo(){}"), Token.THIS));
+    assertFalse(NodeUtil.containsType(
+        parse("(b?foo():null)"), Token.THIS));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testReferencesThis
+  public void testReferencesThis() {
+    assertTrue(NodeUtil.referencesThis(
+        parse("this")));
+    
+    assertFalse(NodeUtil.referencesThis(
+        parse("function foo(){this}")));
+    
+    Node n = parse("function foo(){this}").getFirstChild();
+    assertEquals(n.getType(), Token.FUNCTION);
+    assertTrue(NodeUtil.referencesThis(n));
+    assertTrue(NodeUtil.referencesThis(
+        parse("b?this:null")));
+
+    assertFalse(NodeUtil.referencesThis(
+        parse("a")));
+    n = parse("function foo(){}").getFirstChild();
+    assertEquals(n.getType(), Token.FUNCTION);
+    assertFalse(NodeUtil.referencesThis(n));
+    assertFalse(NodeUtil.referencesThis(
+        parse("(b?foo():null)")));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetNodeTypeReferenceCount
+  public void testGetNodeTypeReferenceCount() {
+    assertEquals(0, NodeUtil.getNodeTypeReferenceCount(
+        parse("function foo(){}"), Token.THIS,
+            Predicates.<Node>alwaysTrue()));
+    assertEquals(1, NodeUtil.getNodeTypeReferenceCount(
+        parse("this"), Token.THIS,
+            Predicates.<Node>alwaysTrue()));
+    assertEquals(2, NodeUtil.getNodeTypeReferenceCount(
+        parse("this;function foo(){}(this)"), Token.THIS,
+            Predicates.<Node>alwaysTrue()));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsNameReferenceCount
+  public void testIsNameReferenceCount() {
+    assertTrue(NodeUtil.isNameReferenced(
+        parse("function foo(){}"), "foo"));
+    assertTrue(NodeUtil.isNameReferenced(
+        parse("var foo = function(){}"), "foo"));
+    assertFalse(NodeUtil.isNameReferenced(
+        parse("function foo(){}"), "undefined"));
+    assertTrue(NodeUtil.isNameReferenced(
+        parse("undefined"), "undefined"));
+    assertTrue(NodeUtil.isNameReferenced(
+        parse("undefined;function foo(){}(undefined)"), "undefined"));
+
+    assertTrue(NodeUtil.isNameReferenced(
+        parse("goo.foo"), "goo"));
+    assertFalse(NodeUtil.isNameReferenced(
+        parse("goo.foo"), "foo"));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetNameReferenceCount
+  public void testGetNameReferenceCount() {
+    assertEquals(0, NodeUtil.getNameReferenceCount(
+        parse("function foo(){}"), "undefined"));
+    assertEquals(1, NodeUtil.getNameReferenceCount(
+        parse("undefined"), "undefined"));
+    assertEquals(2, NodeUtil.getNameReferenceCount(
+        parse("undefined;function foo(){}(undefined)"), "undefined"));
+
+    assertEquals(1, NodeUtil.getNameReferenceCount(
+        parse("goo.foo"), "goo"));
+    assertEquals(0, NodeUtil.getNameReferenceCount(
+        parse("goo.foo"), "foo"));
+    assertEquals(1, NodeUtil.getNameReferenceCount(
+        parse("function foo(){}"), "foo"));
+    assertEquals(1, NodeUtil.getNameReferenceCount(
+        parse("var foo = function(){}"), "foo"));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetVarsDeclaredInBranch
+  public void testGetVarsDeclaredInBranch() {
+    Compiler compiler = new Compiler();
+
+    assertNodeNames(Sets.newHashSet("foo"),
+        NodeUtil.getVarsDeclaredInBranch(
+            parse("var foo;")));
+    assertNodeNames(Sets.newHashSet("foo","goo"),
+        NodeUtil.getVarsDeclaredInBranch(
+            parse("var foo,goo;")));
+    assertNodeNames(Sets.<String>newHashSet(),
+        NodeUtil.getVarsDeclaredInBranch(
+            parse("foo();")));
+    assertNodeNames(Sets.<String>newHashSet(),
+        NodeUtil.getVarsDeclaredInBranch(
+            parse("function f(){var foo;}")));
+    assertNodeNames(Sets.newHashSet("goo"),
+        NodeUtil.getVarsDeclaredInBranch(
+            parse("var goo;function f(){var foo;}")));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsControlStructureCodeBlock
+  public void testIsControlStructureCodeBlock() {
+    Node root = parse("if (x) foo(); else boo();");
+    Node ifNode = root.getFirstChild();
+
+    Node ifCondition = ifNode.getFirstChild();
+    Node ifCase = ifNode.getFirstChild().getNext();
+    Node elseCase = ifNode.getLastChild();
+
+    assertFalse(NodeUtil.isControlStructureCodeBlock(ifNode, ifCondition));
+    assertTrue(NodeUtil.isControlStructureCodeBlock(ifNode, ifCase));
+    assertTrue(NodeUtil.isControlStructureCodeBlock(ifNode, elseCase));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsFunctionExpression1
+  public void testIsFunctionExpression1() {
+    Node root = parse("(function foo() {})");
+    Node statementNode = root.getFirstChild();
+    assertTrue(statementNode.isExprResult());
+    Node functionNode = statementNode.getFirstChild();
+    assertTrue(functionNode.isFunction());
+    assertTrue(NodeUtil.isFunctionExpression(functionNode));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsFunctionExpression2
+  public void testIsFunctionExpression2() {
+    Node root = parse("function foo() {}");
+    Node functionNode = root.getFirstChild();
+    assertTrue(functionNode.isFunction());
+    assertFalse(NodeUtil.isFunctionExpression(functionNode));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveChildBlock
+  public void testRemoveChildBlock() {
+    
+    Node actual = parse("{{x()}}");
+
+    Node outerBlockNode = actual.getFirstChild();
+    Node innerBlockNode = outerBlockNode.getFirstChild();
+    innerBlockNode.setIsSyntheticBlock(true);
+
+    NodeUtil.removeChild(outerBlockNode, innerBlockNode);
+    String expected = "{{}}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveTryChild1
+  public void testRemoveTryChild1() {
+    
+    Node actual = parse("try {foo()} catch(e) {} finally {}");
+
+    Node tryNode = actual.getFirstChild();
+    Node tryBlock = tryNode.getFirstChild();
+    Node catchBlocks = tryNode.getFirstChild().getNext();
+    Node finallyBlock = tryNode.getLastChild();
+
+    NodeUtil.removeChild(tryNode, finallyBlock);
+    String expected = "try {foo()} catch(e) {}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveTryChild2
+  public void testRemoveTryChild2() {
+    
+    Node actual = parse("try {foo()} catch(e) {} finally {}");
+
+    Node tryNode = actual.getFirstChild();
+    Node tryBlock = tryNode.getFirstChild();
+    Node catchBlocks = tryNode.getFirstChild().getNext();
+
+    NodeUtil.removeChild(tryNode, tryBlock);
+    String expected = "try {} catch(e) {} finally {}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveTryChild3
+  public void testRemoveTryChild3() {
+    
+    Node actual = parse("try {foo()} catch(e) {} finally {}");
+
+    Node tryNode = actual.getFirstChild();
+    Node tryBlock = tryNode.getFirstChild();
+    Node catchBlocks = tryNode.getFirstChild().getNext();
+    Node catchBlock = catchBlocks.getFirstChild();
+    Node finallyBlock = tryNode.getLastChild();
+
+    NodeUtil.removeChild(catchBlocks, catchBlock);
+    String expected = "try {foo()} finally {}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveTryChild4
+  public void testRemoveTryChild4() {
+    
+    Node actual = parse("try {foo()} catch(e) {} finally {}");
+
+    Node tryNode = actual.getFirstChild();
+    Node tryBlock = tryNode.getFirstChild();
+    Node catchBlocks = tryNode.getFirstChild().getNext();
+    Node catchBlock = catchBlocks.getFirstChild();
+    Node finallyBlock = tryNode.getLastChild();
+
+    NodeUtil.removeChild(tryNode, catchBlocks);
+    String expected = "try {foo()} finally {}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveTryChild5
+  public void testRemoveTryChild5() {
+    Node actual = parse("try {foo()} catch(e) {} finally {}");
+
+    Node tryNode = actual.getFirstChild();
+    Node tryBlock = tryNode.getFirstChild();
+    Node catchBlocks = tryNode.getFirstChild().getNext();
+    Node catchBlock = catchBlocks.getFirstChild();
+    Node finallyBlock = tryNode.getLastChild();
+
+    NodeUtil.removeChild(catchBlocks, catchBlock);
+    String expected = "try {foo()} finally {}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveVarChild
+  public void testRemoveVarChild() {
+    Compiler compiler = new Compiler();
+
+    
+    Node actual = parse("var foo, goo, hoo");
+
+    Node varNode = actual.getFirstChild();
+    Node nameNode = varNode.getFirstChild();
+
+    NodeUtil.removeChild(varNode, nameNode);
+    String expected = "var goo, hoo";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+
+    
+    actual = parse("var foo, goo, hoo");
+
+    varNode = actual.getFirstChild();
+    nameNode = varNode.getFirstChild().getNext();
+
+    NodeUtil.removeChild(varNode, nameNode);
+    expected = "var foo, hoo";
+    difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+
+    
+    actual = parse("var foo, hoo");
+
+    varNode = actual.getFirstChild();
+    nameNode = varNode.getFirstChild().getNext();
+
+    NodeUtil.removeChild(varNode, nameNode);
+    expected = "var foo";
+    difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+
+    
+    actual = parse("var hoo");
+
+    varNode = actual.getFirstChild();
+    nameNode = varNode.getFirstChild();
+
+    NodeUtil.removeChild(varNode, nameNode);
+    expected = "";
+    difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveLabelChild1
+  public void testRemoveLabelChild1() {
+    Compiler compiler = new Compiler();
+
+    
+    Node actual = parse("foo: goo()");
+
+    Node labelNode = actual.getFirstChild();
+    Node callExpressNode = labelNode.getLastChild();
+
+    NodeUtil.removeChild(labelNode, callExpressNode);
+    String expected = "";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveLabelChild2
+  public void testRemoveLabelChild2() {
+    
+    Node actual = parse("achoo: foo: goo()");
+
+    Node labelNode = actual.getFirstChild();
+    Node callExpressNode = labelNode.getLastChild();
+
+    NodeUtil.removeChild(labelNode, callExpressNode);
+    String expected = "";
+    String difference = parse(expected).checkTreeEquals(actual);
+    if (difference != null) {
+      assertTrue("Nodes do not match:\n" + difference, false);
+    }
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testRemoveForChild
+  public void testRemoveForChild() {
+    Compiler compiler = new Compiler();
+
+    
+    Node actual = parse("for(var a=0;a<0;a++)foo()");
+
+    Node forNode = actual.getFirstChild();
+    Node child = forNode.getFirstChild();
+
+    NodeUtil.removeChild(forNode, child);
+    String expected = "for(;a<0;a++)foo()";
+    String difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+
+    
+    actual = parse("for(var a=0;a<0;a++)foo()");
+
+    forNode = actual.getFirstChild();
+    child = forNode.getFirstChild().getNext();
+
+    NodeUtil.removeChild(forNode, child);
+    expected = "for(var a=0;;a++)foo()";
+    difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+
+    
+    actual = parse("for(var a=0;a<0;a++)foo()");
+
+    forNode = actual.getFirstChild();
+    child = forNode.getFirstChild().getNext().getNext();
+
+    NodeUtil.removeChild(forNode, child);
+    expected = "for(var a=0;a<0;)foo()";
+    difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+
+    
+    actual = parse("for(var a=0;a<0;a++)foo()");
+
+    forNode = actual.getFirstChild();
+    child = forNode.getLastChild();
+
+    NodeUtil.removeChild(forNode, child);
+    expected = "for(var a=0;a<0;a++);";
+    difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+
+    
+    actual = parse("for(a in ack)foo();");
+
+    forNode = actual.getFirstChild();
+    child = forNode.getLastChild();
+
+    NodeUtil.removeChild(forNode, child);
+    expected = "for(a in ack);";
+    difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testMergeBlock1
+  public void testMergeBlock1() {
+    Compiler compiler = new Compiler();
+
+    
+    Node actual = parse("{{a();b();}}");
+
+    Node parentBlock = actual.getFirstChild();
+    Node childBlock = parentBlock.getFirstChild();
+
+    assertTrue(NodeUtil.tryMergeBlock(childBlock));
+    String expected = "{a();b();}";
+    String difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testMergeBlock2
+  public void testMergeBlock2() {
+    Compiler compiler = new Compiler();
+
+    
+    Node actual = parse("foo:{a();}");
+
+    Node parentLabel = actual.getFirstChild();
+    Node childBlock = parentLabel.getLastChild();
+
+    assertFalse(NodeUtil.tryMergeBlock(childBlock));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testMergeBlock3
+  public void testMergeBlock3() {
+    Compiler compiler = new Compiler();
+
+    
+    String code = "foo:{a();boo()}";
+    Node actual = parse("foo:{a();boo()}");
+
+    Node parentLabel = actual.getFirstChild();
+    Node childBlock = parentLabel.getLastChild();
+
+    assertFalse(NodeUtil.tryMergeBlock(childBlock));
+    String expected = code;
+    String difference = parse(expected).checkTreeEquals(actual);
+    assertNull("Nodes do not match:\n" + difference, difference);
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetSourceName
+  public void testGetSourceName() {
+    Node n = new Node(Token.BLOCK);
+    Node parent = new Node(Token.BLOCK, n);
+    parent.putProp(Node.SOURCENAME_PROP, "foo");
+    assertEquals("foo", NodeUtil.getSourceName(n));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testLocalValue1
+  public void testLocalValue1() throws Exception {
+    
+    assertFalse(testLocalValue("x"));
+    assertFalse(testLocalValue("x()"));
+    assertFalse(testLocalValue("this"));
+    assertFalse(testLocalValue("arguments"));
+
+    
+    
+    assertFalse(testLocalValue("new x()"));
+
+    
+    assertFalse(testLocalValue("(new x()).y"));
+    assertFalse(testLocalValue("(new x())['y']"));
+
+    
+    assertTrue(testLocalValue("null"));
+    assertTrue(testLocalValue("undefined"));
+    assertTrue(testLocalValue("Infinity"));
+    assertTrue(testLocalValue("NaN"));
+    assertTrue(testLocalValue("1"));
+    assertTrue(testLocalValue("'a'"));
+    assertTrue(testLocalValue("true"));
+    assertTrue(testLocalValue("false"));
+    assertTrue(testLocalValue("[]"));
+    assertTrue(testLocalValue("{}"));
+
+    
+    assertTrue(testLocalValue("[x]"));
+    assertTrue(testLocalValue("{'a':x}"));
+
+    
+    assertTrue(testLocalValue("++x"));
+    assertTrue(testLocalValue("--x"));
+
+    
+    assertFalse(testLocalValue("x++"));
+    assertFalse(testLocalValue("x--"));
+
+    
+    assertTrue(testLocalValue("x=1"));
+    assertFalse(testLocalValue("x=[]"));
+    assertFalse(testLocalValue("x=y"));
+    
+    
+    assertTrue(testLocalValue("x+=y"));
+    assertTrue(testLocalValue("x*=y"));
+    
+    
+    assertTrue(testLocalValue("x==y"));
+    assertTrue(testLocalValue("x!=y"));
+    assertTrue(testLocalValue("x>y"));
+    
+    assertTrue(testLocalValue("(1,2)"));
+    assertTrue(testLocalValue("(x,1)"));
+    assertFalse(testLocalValue("(x,y)"));
+
+    
+    assertTrue(testLocalValue("1||2"));
+    assertFalse(testLocalValue("x||1"));
+    assertFalse(testLocalValue("x||y"));
+    assertFalse(testLocalValue("1||y"));
+
+    
+    assertTrue(testLocalValue("1&&2"));
+    assertFalse(testLocalValue("x&&1"));
+    assertFalse(testLocalValue("x&&y"));
+    assertFalse(testLocalValue("1&&y"));
+
+    
+    assertTrue(testLocalValue("x?1:2"));
+    assertFalse(testLocalValue("x?x:2"));
+    assertFalse(testLocalValue("x?1:x"));
+    assertFalse(testLocalValue("x?x:y"));
+
+    
+    assertTrue(testLocalValue("!y"));
+    assertTrue(testLocalValue("~y"));
+    assertTrue(testLocalValue("y + 1"));
+    assertTrue(testLocalValue("y + z"));
+    assertTrue(testLocalValue("y * z"));
+
+    assertTrue(testLocalValue("'a' in x"));
+    assertTrue(testLocalValue("typeof x"));
+    assertTrue(testLocalValue("x instanceof y"));
+
+    assertTrue(testLocalValue("void x"));
+    assertTrue(testLocalValue("void 0"));
+
+    assertFalse(testLocalValue("{}.x"));
+
+    assertTrue(testLocalValue("{}.toString()"));
+    assertTrue(testLocalValue("o.toString()"));
+
+    assertFalse(testLocalValue("o.valueOf()"));
+
+    assertTrue(testLocalValue("delete a.b"));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testLocalValue2
+  public void testLocalValue2() {
+    Node newExpr = getNode("new x()");
+    assertFalse(NodeUtil.evaluatesToLocalValue(newExpr));
+
+    Preconditions.checkState(newExpr.isNew());
+    Node.SideEffectFlags flags = new Node.SideEffectFlags();
+
+    flags.clearAllFlags();
+    newExpr.setSideEffectFlags(flags.valueOf());
+
+    assertTrue(NodeUtil.evaluatesToLocalValue(newExpr));
+
+    flags.clearAllFlags();
+    flags.setMutatesThis();
+    newExpr.setSideEffectFlags(flags.valueOf());
+
+    assertTrue(NodeUtil.evaluatesToLocalValue(newExpr));
+
+    flags.clearAllFlags();
+    flags.setReturnsTainted();
+    newExpr.setSideEffectFlags(flags.valueOf());
+
+    assertTrue(NodeUtil.evaluatesToLocalValue(newExpr));
+
+    flags.clearAllFlags();
+    flags.setThrows();
+    newExpr.setSideEffectFlags(flags.valueOf());
+
+    assertFalse(NodeUtil.evaluatesToLocalValue(newExpr));
+
+    flags.clearAllFlags();
+    flags.setMutatesArguments();
+    newExpr.setSideEffectFlags(flags.valueOf());
+
+    assertFalse(NodeUtil.evaluatesToLocalValue(newExpr));
+
+    flags.clearAllFlags();
+    flags.setMutatesGlobalState();
+    newExpr.setSideEffectFlags(flags.valueOf());
+
+    assertFalse(NodeUtil.evaluatesToLocalValue(newExpr));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testCallSideEffects
+  public void testCallSideEffects() {
+    Node callExpr = getNode("new x().method()");
+    assertTrue(NodeUtil.functionCallHasSideEffects(callExpr));
+
+    Node newExpr = callExpr.getFirstChild().getFirstChild();
+    Preconditions.checkState(newExpr.isNew());
+    Node.SideEffectFlags flags = new Node.SideEffectFlags();
+
+    
+    flags.clearAllFlags();
+    newExpr.setSideEffectFlags(flags.valueOf());
+    flags.clearAllFlags();
+    callExpr.setSideEffectFlags(flags.valueOf());
+
+    assertTrue(NodeUtil.evaluatesToLocalValue(callExpr));
+    assertFalse(NodeUtil.functionCallHasSideEffects(callExpr));
+    assertFalse(NodeUtil.mayHaveSideEffects(callExpr));
+
+    
+    flags.clearAllFlags();
+    newExpr.setSideEffectFlags(flags.valueOf());
+    flags.clearAllFlags();
+    flags.setMutatesThis();
+    callExpr.setSideEffectFlags(flags.valueOf());
+
+    assertTrue(NodeUtil.evaluatesToLocalValue(callExpr));
+    assertFalse(NodeUtil.functionCallHasSideEffects(callExpr));
+    assertFalse(NodeUtil.mayHaveSideEffects(callExpr));
+
+    
+    flags.clearAllFlags();
+    newExpr.setSideEffectFlags(flags.valueOf());
+    flags.clearAllFlags();
+    flags.setMutatesThis();
+    flags.setReturnsTainted();
+    callExpr.setSideEffectFlags(flags.valueOf());
+
+    assertFalse(NodeUtil.evaluatesToLocalValue(callExpr));
+    assertFalse(NodeUtil.functionCallHasSideEffects(callExpr));
+    assertFalse(NodeUtil.mayHaveSideEffects(callExpr));
+
+    
+    flags.clearAllFlags();
+    newExpr.setSideEffectFlags(flags.valueOf());
+    flags.clearAllFlags();
+    flags.setReturnsTainted();
+    callExpr.setSideEffectFlags(flags.valueOf());
+
+    assertFalse(NodeUtil.evaluatesToLocalValue(callExpr));
+    assertFalse(NodeUtil.functionCallHasSideEffects(callExpr));
+    assertFalse(NodeUtil.mayHaveSideEffects(callExpr));
+
+    
+    
+    flags.clearAllFlags();
+    flags.setMutatesGlobalState();
+    newExpr.setSideEffectFlags(flags.valueOf());
+    flags.clearAllFlags();
+    callExpr.setSideEffectFlags(flags.valueOf());
+
+    assertTrue(NodeUtil.evaluatesToLocalValue(callExpr));
+    assertFalse(NodeUtil.functionCallHasSideEffects(callExpr));
+    assertTrue(NodeUtil.mayHaveSideEffects(callExpr));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testValidDefine
+  public void testValidDefine() {
+    assertTrue(testValidDefineValue("1"));
+    assertTrue(testValidDefineValue("-3"));
+    assertTrue(testValidDefineValue("true"));
+    assertTrue(testValidDefineValue("false"));
+    assertTrue(testValidDefineValue("'foo'"));
+
+    assertFalse(testValidDefineValue("x"));
+    assertFalse(testValidDefineValue("null"));
+    assertFalse(testValidDefineValue("undefined"));
+    assertFalse(testValidDefineValue("NaN"));
+
+    assertTrue(testValidDefineValue("!true"));
+    assertTrue(testValidDefineValue("-true"));
+    assertTrue(testValidDefineValue("1 & 8"));
+    assertTrue(testValidDefineValue("1 + 8"));
+    assertTrue(testValidDefineValue("'a' + 'b'"));
+
+    assertFalse(testValidDefineValue("1 & foo"));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetNumberValue
+  public void testGetNumberValue() {
+    
+    assertEquals(1.0, NodeUtil.getNumberValue(getNode("'\\uFEFF1'")));
+    assertEquals(0.0, NodeUtil.getNumberValue(getNode("''")));
+    assertEquals(0.0, NodeUtil.getNumberValue(getNode("' '")));
+    assertEquals(0.0, NodeUtil.getNumberValue(getNode("' \\t'")));
+    assertEquals(0.0, NodeUtil.getNumberValue(getNode("'+0'")));
+    assertEquals(-0.0, NodeUtil.getNumberValue(getNode("'-0'")));
+    assertEquals(2.0, NodeUtil.getNumberValue(getNode("'+2'")));
+    assertEquals(-1.6, NodeUtil.getNumberValue(getNode("'-1.6'")));
+    assertEquals(16.0, NodeUtil.getNumberValue(getNode("'16'")));
+    assertEquals(16.0, NodeUtil.getNumberValue(getNode("' 16 '")));
+    assertEquals(16.0, NodeUtil.getNumberValue(getNode("' 16 '")));
+    assertEquals(12300.0, NodeUtil.getNumberValue(getNode("'123e2'")));
+    assertEquals(12300.0, NodeUtil.getNumberValue(getNode("'123E2'")));
+    assertEquals(1.23, NodeUtil.getNumberValue(getNode("'123e-2'")));
+    assertEquals(1.23, NodeUtil.getNumberValue(getNode("'123E-2'")));
+    assertEquals(-1.23, NodeUtil.getNumberValue(getNode("'-123e-2'")));
+    assertEquals(-1.23, NodeUtil.getNumberValue(getNode("'-123E-2'")));
+    assertEquals(1.23, NodeUtil.getNumberValue(getNode("'+123e-2'")));
+    assertEquals(1.23, NodeUtil.getNumberValue(getNode("'+123E-2'")));
+    assertEquals(12300.0, NodeUtil.getNumberValue(getNode("'+123e+2'")));
+    assertEquals(12300.0, NodeUtil.getNumberValue(getNode("'+123E+2'")));
+
+    assertEquals(15.0, NodeUtil.getNumberValue(getNode("'0xf'")));
+    assertEquals(15.0, NodeUtil.getNumberValue(getNode("'0xF'")));
+
+    
+    
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'-0xf'")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'-0xF'")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'+0xf'")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'+0xF'")));
+
+    assertEquals(16.0, NodeUtil.getNumberValue(getNode("'0X10'")));
+    assertEquals(Double.NaN, NodeUtil.getNumberValue(getNode("'0X10.8'")));
+    assertEquals(77.0, NodeUtil.getNumberValue(getNode("'077'")));
+    assertEquals(-77.0, NodeUtil.getNumberValue(getNode("'-077'")));
+    assertEquals(-77.5, NodeUtil.getNumberValue(getNode("'-077.5'")));
+    assertEquals(
+        Double.NEGATIVE_INFINITY,
+        NodeUtil.getNumberValue(getNode("'-Infinity'")));
+    assertEquals(
+        Double.POSITIVE_INFINITY,
+        NodeUtil.getNumberValue(getNode("'Infinity'")));
+    assertEquals(
+        Double.POSITIVE_INFINITY,
+        NodeUtil.getNumberValue(getNode("'+Infinity'")));
+    
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'-infinity'")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'infinity'")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("'+infinity'")));
+
+    assertEquals(Double.NaN, NodeUtil.getNumberValue(getNode("'NaN'")));
+    assertEquals(
+        Double.NaN, NodeUtil.getNumberValue(getNode("'some unknown string'")));
+    assertEquals(Double.NaN, NodeUtil.getNumberValue(getNode("'123 blah'")));
+
+    
+    assertEquals(1.0, NodeUtil.getNumberValue(getNode("1")));
+    
+    assertEquals(-1.0, NodeUtil.getNumberValue(getNode("-1")));
+    
+    assertEquals(null, NodeUtil.getNumberValue(getNode("+1")));
+    assertEquals(22.0, NodeUtil.getNumberValue(getNode("22")));
+    assertEquals(18.0, NodeUtil.getNumberValue(getNode("022")));
+    assertEquals(34.0, NodeUtil.getNumberValue(getNode("0x22")));
+
+    assertEquals(
+        1.0, NodeUtil.getNumberValue(getNode("true")));
+    assertEquals(
+        0.0, NodeUtil.getNumberValue(getNode("false")));
+    assertEquals(
+        0.0, NodeUtil.getNumberValue(getNode("null")));
+    assertEquals(
+        Double.NaN, NodeUtil.getNumberValue(getNode("void 0")));
+    assertEquals(
+        Double.NaN, NodeUtil.getNumberValue(getNode("void f")));
+    
+    assertEquals(
+        null, NodeUtil.getNumberValue(getNode("void f()")));
+    assertEquals(
+        Double.NaN, NodeUtil.getNumberValue(getNode("NaN")));
+    assertEquals(
+        Double.POSITIVE_INFINITY,
+        NodeUtil.getNumberValue(getNode("Infinity")));
+    assertEquals(
+        Double.NEGATIVE_INFINITY,
+        NodeUtil.getNumberValue(getNode("-Infinity")));
+
+    
+    assertEquals(null, NodeUtil.getNumberValue(getNode("infinity")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("-infinity")));
+
+    
+    assertEquals(null, NodeUtil.getNumberValue(getNode("x")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("x.y")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("1/2")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("1-2")));
+    assertEquals(null, NodeUtil.getNumberValue(getNode("+1")));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsNumbericResult
+  public void testIsNumbericResult() {
+    assertTrue(NodeUtil.isNumericResult(getNode("1")));
+    assertFalse(NodeUtil.isNumericResult(getNode("true")));
+    assertTrue(NodeUtil.isNumericResult(getNode("+true")));
+    assertTrue(NodeUtil.isNumericResult(getNode("+1")));
+    assertTrue(NodeUtil.isNumericResult(getNode("-1")));
+    assertTrue(NodeUtil.isNumericResult(getNode("-Infinity")));
+    assertTrue(NodeUtil.isNumericResult(getNode("Infinity")));
+    assertTrue(NodeUtil.isNumericResult(getNode("NaN")));
+    assertFalse(NodeUtil.isNumericResult(getNode("undefined")));
+    assertFalse(NodeUtil.isNumericResult(getNode("void 0")));
+
+    assertTrue(NodeUtil.isNumericResult(getNode("a << b")));
+    assertTrue(NodeUtil.isNumericResult(getNode("a >> b")));
+    assertTrue(NodeUtil.isNumericResult(getNode("a >>> b")));
+
+    assertFalse(NodeUtil.isNumericResult(getNode("a == b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a != b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a === b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a !== b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a < b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a > b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a <= b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a >= b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a in b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a instanceof b")));
+
+    assertFalse(NodeUtil.isNumericResult(getNode("'a'")));
+    assertFalse(NodeUtil.isNumericResult(getNode("'a'+b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a+'b'")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a+b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a()")));
+    assertFalse(NodeUtil.isNumericResult(getNode("''.a")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a.b")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a.b()")));
+    assertFalse(NodeUtil.isNumericResult(getNode("a().b()")));
+    assertFalse(NodeUtil.isNumericResult(getNode("new a()")));
+
+    
+    assertFalse(NodeUtil.isNumericResult(getNode("([1,2])")));
+    assertFalse(NodeUtil.isNumericResult(getNode("({a:1})")));
+
+    
+    assertTrue(NodeUtil.isNumericResult(getNode("1 && 2")));
+    assertTrue(NodeUtil.isNumericResult(getNode("1 || 2")));
+    assertTrue(NodeUtil.isNumericResult(getNode("a ? 2 : 3")));
+    assertTrue(NodeUtil.isNumericResult(getNode("a,1")));
+    assertTrue(NodeUtil.isNumericResult(getNode("a=1")));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testIsBooleanResult
+  public void testIsBooleanResult() {
+    assertFalse(NodeUtil.isBooleanResult(getNode("1")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("true")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("+true")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("+1")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("-1")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("-Infinity")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("Infinity")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("NaN")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("undefined")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("void 0")));
+
+    assertFalse(NodeUtil.isBooleanResult(getNode("a << b")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a >> b")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a >>> b")));
+
+    assertTrue(NodeUtil.isBooleanResult(getNode("a == b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a != b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a === b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a !== b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a < b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a > b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a <= b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a >= b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a in b")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a instanceof b")));
+
+    assertFalse(NodeUtil.isBooleanResult(getNode("'a'")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("'a'+b")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a+'b'")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a+b")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a()")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("''.a")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a.b")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a.b()")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a().b()")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("new a()")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("delete a")));
+
+    
+    assertFalse(NodeUtil.isBooleanResult(getNode("([true,false])")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("({a:true})")));
+
+    
+    assertTrue(NodeUtil.isBooleanResult(getNode("true && false")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("true || false")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a ? true : false")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a,true")));
+    assertTrue(NodeUtil.isBooleanResult(getNode("a=true")));
+    assertFalse(NodeUtil.isBooleanResult(getNode("a=1")));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testMayBeString
+  public void testMayBeString() {
+    assertFalse(NodeUtil.mayBeString(getNode("1")));
+    assertFalse(NodeUtil.mayBeString(getNode("true")));
+    assertFalse(NodeUtil.mayBeString(getNode("+true")));
+    assertFalse(NodeUtil.mayBeString(getNode("+1")));
+    assertFalse(NodeUtil.mayBeString(getNode("-1")));
+    assertFalse(NodeUtil.mayBeString(getNode("-Infinity")));
+    assertFalse(NodeUtil.mayBeString(getNode("Infinity")));
+    assertFalse(NodeUtil.mayBeString(getNode("NaN")));
+    assertFalse(NodeUtil.mayBeString(getNode("undefined")));
+    assertFalse(NodeUtil.mayBeString(getNode("void 0")));
+    assertFalse(NodeUtil.mayBeString(getNode("null")));
+
+    assertFalse(NodeUtil.mayBeString(getNode("a << b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a >> b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a >>> b")));
+
+    assertFalse(NodeUtil.mayBeString(getNode("a == b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a != b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a === b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a !== b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a < b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a > b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a <= b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a >= b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a in b")));
+    assertFalse(NodeUtil.mayBeString(getNode("a instanceof b")));
+
+    assertTrue(NodeUtil.mayBeString(getNode("'a'")));
+    assertTrue(NodeUtil.mayBeString(getNode("'a'+b")));
+    assertTrue(NodeUtil.mayBeString(getNode("a+'b'")));
+    assertTrue(NodeUtil.mayBeString(getNode("a+b")));
+    assertTrue(NodeUtil.mayBeString(getNode("a()")));
+    assertTrue(NodeUtil.mayBeString(getNode("''.a")));
+    assertTrue(NodeUtil.mayBeString(getNode("a.b")));
+    assertTrue(NodeUtil.mayBeString(getNode("a.b()")));
+    assertTrue(NodeUtil.mayBeString(getNode("a().b()")));
+    assertTrue(NodeUtil.mayBeString(getNode("new a()")));
+
+    
+    assertFalse(NodeUtil.mayBeString(getNode("1 && 2")));
+    assertFalse(NodeUtil.mayBeString(getNode("1 || 2")));
+    assertFalse(NodeUtil.mayBeString(getNode("1 ? 2 : 3")));
+    assertFalse(NodeUtil.mayBeString(getNode("1,2")));
+    assertFalse(NodeUtil.mayBeString(getNode("a=1")));
+    assertFalse(NodeUtil.mayBeString(getNode("1+1")));
+    assertFalse(NodeUtil.mayBeString(getNode("true+true")));
+    assertFalse(NodeUtil.mayBeString(getNode("null+null")));
+    assertFalse(NodeUtil.mayBeString(getNode("NaN+NaN")));
+
+    
+    assertTrue(NodeUtil.mayBeString(getNode("([1,2])")));
+    assertTrue(NodeUtil.mayBeString(getNode("({a:1})")));
+    assertTrue(NodeUtil.mayBeString(getNode("({}+1)")));
+    assertTrue(NodeUtil.mayBeString(getNode("(1+{})")));
+    assertTrue(NodeUtil.mayBeString(getNode("([]+1)")));
+    assertTrue(NodeUtil.mayBeString(getNode("(1+[])")));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testValidNames
+  public void testValidNames() {
+    assertTrue(NodeUtil.isValidPropertyName("a"));
+    assertTrue(NodeUtil.isValidPropertyName("a3"));
+    assertFalse(NodeUtil.isValidPropertyName("3a"));
+    assertFalse(NodeUtil.isValidPropertyName("a."));
+    assertFalse(NodeUtil.isValidPropertyName(".a"));
+    assertFalse(NodeUtil.isValidPropertyName("a.b"));
+    assertFalse(NodeUtil.isValidPropertyName("true"));
+    assertFalse(NodeUtil.isValidPropertyName("a.true"));
+    assertFalse(NodeUtil.isValidPropertyName("a..b"));
+
+    assertTrue(NodeUtil.isValidSimpleName("a"));
+    assertTrue(NodeUtil.isValidSimpleName("a3"));
+    assertFalse(NodeUtil.isValidSimpleName("3a"));
+    assertFalse(NodeUtil.isValidSimpleName("a."));
+    assertFalse(NodeUtil.isValidSimpleName(".a"));
+    assertFalse(NodeUtil.isValidSimpleName("a.b"));
+    assertFalse(NodeUtil.isValidSimpleName("true"));
+    assertFalse(NodeUtil.isValidSimpleName("a.true"));
+    assertFalse(NodeUtil.isValidSimpleName("a..b"));
+
+    assertTrue(NodeUtil.isValidQualifiedName("a"));
+    assertTrue(NodeUtil.isValidQualifiedName("a3"));
+    assertFalse(NodeUtil.isValidQualifiedName("3a"));
+    assertFalse(NodeUtil.isValidQualifiedName("a."));
+    assertFalse(NodeUtil.isValidQualifiedName(".a"));
+    assertTrue(NodeUtil.isValidQualifiedName("a.b"));
+    assertFalse(NodeUtil.isValidQualifiedName("true"));
+    assertFalse(NodeUtil.isValidQualifiedName("a.true"));
+    assertFalse(NodeUtil.isValidQualifiedName("a..b"));
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetNearestFunctionName
+  public void testGetNearestFunctionName() {
+    testFunctionName("function a() {}", "a");
+    testFunctionName("(function a() {})", "a");
+    testFunctionName("({a:function () {}})", "a");
+    testFunctionName("({get a() {}})", "a");
+    testFunctionName("({set a(b) {}})", "a");
+    testFunctionName("({set a(b) {}})", "a");
+    testFunctionName("({1:function () {}})", "1");
+    testFunctionName("var a = function a() {}", "a");
+    testFunctionName("var a;a = function a() {}", "a");
+    testFunctionName("var o;o.a = function a() {}", "o.a");
+    testFunctionName("this.a = function a() {}", "this.a");
+  }
+
+// com.google.javascript.jscomp.NodeUtilTest::testGetBestLValue
+  public void testGetBestLValue() {
+    assertEquals("x", getFunctionLValue("var x = function() {};"));
+    assertEquals("x", getFunctionLValue("x = function() {};"));
+    assertEquals("x", getFunctionLValue("function x() {};"));
+    assertEquals("x", getFunctionLValue("var x = y ? z : function() {};"));
+    assertEquals("x", getFunctionLValue("var x = y ? function() {} : z;"));
+    assertEquals("x", getFunctionLValue("var x = y && function() {};"));
+    assertEquals("x", getFunctionLValue("var x = y || function() {};"));
+    assertEquals("x", getFunctionLValue("var x = (y, function() {});"));
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testSplitVar
+  public void testSplitVar() {
+    testSame("var a");
+    test("var a, b",
+         "var a; var b");
+    test("var a, b, c",
+         "var a; var b; var c");
+    testSame("var a = 0 ");
+    test("var a = 0 , b = foo()",
+         "var a = 0; var b = foo()");
+    test("var a = 0, b = 1, c = 2",
+         "var a = 0; var b = 1; var c = 2");
+    test("var a = foo(1), b = foo(2), c = foo(3)",
+         "var a = foo(1); var b = foo(2); var c = foo(3)");
+
+    
+    test("for(var a = 0, b = foo(1), c = 1; c < b; c++) foo(2)",
+         "var a = 0; var b = foo(1); var c = 1; for(; c < b; c++) foo(2)");
+
+    
+    test("for(;;) var b = foo(1), c = foo(2);",
+        "for(;;){var b = foo(1); var c = foo(2)}");
+    test("for(;;){var b = foo(1), c = foo(2);}",
+         "for(;;){var b = foo(1); var c = foo(2)}");
+
+    test("try{var b = foo(1), c = foo(2);} finally foo(3);",
+         "try{var b = foo(1); var c = foo(2)} finally foo(3);");
+    test("try{var b = foo(1),c = foo(2);} finally;",
+         "try{var b = foo(1); var c = foo(2)} finally;");
+    test("try{foo(0);} finally var b = foo(1), c = foo(2);",
+         "try{foo(0);} finally {var b = foo(1); var c = foo(2)}");
+
+    test("switch(a) {default: var b = foo(1), c = foo(2); break;}",
+         "switch(a) {default: var b = foo(1); var c = foo(2); break;}");
+
+    test("do var a = foo(1), b; while(false);",
+         "do{var a = foo(1); var b} while(false);");
+    test("a:var a,b,c;",
+         "a:{ var a;var b; var c; }");
+    test("a:for(var a,b,c;;);",
+         "var a;var b; var c;a:for(;;);");
+    test("if (true) a:var a,b;",
+         "if (true)a:{ var a; var b; }");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testDuplicateVarInExterns
+  public void testDuplicateVarInExterns() {
+    test("var extern;",
+         " var extern = 3;", "var extern = 3;",
+         null, null);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testUnhandled
+  public void testUnhandled() {
+    testSame("var x = y = 1");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testFor
+  public void testFor() {
+    
+    test("for(a = 0; a < 2 ; a++) foo();",
+         "a = 0; for(; a < 2 ; a++) foo()");
+    
+    test("for(var a = 0; c < b ; c++) foo()",
+         "var a = 0; for(; c < b ; c++) foo()");
+
+    
+    test("a:for(var a = 0; c < b ; c++) foo()",
+         "var a = 0; a:for(; c < b ; c++) foo()");
+    
+    test("a:b:for(var a = 0; c < b ; c++) foo()",
+         "var a = 0; a:b:for(; c < b ; c++) foo()");
+
+    
+    test("if(x) for(var a = 0; c < b ; c++) foo()",
+         "if(x){var a = 0; for(; c < b ; c++) foo()}");
+
+    
+    test("for(init(); a < 2 ; a++) foo();",
+         "init(); for(; a < 2 ; a++) foo()");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testForIn1
+  public void testForIn1() {
+    
+    testSame("for(a in b) foo();");
+
+    
+    test("for(var a in b) foo()",
+         "var a; for(a in b) foo()");
+
+    
+    test("a:for(var a in b) foo()",
+         "var a; a:for(a in b) foo()");
+    
+    test("a:b:for(var a in b) foo()",
+         "var a; a:b:for(a in b) foo()");
+
+    
+    test("if (x) for(var a in b) foo()",
+         "if (x) { var a; for(a in b) foo() }");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testForIn2
+  public void testForIn2() {
+    
+    test("for(var a = foo() in b) foo()",
+         "var a = foo(); for(a in b) foo()");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testWhile
+  public void testWhile() {
+    
+    test("while(c < b) foo()",
+         "for(; c < b;) foo()");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testMoveFunctions1
+  public void testMoveFunctions1() throws Exception {
+    test("function f() { if (x) return; foo(); function foo() {} }",
+         "function f() {function foo() {} if (x) return; foo(); }");
+    test("function f() { " +
+            "function foo() {} " +
+            "if (x) return;" +
+            "foo(); " +
+            "function bar() {} " +
+         "}",
+         "function f() {" +
+           "function foo() {}" +
+           "function bar() {}" +
+           "if (x) return;" +
+           "foo();" +
+         "}");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testMoveFunctions2
+  public void testMoveFunctions2() throws Exception {
+    testSame("function f() { function foo() {} }");
+    test("function f() { f(); a:function bar() {} }",
+         "function f() { f(); a:{ var bar = function () {} }}");
+    test("function f() { f(); {function bar() {}}}",
+         "function f() { f(); {var bar = function () {}}}");
+    test("function f() { f(); if (true) {function bar() {}}}",
+         "function f() { f(); if (true) {var bar = function () {}}}");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testNormalizeFunctionDeclarations
+  public void testNormalizeFunctionDeclarations() throws Exception {
+    testSame("function f() {}");
+    testSame("var f = function () {}");
+    test("var f = function f() {}",
+         "var f = function f$$1() {}");
+    testSame("var f = function g() {}");
+    test("a:function g() {}",
+         "a:{ var g = function () {} }");
+    test("{function g() {}}",
+         "{var g = function () {}}");
+    testSame("if (function g() {}) {}");
+    test("if (true) {function g() {}}",
+         "if (true) {var g = function () {}}");
+    test("if (true) {} else {function g() {}}",
+         "if (true) {} else {var g = function () {}}");
+    testSame("switch (function g() {}) {}");
+    test("switch (1) { case 1: function g() {}}",
+         "switch (1) { case 1: var g = function () {}}");
+
+    testSameInFunction("function f() {}");
+    testInFunction("f(); a:function g() {}",
+                   "f(); a:{ var g = function () {} }");
+    testInFunction("f(); {function g() {}}",
+                   "f(); {var g = function () {}}");
+    testInFunction("f(); if (true) {function g() {}}",
+                   "f(); if (true) {var g = function () {}}");
+    testInFunction("if (true) {} else {function g() {}}",
+                   "if (true) {} else {var g = function () {}}");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testMakeLocalNamesUnique
+  public void testMakeLocalNamesUnique() {
+    if (!Normalize.MAKE_LOCAL_NAMES_UNIQUE) {
+      return;
+    }
+
+    
+    testSame("var a;");
+
+    
+    testSame("a;");
+
+    
+    test("var a;function foo(a){var b;a}",
+         "var a;function foo(a$$1){var b;a$$1}");
+    test("var a;function foo(){var b;a}function boo(){var b;a}",
+         "var a;function foo(){var b;a}function boo(){var b$$1;a}");
+    test("function foo(a){var b}" +
+         "function boo(a){var b}",
+         "function foo(a){var b}" +
+         "function boo(a$$1){var b$$1}");
+
+    
+    test("var a = function foo(){foo()};var b = function foo(){foo()};",
+         "var a = function foo(){foo()};var b = function foo$$1(){foo$$1()};");
+
+    
+    test("try { } catch(e) {e;}",
+         "try { } catch(e) {e;}");
+    test("try { } catch(e) {e;}; try { } catch(e) {e;}",
+         "try { } catch(e) {e;}; try { } catch(e$$1) {e$$1;}");
+    test("try { } catch(e) {e; try { } catch(e) {e;}};",
+         "try { } catch(e) {e; try { } catch(e$$1) {e$$1;} }; ");
+
+    
+    test("\nvar window;", "var window;");
+
+    
+    test("\nvar window;" +
+         "\nvar window;", "var window;");
+
+    
+    test("function f() {var window}",
+         "function f() {var window$$1}");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testRemoveDuplicateVarDeclarations1
+  public void testRemoveDuplicateVarDeclarations1() {
+    test("function f() { var a; var a }",
+         "function f() { var a; }");
+    test("function f() { var a = 1; var a = 2 }",
+         "function f() { var a = 1; a = 2 }");
+    test("var a = 1; function f(){ var a = 2 }",
+         "var a = 1; function f(){ var a$$1 = 2 }");
+    test("function f() { var a = 1; lable1:var a = 2 }",
+         "function f() { var a = 1; lable1:{a = 2}}");
+    test("function f() { var a = 1; lable1:var a }",
+         "function f() { var a = 1; lable1:{} }");
+    test("function f() { var a = 1; for(var a in b); }",
+         "function f() { var a = 1; for(a in b); }");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testRemoveDuplicateVarDeclarations2
+  public void testRemoveDuplicateVarDeclarations2() {
+    test("var e = 1; function f(){ try {} catch (e) {} var e = 2 }",
+         "var e = 1; function f(){ try {} catch (e$$2) {} var e$$1 = 2 }");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testRemoveDuplicateVarDeclarations3
+  public void testRemoveDuplicateVarDeclarations3() {
+    test("var f = 1; function f(){}",
+         "f = 1; function f(){}");
+    test("var f; function f(){}",
+         "function f(){}");
+    test("if (a) { var f = 1; } else { function f(){} }",
+         "if (a) { var f = 1; } else { f = function (){} }");
+
+    test("function f(){} var f = 1;",
+         "function f(){} f = 1;");
+    test("function f(){} var f;",
+         "function f(){}");
+    test("if (a) { function f(){} } else { var f = 1; }",
+         "if (a) { var f = function (){} } else { f = 1; }");
+
+    
+    
+    test("function f(){} function f(){}",
+         "function f(){} function f(){}",
+         SyntacticScopeCreator.VAR_MULTIPLY_DECLARED_ERROR);
+    test("if (a) { function f(){} } else { function f(){} }",
+         "if (a) { var f = function (){} } else { f = function (){} }");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testRenamingConstants
+  public void testRenamingConstants() {
+    test("var ACONST = 4;var b = ACONST;",
+         "var ACONST = 4; var b = ACONST;");
+
+    test("var a, ACONST = 4;var b = ACONST;",
+         "var a; var ACONST = 4; var b = ACONST;");
+
+    test("var ACONST; ACONST = 4; var b = ACONST;",
+         "var ACONST; ACONST = 4;" +
+         "var b = ACONST;");
+
+    test("var ACONST = new Foo(); var b = ACONST;",
+         "var ACONST = new Foo(); var b = ACONST;");
+
+    test("var aa; aa=1;", "var aa;aa=1");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testSkipRenamingExterns
+  public void testSkipRenamingExterns() {
+    test("var EXTERN; var ext; ext.FOO;", "var b = EXTERN; var c = ext.FOO",
+         "var b = EXTERN; var c = ext.FOO", null, null);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue166a
+  public void testIssue166a() {
+    test("try { throw 1 } catch(e) {  var e=2 }",
+         "try { throw 1 } catch(e) { var e=2 }",
+         Normalize.CATCH_BLOCK_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue166b
+  public void testIssue166b() {
+    test("function a() {" +
+         "try { throw 1 } catch(e) {  var e=2 }" +
+         "};",
+         "function a() {" +
+         "try { throw 1 } catch(e) { var e=2 }" +
+         "}",
+         Normalize.CATCH_BLOCK_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue166c
+  public void testIssue166c() {
+    test("var e = 0; try { throw 1 } catch(e) {" +
+             " var e=2 }",
+         "var e = 0; try { throw 1 } catch(e) { var e=2 }",
+         Normalize.CATCH_BLOCK_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue166d
+  public void testIssue166d() {
+    test("function a() {" +
+         "var e = 0; try { throw 1 } catch(e) {" +
+             " var e=2 }" +
+         "};",
+         "function a() {" +
+         "var e = 0; try { throw 1 } catch(e) { var e=2 }" +
+         "}",
+         Normalize.CATCH_BLOCK_VAR_ERROR);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue166e
+  public void testIssue166e() {
+    test("var e = 2; try { throw 1 } catch(e) {}",
+         "var e = 2; try { throw 1 } catch(e$$1) {}");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue166f
+  public void testIssue166f() {
+    test("function a() {" +
+         "var e = 2; try { throw 1 } catch(e) {}" +
+         "}",
+         "function a() {" +
+         "var e = 2; try { throw 1 } catch(e$$1) {}" +
+         "}");
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIssue
+  public void testIssue() {
+    super.allowExternsChanges(true);
+    test("var a,b,c; var a,b", "a(), b()", "a(), b()", null, null);
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testNormalizeSyntheticCode
+  public void testNormalizeSyntheticCode() {
+    Compiler compiler = new Compiler();
+    compiler.init(
+        Lists.<JSSourceFile>newArrayList(),
+        Lists.<JSSourceFile>newArrayList(), new CompilerOptions());
+    Node code = Normalize.parseAndNormalizeSyntheticCode(
+        compiler, "function f(x) {} function g(x) {}", "prefix_");
+    assertEquals(
+        "function f(x$$prefix_0){}function g(x$$prefix_1){}",
+        compiler.toSource(code));
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testIsConstant
+  public void testIsConstant() throws Exception {
+    testSame("var CONST = 3; var b = CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testPropertyIsConstant1
+  public void testPropertyIsConstant1() throws Exception {
+    testSame("var a = {};a.CONST = 3; var b = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testPropertyIsConstant2
+  public void testPropertyIsConstant2() throws Exception {
+    testSame("var a = {CONST: 3}; var b = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testGetterPropertyIsConstant
+  public void testGetterPropertyIsConstant() throws Exception {
+    testSame("var a = { get CONST() {return 3} }; " +
+             "var b = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testSetterPropertyIsConstant
+  public void testSetterPropertyIsConstant() throws Exception {
+    
+    testSame("var a = { set CONST(b) {throw 'invalid'} }; " +
+             "var c = a.CONST;");
+    Node n = getLastCompiler().getRoot();
+
+    Set<Node> constantNodes = findNodesWithProperty(n, Node.IS_CONSTANT_NAME);
+    assertEquals(2, constantNodes.size());
+    for (Node hasProp : constantNodes) {
+      assertEquals("CONST", hasProp.getString());
+    }
+  }
+
+// com.google.javascript.jscomp.NormalizeTest::testRenamingConstantProperties
+  public void testRenamingConstantProperties() {
+    
+    
+    
+    new WithCollapse().testConstantProperties();
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPostprocessTest::testFooDotBar
+  public void testFooDotBar() {
+    testPass("goog.global, foo.bar", "foo, 'bar'");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPostprocessTest::testFooGetElemBar
+  public void testFooGetElemBar() {
+    testPass("goog.global, foo[bar]", "foo, bar");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPostprocessTest::testFooBar
+  public void testFooBar() {
+    testPass("goog.global, foo$bar", "goog.global, 'foo$bar'");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testDeclaration
+  public void testDeclaration() {
+    test("goog.testing.ObjectPropertyString = function() {}",
+         "JSCompiler_ObjectPropertyString = function() {}");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testFooBar
+  public void testFooBar() {
+    test("new goog.testing.ObjectPropertyString(foo, 'bar')",
+         "new JSCompiler_ObjectPropertyString(goog.global, foo.bar)");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testFooPrototypeBar
+  public void testFooPrototypeBar() {
+    test("new goog.testing.ObjectPropertyString(foo.prototype, 'bar')",
+         "new JSCompiler_ObjectPropertyString(goog.global, " +
+         "foo.prototype.bar)");
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testInvalidNumArgumentsError
+  public void testInvalidNumArgumentsError() {
+    testSame(new String[] {"new goog.testing.ObjectPropertyString()"},
+        ObjectPropertyStringPreprocess.INVALID_NUM_ARGUMENTS_ERROR);
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testQualifedNameExpectedError
+  public void testQualifedNameExpectedError() {
+    testSame(
+        new String[] {
+          "new goog.testing.ObjectPropertyString(foo[a], 'bar')"
+        },
+        ObjectPropertyStringPreprocess.QUALIFIED_NAME_EXPECTED_ERROR);
+  }
+
+// com.google.javascript.jscomp.ObjectPropertyStringPreprocessTest::testStringLiteralExpectedError
+  public void testStringLiteralExpectedError() {
+    testSame(new String[] {"new goog.testing.ObjectPropertyString(foo, bar)"},
+        ObjectPropertyStringPreprocess.STRING_LITERAL_EXPECTED_ERROR);
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testSimple
+  public void testSimple() {
+    test("function foo()   { alert(arguments[0]); }",
+         "function foo(p0) { alert(p0); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoVarArgs
+  public void testNoVarArgs() {
+    testSame("function f(a,b,c) { alert(a + b + c) }");
+
+    test("function f(a,b,c) { alert(arguments[0]) }",
+         "function f(a,b,c) { alert(a) }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testMissingVarArgs
+  public void testMissingVarArgs() {
+    testSame("function f() { alert(arguments[x]) }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testArgumentRefOnNamedParameter
+  public void testArgumentRefOnNamedParameter() {
+    test("function f(a,b) { alert(arguments[0]) }",
+         "function f(a,b) { alert(a) }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoVarArgs
+  public void testTwoVarArgs() {
+    test("function foo(a) { alert(arguments[1] + arguments[2]); }",
+         "function foo(a, p0, p1) { alert(p0 + p1); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoFourArgsTwoUsed
+  public void testTwoFourArgsTwoUsed() {
+    test("function foo() { alert(arguments[0] + arguments[3]); }",
+         "function foo(p0, p1, p2, p3) { alert(p0 + p3); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testOneRequired
+  public void testOneRequired() {
+    test("function foo(req0, var_args) { alert(req0 + arguments[1]); }",
+         "function foo(req0, var_args) { alert(req0 + var_args); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoRequiredSixthVarArgReferenced
+  public void testTwoRequiredSixthVarArgReferenced() {
+    test("function foo(r0, r1, var_args) {alert(r0 + r1 + arguments[5]);}",
+         "function foo(r0, r1, var_args, p0, p1, p2) { alert(r0 + r1 + p2); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoRequiredOneOptionalFifthVarArgReferenced
+  public void testTwoRequiredOneOptionalFifthVarArgReferenced() {
+    test("function foo(r0, r1, opt_1)"
+       + "  {alert(r0 + r1 + opt_1 + arguments[4]);}",
+         "function foo(r0, r1, opt_1, p0, p1)"
+       + "  {alert(r0 + r1 + opt_1 + p1); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testTwoRequiredTwoOptionalSixthVarArgReferenced
+  public void testTwoRequiredTwoOptionalSixthVarArgReferenced() {
+    test("function foo(r0, r1, opt_1, opt_2)"
+       + "  {alert(r0 + r1 + opt_1 + opt_2 + arguments[5]);}",
+         "function foo(r0, r1, opt_1, opt_2, p0, p1)"
+       + "  {alert(r0 + r1 + opt_1 + opt_2 + p1); }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctions
+  public void testInnerFunctions() {
+    test("function f() { function b(  ) { arguments[0]  }}",
+         "function f() { function b(p0) {            p0 }}");
+
+    test("function f(  ) { function b() { }  arguments[0] }",
+         "function f(p0) { function b() { }            p0 }");
+
+    test("function f( )  { arguments[0]; function b(  ) { arguments[0] }}",
+         "function f(p1) {           p1; function b(p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsWithNamedArgumentInInnerFunction
+  public void testInnerFunctionsWithNamedArgumentInInnerFunction() {
+    test("function f() { function b(x   ) { arguments[1] }}",
+         "function f() { function b(x,p0) {           p0 }}");
+
+    test("function f(  ) { function b(x) { }  arguments[0] }",
+         "function f(p0) { function b(x) { }            p0 }");
+
+    test("function f( )  { arguments[0]; function b(x   ) { arguments[1] }}",
+         "function f(p1) {           p1; function b(x,p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsWithNamedArgumentInOutterFunction
+  public void testInnerFunctionsWithNamedArgumentInOutterFunction() {
+    test("function f(x) { function b(  ) { arguments[0] }}",
+         "function f(x) { function b(p0) {           p0 }}");
+
+    test("function f(x   ) { function b() { }  arguments[1] }",
+         "function f(x,p0) { function b() { }            p0 }");
+
+    test("function f(x   ) { arguments[1]; function b(  ) { arguments[0] }}",
+         "function f(x,p1) {           p1; function b(p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsWithNamedArgumentInInnerAndOutterFunction
+  public void testInnerFunctionsWithNamedArgumentInInnerAndOutterFunction() {
+    test("function f(x) { function b(x   ) { arguments[1] }}",
+         "function f(x) { function b(x,p0) {           p0 }}");
+
+    test("function f(x   ) { function b(x) { }  arguments[1] }",
+         "function f(x,p0) { function b(x) { }            p0 }");
+
+    test("function f(x   ) { arguments[1]; function b(x   ) { arguments[1] }}",
+         "function f(x,p1) {           p1; function b(x,p0) {           p0 }}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testInnerFunctionsAfterArguments
+  public void testInnerFunctionsAfterArguments() {
+    
+    
+    test("function f(  ) { arguments[0]; function b() { function c() { }} }",
+         "function f(p0) {           p0; function b() { function c() { }} }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoOptimizationWhenGetProp
+  public void testNoOptimizationWhenGetProp() {
+    testSame("function f() { arguments[0]; arguments.size }");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoOptimizationWhenIndexIsNotNumberConstant
+  public void testNoOptimizationWhenIndexIsNotNumberConstant() {
+    testSame("function f() { arguments[0]; arguments['callee'].length}");
+    testSame("function f() { arguments[0]; arguments.callee.length}");
+    testSame(
+        "function f() { arguments[0]; var x = 'callee'; arguments[x].length}");
+  }
+
+// com.google.javascript.jscomp.OptimizeArgumentsArrayTest::testNoOptimizationWhenArgumentIsUsedAsFunctionCall
+  public void testNoOptimizationWhenArgumentIsUsedAsFunctionCall() {
+    testSame("function f() {arguments[0]()}");
+  }
+
+// com.google.javascript.jscomp.OptimizeCallsTest::testRemovingReturnCallToFunctionWithUnusedParams
+  public void testRemovingReturnCallToFunctionWithUnusedParams() {
+    test("function foo() {var x; return x = bar(1)} foo(); function bar(x) {}",
+         "function foo() {          bar(); return;} foo(); function bar()  {}");
+  }
+
+// com.google.javascript.jscomp.OptimizeCallsTest::testNestingFunctionCallWithUnsedParams
+  public void testNestingFunctionCallWithUnsedParams() {
+    test("function f1(x) { } function f2(x) { }" +
+         "function f3(x) { } function f4(x) { }" +
+         "f3(f1(f2()));",
+         "function f1() {f2()} function f2() { }" +
+         "function f3() {f1()} " +
+         "f3();"
+    );
+  }
+
+// com.google.javascript.jscomp.OptimizeCallsTest::testUnusedAssignOnFunctionWithUnusedParams
+  public void testUnusedAssignOnFunctionWithUnusedParams() {
+    test("var foo = function(a){}; function bar(){var x;x = foo} bar(); foo(1)",
+         "var foo = function( ){}; function bar(){             } bar(); foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoRemoval
+  public void testNoRemoval() {
+    testSame("function foo(p1) { } foo(1); foo(2)");
+    testSame("function foo(p1) { } foo(1,2); foo(3,4)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testSimpleRemoval
+  public void testSimpleRemoval() {
+    test("function foo(p1) { } foo(); foo()",
+         "function foo() {var p1;} foo(); foo()");
+    test("function foo(p1) { } foo(1); foo(1)",
+         "function foo() {var p1 = 1;} foo(); foo()");
+    test("function foo(p1) { } foo(1,2); foo(1,4)",
+         "function foo() {var p1 = 1;} foo(2); foo(4)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNotAFunction
+  public void testNotAFunction() {
+    testSame("var x = 1; x; x = 2");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalNamedFunction
+  public void testRemoveOneOptionalNamedFunction() {
+    test("function foo(p1) { } foo()", "function foo() {var p1} foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDifferentScopes
+  public void testDifferentScopes() {
+    test("function f(a, b) {} f(1, 2); f(1, 3); " +
+        "function h() {function g(a) {} g(4); g(5);} f(1, 2);",
+        "function f(b) {var a = 1} f(2); f(3); " +
+        "function h() {function g(a) {} g(4); g(5);} f(2);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testOptimizeOnlyImmutableValues
+  public void testOptimizeOnlyImmutableValues() {
+    test("function foo(a) {}; foo(undefined);",
+         "function foo() {var a = undefined}; foo()");
+    test("function foo(a) {}; foo(null);",
+        "function foo() {var a = null}; foo()");
+    test("function foo(a) {}; foo(1);",
+         "function foo() {var a = 1}; foo()");
+    test("function foo(a) {}; foo('abc');",
+        "function foo() {var a = 'abc'}; foo()");
+
+    test("var foo = function(a) {}; foo(undefined);",
+         "var foo = function() {var a = undefined}; foo()");
+    test("var foo = function(a) {}; foo(null);",
+         "var foo = function() {var a = null}; foo()");
+    test("var foo = function(a) {}; foo(1);",
+         "var foo = function() {var a = 1}; foo()");
+    test("var foo = function(a) {}; foo('abc');",
+         "var foo = function() {var a = 'abc'}; foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalVarAssignment
+  public void testRemoveOneOptionalVarAssignment() {
+    test("var foo = function (p1) { }; foo()",
+        "var foo = function () {var p1}; foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoOptimizeCall
+  public void testDoOptimizeCall() {
+    testSame("var foo = function () {}; foo(); foo.call();");
+    
+    testSame("var foo = function () {}; foo(); foo.call(this);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.call(this, 1);");
+    testSame("var foo = function () {}; foo(); foo.call(null);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.call(null, 1);");
+
+    testSame("var foo = function () {}; foo.call();");
+    
+    testSame("var foo = function () {}; foo.call(this);");
+    testSame("var foo = function (a, b) {}; foo.call(this, 1);");
+    testSame("var foo = function () {}; foo.call(null);");
+    testSame("var foo = function (a, b) {}; foo.call(null, 1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoOptimizeApply
+  public void testDoOptimizeApply() {
+    testSame("var foo = function () {}; foo(); foo.apply();");
+    testSame("var foo = function () {}; foo(); foo.apply(this);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.apply(this, 1);");
+    testSame("var foo = function () {}; foo(); foo.apply(null);");
+    testSame("var foo = function (a, b) {}; foo(1); foo.apply(null, []);");
+
+    testSame("var foo = function () {}; foo.apply();");
+    testSame("var foo = function () {}; foo.apply(this);");
+    testSame("var foo = function (a, b) {}; foo.apply(this, 1);");
+    testSame("var foo = function () {}; foo.apply(null);");
+    testSame("var foo = function (a, b) {}; foo.apply(null, []);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalExpressionAssign
+  public void testRemoveOneOptionalExpressionAssign() {
+    
+    
+    testSame("var foo; foo = function (p1) { }; foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalOneRequired
+  public void testRemoveOneOptionalOneRequired() {
+    test("function foo(p1, p2) { } foo(1); foo(2)",
+        "function foo(p1) {var p2} foo(1); foo(2)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalMultipleCalls
+  public void testRemoveOneOptionalMultipleCalls() {
+    test( "function foo(p1, p2) { } foo(1); foo(2); foo()",
+        "function foo(p1) {var p2} foo(1); foo(2); foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveOneOptionalMultiplePossibleDefinition
+  public void testRemoveOneOptionalMultiplePossibleDefinition() {
+    String src = "var goog = {};" +
+        "goog.foo = function (p1, p2) { };" +
+        "goog.foo = function (q1, q2) { };" +
+        "goog.foo = function (r1, r2) { };" +
+        "goog.foo(1); goog.foo(2); goog.foo()";
+
+    String expected = "var goog = {};" +
+        "goog.foo = function (p1) { var p2 };" +
+        "goog.foo = function (q1) { var q2 };" +
+        "goog.foo = function (r1) { var r2 };" +
+        "goog.foo(1); goog.foo(2); goog.foo()";
+    
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveTwoOptionalMultiplePossibleDefinition
+  public void testRemoveTwoOptionalMultiplePossibleDefinition() {
+    String src = "var goog = {};" +
+        "goog.foo = function (p1, p2, p3, p4) { };" +
+        "goog.foo = function (q1, q2, q3, q4) { };" +
+        "goog.foo = function (r1, r2, r3, r4) { };" +
+        "goog.foo(1,0); goog.foo(2,1); goog.foo()";
+
+    String expected = "var goog = {};" +
+        "goog.foo = function(p1, p2) { var p4; var p3};" +
+        "goog.foo = function(q1, q2) { var q4; var q3};" +
+        "goog.foo = function(r1, r2) { var r4; var r3};" +
+        "goog.foo(1,0); goog.foo(2,1); goog.foo()";
+    
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testConstructorOptArgsNotRemoved
+  public void testConstructorOptArgsNotRemoved() {
+    String src =
+        "" +
+        "var goog = function(){};" +
+        "goog.prototype.foo = function(a,b) {};" +
+        "goog.prototype.bar = function(a) {};" +
+        "goog.bar.inherits(goog.foo);" +
+        "new goog.foo(2,3);" +
+        "new goog.foo(1,2);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMultipleUnknown
+  public void testMultipleUnknown() {
+    String src = "var goog1 = {};" +
+        "goog1.foo = function () { };" +
+        "var goog2 = {};" +
+        "goog2.foo = function (p1) { };" +
+        "var x = getGoog();" +
+        "x.foo()";
+
+    String expected = "var goog1 = {};" +
+        "goog1.foo = function () { };" +
+        "var goog2 = {};" +
+        "goog2.foo = function () { var p1 };" +
+        "var x = getGoog();" +
+        "x.foo()";
+    
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testSingleUnknown
+  public void testSingleUnknown() {
+    String src =
+        "var goog2 = {};" +
+        "goog2.foo = function (p1) { };" +
+        "var x = getGoog();" +
+        "x.foo()";
+
+    String expected =
+        "var goog2 = {};" +
+        "goog2.foo = function () { var p1 };" +
+        "var x = getGoog();" +
+        "x.foo()";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveVarArg
+  public void testRemoveVarArg() {
+    test("function foo(p1, var_args) { } foo(1); foo(2)",
+        "function foo(p1) { var var_args } foo(1); foo(2)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize
+  public void testAliasMethodsDontGetOptimize() {
+    String src =
+        "var foo = function(a, b) {};" +
+        "var goog = {};" +
+        "goog.foo = foo;" +
+        "goog.prototype.bar = goog.foo;" +
+        "new goog().bar(1,2);" +
+        "foo(2);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize2
+  public void testAliasMethodsDontGetOptimize2() {
+    String src =
+        "var foo = function(a, b) {};" +
+        "var bar = foo;" +
+        "foo(1);" +
+        "bar(2,3);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize3
+  public void testAliasMethodsDontGetOptimize3() {
+    String src =
+        "var array = {};" +
+        "array[0] = function(a, b) {};" +
+        "var foo = array[0];" + 
+        "foo(1);";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testAliasMethodsDontGetOptimize4
+  public void testAliasMethodsDontGetOptimize4() {
+    
+
+    test(
+      "function foo(bar) {};" +
+      "baz = function(a) {};" +
+      "baz(1);" +
+      "foo(baz);",
+      "function foo() {var bar = baz};" +
+      "baz = function(a) {};" +
+      "baz(1);" +
+      "foo();");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMethodsDefinedInArraysDontGetOptimized
+  public void testMethodsDefinedInArraysDontGetOptimized() {
+    String src =
+        "var array = [true, function (a) {}];" +
+        "array[1](1)";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMethodsDefinedInObjectDontGetOptimized
+  public void testMethodsDefinedInObjectDontGetOptimized() {
+    String src =
+      "var object = { foo: function bar() {} };" +
+      "object.foo(1)";
+    testSame(src);
+    src =
+      "var object = { foo: function bar() {} };" +
+      "object['foo'](1)";
+    testSame(src);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRemoveConstantArgument
+  public void testRemoveConstantArgument() {
+    
+    test("function foo(p1, p2) {}; foo(1,2); foo(2,2);",
+         "function foo(p1) {var p2 = 2}; foo(1); foo(2)");
+
+    
+    testSame("function foo(p1, p2) {}; foo(1); foo(2,3);");
+
+    
+    test("function foo(a,b,c){}; foo(1, 2, 3); foo(1, 2, 4); foo(2, 2, 3)",
+         "function foo(a,c){var b=2}; foo(1, 3); foo(1, 4); foo(2, 3)");
+
+    
+    test("function foo(a) {}; foo(1); foo(1.0);",
+         "function foo() {var a = 1;}; foo(); foo();");
+
+    
+    String src =
+        "" +
+        "function Person(){}; Person.prototype.run = function(a, b) {};" +
+        "Person.run(1, 'a'); Person.run(2, 'a')";
+    String expected =
+        "function Person(){}; Person.prototype.run = " +
+        "function(a) {var b = 'a'};" +
+        "Person.run(1); Person.run(2)";
+    test(src, expected);
+
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testCanDeleteArgumentsAtAnyPosition
+  public void testCanDeleteArgumentsAtAnyPosition() {
+    
+    String src =
+        "function foo(a,b,c,d,e) {};" +
+        "foo(1,2,3,4,5);" +
+        "foo(2,2,4,4,5);";
+    String expected =
+        "function foo(a,c) {var b=2; var d=4; var e=5;};" +
+        "foo(1,3);" +
+        "foo(2,4);";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoOptimizationForExternsFunctions
+  public void testNoOptimizationForExternsFunctions() {
+    testSame("function _foo(x, y, z){}; _foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoOptimizationForGoogExportSymbol
+  public void testNoOptimizationForGoogExportSymbol() {
+    testSame("goog.exportSymbol('foo', foo);" +
+             "function foo(x, y, z){}; foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNoArgumentRemovalNonEqualNodes
+  public void testNoArgumentRemovalNonEqualNodes() {
+    testSame("function foo(a){}; foo('bar'); foo('baz');");
+    testSame("function foo(a){}; foo(1.0); foo(2.0);");
+    testSame("function foo(a){}; foo(true); foo(false);");
+    testSame("var a = 1, b = 2; function foo(a){}; foo(a); foo(b);");
+    testSame("function foo(a){}; foo(/&/g); foo(/</g);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testFunctionPassedAsParam
+  public void testFunctionPassedAsParam() {
+    String src =
+        " function person(){}; " +
+        "person.prototype.run = function(a, b) {};" +
+        "person.prototype.walk = function() {};" +
+        "person.prototype.foo = function() { this.run(this.walk, 0.1)};" +
+        "person.foo();";
+    String expected =
+        "function person(){}; person.prototype.run = function(a) {" +
+        "  var b = 0.1;};" +
+        "person.prototype.walk = function() {};" +
+        "person.prototype.foo = function() { this.run(this.walk)};" +
+        "person.foo();";
+
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testCallIsIgnore
+  public void testCallIsIgnore() {
+    testSame("var goog;" +
+        "goog.foo = function(a, opt) {};" +
+        "var bar = function(){goog.foo.call(this, 1)};" +
+        "goog.foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testApplyIsIgnore
+  public void testApplyIsIgnore() {
+    testSame("var goog;" +
+        "goog.foo = function(a, opt) {};" +
+        "var bar = function(){goog.foo.apply(this, 1)};" +
+        "goog.foo(1);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testFunctionWithReferenceToArgumentsShouldNotBeOptimize
+  public void testFunctionWithReferenceToArgumentsShouldNotBeOptimize() {
+    testSame("function foo(a,b,c) { return arguments.size; };" +
+             "foo(1);");
+    testSame("var foo = function(a,b,c) { return arguments.size }; foo(1);");
+    testSame("var foo = function bar(a,b,c) { return arguments.size }; " +
+             "foo(2); bar(2);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testFunctionWithTwoNames
+  public void testFunctionWithTwoNames() {
+    testSame("var foo = function bar(a,b) {};");
+    testSame("var foo = function bar(a,b) {}; foo(1)");
+    testSame("var foo = function bar(a,b) {}; bar(1);");
+    testSame("var foo = function bar(a,b) {}; foo(1); foo(2)");
+    testSame("var foo = function bar(a,b) {}; foo(1); bar(1)");
+    testSame("var foo = function bar(a,b) {}; foo(1); bar(2)");
+    testSame("var foo = function bar(a,b) {}; foo(1,2); bar(2,1)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRecursion
+  public void testRecursion() {
+    test("var foo = function (a,b) {foo(1, b)}; foo(1, 2)",
+         "var foo = function (b) {var a=1; foo(b)}; foo(2)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testConstantArgumentsToConstructorCanBeOptimized
+  public void testConstantArgumentsToConstructorCanBeOptimized() {
+    String src = "function foo(a) {};" +
+        "var bar = new foo(1);";
+    String expected = "function foo() {var a=1;};" +
+        "var bar = new foo();";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testOptionalArgumentsToConstructorCanBeOptimized
+  public void testOptionalArgumentsToConstructorCanBeOptimized() {
+    String src = "function foo(a) {};" +
+        "var bar = new foo();";
+    String expected = "function foo() {var a;};" +
+        "var bar = new foo();";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testRegexesCanBeInlined
+  public void testRegexesCanBeInlined() {
+    test("function foo(a) {}; foo(/abc/);",
+         "function foo() {var a = /abc/}; foo();");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testConstructorUsedAsFunctionCanBeOptimized
+  public void testConstructorUsedAsFunctionCanBeOptimized() {
+    String src = "function foo(a) {};" +
+        "var bar = new foo(1);" +
+        "foo(1);";
+    String expected = "function foo() {var a=1;};" +
+        "var bar = new foo();" +
+        "foo();";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeConstructorWhenArgumentsAreNotEqual
+  public void testDoNotOptimizeConstructorWhenArgumentsAreNotEqual() {
+    testSame("function Foo(a) {};" +
+        "var bar = new Foo(1);" +
+        "var baz = new Foo(2);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeArrayElements
+  public void testDoNotOptimizeArrayElements() {
+    testSame("var array = [function (a, b) {}];");
+    testSame("var array = [function f(a, b) {}]");
+
+    testSame("var array = [function (a, b) {}];" +
+        "array[0](1, 2);" +
+        "array[0](1);");
+
+    testSame("var array = [];" +
+        "function foo(a, b) {};" +
+        "array[0] = foo;");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testOptimizeThis
+  public void testOptimizeThis() {
+    String src = "function foo() {" +
+        "var bar = function (a, b) {};" +
+        "this.bar = function (a, b) {};" +
+        "this.bar(3);" +
+        "bar(2);}";
+    String expected = "function foo() {" +
+        "var bar = function () {var b; var a = 2;};" +
+        "this.bar = function () {var b; var a = 3;};" +
+        "this.bar();" +
+        "bar();}";
+    test(src, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeWhenArgumentsPassedAsParameter
+  public void testDoNotOptimizeWhenArgumentsPassedAsParameter() {
+    testSame("function foo(a) {}; foo(arguments)");
+    testSame("function foo(a) {}; foo(arguments[0])");
+
+    test("function foo(a, b) {}; foo(arguments, 1)",
+         "function foo(a) {var b = 1}; foo(arguments)");
+
+    test("function foo(a, b) {}; foo(arguments)",
+         "function foo(a) {var b}; foo(arguments)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeGoogExportFunctions
+  public void testDoNotOptimizeGoogExportFunctions() {
+    testSame("function foo(a, b) {}; foo(); goog.export_function(foo);");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeJSCompiler_renameProperty
+  public void testDoNotOptimizeJSCompiler_renameProperty() {
+    testSame("function JSCompiler_renameProperty(a) {return a};" +
+             "JSCompiler_renameProperty('a');");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testDoNotOptimizeJSCompiler_ObjectPropertyString
+  public void testDoNotOptimizeJSCompiler_ObjectPropertyString() {
+    testSame("function JSCompiler_ObjectPropertyString(a, b) {return a[b]};" +
+             "JSCompiler_renameProperty(window,'b');");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMutableValues1
+  public void testMutableValues1() {
+    test("function foo(p1) {} foo()",
+         "function foo() {var p1} foo()");
+    test("function foo(p1) {} foo(1)",
+         "function foo() {var p1=1} foo()");
+    test("function foo(p1) {} foo([])",
+         "function foo() {var p1=[]} foo()");
+    test("function foo(p1) {} foo({})",
+         "function foo() {var p1={}} foo()");
+    test("var x;function foo(p1) {} foo(x)",
+         "var x;function foo() {var p1=x} foo()");
+    test("var x;function foo(p1) {} foo(x())",
+         "var x;function foo() {var p1=x()} foo()");
+    test("var x;function foo(p1) {} foo(new x())",
+         "var x;function foo() {var p1=new x()} foo()");
+    test("var x;function foo(p1) {} foo('' + x)",
+         "var x;function foo() {var p1='' + x} foo()");
+
+    testSame("function foo(p1) {} foo(this)");
+    testSame("function foo(p1) {} foo(arguments)");
+    testSame("function foo(p1) {} foo(function(){})");
+    testSame("function foo(p1) {} (function () {var x;foo(x)})()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMutableValues2
+  public void testMutableValues2() {
+    test("function foo(p1, p2) {} foo(1, 2)",
+         "function foo() {var p1=1; var p2 = 2} foo()");
+    test("var x; var y; function foo(p1, p2) {} foo(x(), y())",
+         "var x; var y; function foo() {var p1=x(); var p2 = y()} foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMutableValues3
+  public void testMutableValues3() {
+    test(
+        "var x; var y; var z;" +
+        "function foo(p1, p2) {}" +
+        "foo(x(), y()); foo(x(),y())",
+        "var x; var y; var z;" +
+        "function foo() {var p1=x(); var p2=y()}" +
+        "foo(); foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMutableValues4
+  public void testMutableValues4() {
+    
+    
+    
+    testSame(
+        "var x; var y; var z;" +
+        "function foo(p1, p2, p3) {}" +
+        "foo(x(), y(), z()); foo(x(),y(),3)");
+
+    
+    
+    testSame(
+        "var x; var y; var z;" +
+        "function foo(p1, p2, p3) {}" +
+        "foo(x, y(), z()); foo(x,y(),3)");
+
+    
+    
+    test(
+        "var x; var y; var z;" +
+        "function foo(p1, p2, p3) {}" +
+        "foo([], y(), z()); foo([],y(),3)",
+        "var x; var y; var z;" +
+        "function foo(p2, p3) {var p1=[]}" +
+        "foo(y(), z()); foo(y(),3)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testMutableValues5
+  public void testMutableValues5() {
+    test(
+        "var x; var y; var z;" +
+        "function foo(p1, p2) {}" +
+        "new foo(new x(), y()); new foo(new x(),y())",
+        "var x; var y; var z;" +
+        "function foo() {var p1=new x(); var p2=y()}" +
+        "new foo(); new foo()");
+
+    test(
+        "var x; var y; var z;" +
+        "function foo(p1, p2) {}" +
+        "new foo(x(), y()); new foo(x(),y())",
+        "var x; var y; var z;" +
+        "function foo() {var p1=x(); var p2=y()}" +
+        "new foo(); new foo()");
+
+    testSame(
+        "var x; var y; var z;" +
+        "function foo(p1, p2, p3) {}" +
+        "new foo(x(), y(), z()); new foo(x(),y(),3)");
+
+    testSame(
+        "var x; var y; var z;" +
+        "function foo(p1, p2, p3) {}" +
+        "new foo(x, y(), z()); new foo(x,y(),3)");
+
+    test(
+        "var x; var y; var z;" +
+        "function foo(p1, p2, p3) {}" +
+        "new foo([], y(), z()); new foo([],y(),3)",
+        "var x; var y; var z;" +
+        "function foo(p2, p3) {var p1=[]}" +
+        "new foo(y(), z()); new foo(y(),3)");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testShadows
+  public void testShadows() {
+    testSame("function foo(a) {}" +
+             "var x;" +
+             "function f() {" +
+             "  var x;" +
+             "  function g() {" +
+             "    foo(x());" +
+             "  }" +
+             "};" +
+             "foo(x())");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testCrash
+  public void testCrash() {
+    test(
+        "function foo(a) {}" +
+        "foo({o:1});" +
+        "foo({o:1})",
+        "function foo() {var a = {o:1}}" +
+        "foo();" +
+        "foo()");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testGlobalCatch
+  public void testGlobalCatch() {
+    testSame("function foo(a) {} try {} catch (e) {foo(e)}");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNamelessParameter1
+  public void testNamelessParameter1() {
+    test("f(g()); function f(){}",
+         "f(); function f(){g()}");
+  }
+
+// com.google.javascript.jscomp.OptimizeParametersTest::testNamelessParameter2
+  public void testNamelessParameter2() {
+    test("f(g(),h()); function f(){}",
+         "f(); function f(){g();h()}");
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteUsedResult1
+  public void testNoRewriteUsedResult1() throws Exception {
+    String source = newlineJoin(
+        "function a(){return 1}",
+        "var x = a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteUsedResult2
+  public void testNoRewriteUsedResult2() throws Exception {
+    String source = newlineJoin(
+        "var a = function(){return 1}",
+        "a(); var b = a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult1
+  public void testRewriteUnusedResult1() throws Exception {
+    String source = newlineJoin(
+        "function a(){return 1}",
+        "a()");
+    String expected = newlineJoin(
+        "function a(){return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult2
+  public void testRewriteUnusedResult2() throws Exception {
+    String source = newlineJoin(
+        "var a; a = function(){return 1}",
+        "a()");
+    String expected = newlineJoin(
+        "var a; a = function(){return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult3
+  public void testRewriteUnusedResult3() throws Exception {
+    String source = newlineJoin(
+        "var a = function(){return 1}",
+        "a()");
+    String expected = newlineJoin(
+        "var a = function(){return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult4a
+  public void testRewriteUnusedResult4a() throws Exception {
+    String source = newlineJoin(
+        "var a = function(){return a()}",
+        "a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult4b
+  public void testRewriteUnusedResult4b() throws Exception {
+    String source = newlineJoin(
+        "var a = function b(){return b()}",
+        "a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult4c
+  public void testRewriteUnusedResult4c() throws Exception {
+    String source = newlineJoin(
+        "function a(){return a()}",
+        "a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult5
+  public void testRewriteUnusedResult5() throws Exception {
+    String source = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return args};",
+        "var o = new a;",
+        "o.foo()");
+    String expected = newlineJoin(
+        "function a(){}",
+        "a.prototype.foo = function(args) {return};",
+        "var o = new a;",
+        "o.foo()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult6
+  public void testRewriteUnusedResult6() throws Exception {
+    String source = newlineJoin(
+        "function a(){return (g = 1)}",
+        "a()");
+    String expected = newlineJoin(
+        "function a(){g = 1;return}",
+        "a()");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult7a
+  public void testRewriteUnusedResult7a() throws Exception {
+    String source = newlineJoin(
+        "function a() { return 1 }",
+        "function b() { return a() }",
+        "function c() { return b() }",
+        "c();");
+
+    String expected = newlineJoin(
+        "function a() { return 1 }",
+        "function b() { return a() }",
+        "function c() { b(); return }",
+        "c();");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult7b
+  public void testRewriteUnusedResult7b() throws Exception {
+    String source = newlineJoin(
+        "c();",
+        "function c() { return b() }",
+        "function b() { return a() }",
+        "function a() { return 1 }");
+
+    
+    String expected = newlineJoin(
+        "c();",
+        "function c() { b(); return }",
+        "function b() { return a() }",
+        "function a() { return 1 }");
+    test(source, expected);
+
+    
+    source = expected;
+    expected = newlineJoin(
+        "c();",
+        "function c() { b(); return }",
+        "function b() { a(); return }",
+        "function a() { return 1 }");
+    test(source, expected);
+
+    
+    source = expected;
+    expected = newlineJoin(
+        "c();",
+        "function c() { b(); return }",
+        "function b() { a(); return }",
+        "function a() { return }");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUnusedResult8
+  public void testRewriteUnusedResult8() throws Exception {
+    String source = newlineJoin(
+        "function a() { return c() }",
+        "function b() { return a() }",
+        "function c() { return b() }",
+        "c();");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteObjLit1
+  public void testNoRewriteObjLit1() throws Exception {
+    String source = newlineJoin(
+        "var a = {b:function(){return 1;}}",
+        "for(c in a) (a[c])();",
+        "a.b()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteObjLit2
+  public void testNoRewriteObjLit2() throws Exception {
+    String source = newlineJoin(
+        "var a = {b:function fn(){return 1;}}",
+        "for(c in a) (a[c])();",
+        "a.b()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testNoRewriteArrLit
+  public void testNoRewriteArrLit() throws Exception {
+    String source = newlineJoin(
+        "var a = [function(){return 1;}]",
+        "(a[0])();");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod1
+  public void testPrototypeMethod1() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "var x = new c;",
+        "x.a()");
+    String result = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return}",
+        "var x = new c;",
+        "x.a()");
+    test(source, result);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod2
+  public void testPrototypeMethod2() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "goog.reflect.object({a: 'v'})",
+        "var x = new c;",
+        "x.a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod3
+  public void testPrototypeMethod3() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "var x = new c;",
+        "for(var key in goog.reflect.object({a: 'v'})){ x[key](); }",
+        "x.a()");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testPrototypeMethod4
+  public void testPrototypeMethod4() throws Exception {
+    String source = newlineJoin(
+        "function c(){}",
+        "c.prototype.a = function(){return 1}",
+        "var x = new c;",
+        "for(var key in goog.reflect.object({a: 'v'})){ x[key](); }");
+    testSame(source);
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testCallOrApply
+  public void testCallOrApply() throws Exception {
+    
+    testSame("function a() {return 1}; a.call(new foo);");
+
+    testSame("function a() {return 1}; a.apply(new foo);");
+  }
+
+// com.google.javascript.jscomp.OptimizeReturnsTest::testRewriteUseSiteRemoval
+  public void testRewriteUseSiteRemoval() throws Exception {
+    String source = newlineJoin(
+        "function a() { return {\"_id\" : 1} }",
+        "a();");
+    String expected = newlineJoin(
+        "function a() { return }",
+        "a();");
+    test(source, expected);
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testNoFunction
+  public void testNoFunction() {
+    replace("\"foo\"");
+    replace("var foo");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testOneFunction
+  public void testOneFunction() {
+    replace("\"foo\";function foo(){\"foo\"}");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testTwoFunctions
+  public void testTwoFunctions() {
+    replace("\"foo\";function f1(){\"foo\"}function f2(){\"foo\"}");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testInnerFunctions
+  public void testInnerFunctions() {
+    replace("\"foo\";function f1(){\"foo\";function f2(){\"foo\"}}");
+  }
+
+// com.google.javascript.jscomp.ParallelCompilerPassTest::testManyFunctions
+  public void testManyFunctions() {
+    StringBuilder sb = new StringBuilder("\"foo\";");
+    for (int i = 0; i < 20; i++) {
+      sb.append("function f");
+      sb.append(i);
+      sb.append("(){\"foo\"}");
+    }
+    replace(sb.toString());
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison1
+  public void testUndefinedComparison1() {
+    fold("undefined == undefined", "true");
+    fold("undefined == null", "true");
+    fold("undefined == void 0", "true");
+
+    fold("undefined == 0", "false");
+    fold("undefined == 1", "false");
+    fold("undefined == 'hi'", "false");
+    fold("undefined == true", "false");
+    fold("undefined == false", "false");
+
+    fold("undefined === undefined", "true");
+    fold("undefined === null", "false");
+    fold("undefined === void 0", "true");
+
+    foldSame("undefined == this");
+    foldSame("undefined == x");
+
+    fold("undefined != undefined", "false");
+    fold("undefined != null", "false");
+    fold("undefined != void 0", "false");
+
+    fold("undefined != 0", "true");
+    fold("undefined != 1", "true");
+    fold("undefined != 'hi'", "true");
+    fold("undefined != true", "true");
+    fold("undefined != false", "true");
+
+    fold("undefined !== undefined", "false");
+    fold("undefined !== void 0", "false");
+    fold("undefined !== null", "true");
+
+    foldSame("undefined != this");
+    foldSame("undefined != x");
+
+    fold("undefined < undefined", "false");
+    fold("undefined > undefined", "false");
+    fold("undefined >= undefined", "false");
+    fold("undefined <= undefined", "false");
+
+    fold("0 < undefined", "false");
+    fold("true > undefined", "false");
+    fold("'hi' >= undefined", "false");
+    fold("null <= undefined", "false");
+
+    fold("undefined < 0", "false");
+    fold("undefined > true", "false");
+    fold("undefined >= 'hi'", "false");
+    fold("undefined <= null", "false");
+
+    fold("null == undefined", "true");
+    fold("0 == undefined", "false");
+    fold("1 == undefined", "false");
+    fold("'hi' == undefined", "false");
+    fold("true == undefined", "false");
+    fold("false == undefined", "false");
+    fold("null === undefined", "false");
+    fold("void 0 === undefined", "true");
+
+    fold("undefined == NaN", "false");
+    fold("NaN == undefined", "false");
+    fold("undefined == Infinity", "false");
+    fold("Infinity == undefined", "false");
+    fold("undefined == -Infinity", "false");
+    fold("-Infinity == undefined", "false");
+    fold("({}) == undefined", "false");
+    fold("undefined == ({})", "false");
+    fold("([]) == undefined", "false");
+    fold("undefined == ([])", "false");
+    fold("(/a/g) == undefined", "false");
+    fold("undefined == (/a/g)", "false");
+    fold("(function(){}) == undefined", "false");
+    fold("undefined == (function(){})", "false");
+
+    fold("undefined != NaN", "true");
+    fold("NaN != undefined", "true");
+    fold("undefined != Infinity", "true");
+    fold("Infinity != undefined", "true");
+    fold("undefined != -Infinity", "true");
+    fold("-Infinity != undefined", "true");
+    fold("({}) != undefined", "true");
+    fold("undefined != ({})", "true");
+    fold("([]) != undefined", "true");
+    fold("undefined != ([])", "true");
+    fold("(/a/g) != undefined", "true");
+    fold("undefined != (/a/g)", "true");
+    fold("(function(){}) != undefined", "true");
+    fold("undefined != (function(){})", "true");
+
+    foldSame("this == undefined");
+    foldSame("x == undefined");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison2
+  public void testUndefinedComparison2() {
+    fold("\"123\" !== void 0", "true");
+    fold("\"123\" === void 0", "false");
+
+    fold("void 0 !== \"123\"", "true");
+    fold("void 0 === \"123\"", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison3
+  public void testUndefinedComparison3() {
+    fold("\"123\" !== undefined", "true");
+    fold("\"123\" === undefined", "false");
+
+    fold("undefined !== \"123\"", "true");
+    fold("undefined === \"123\"", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUndefinedComparison4
+  public void testUndefinedComparison4() {
+    fold("1 !== void 0", "true");
+    fold("1 === void 0", "false");
+
+    fold("null !== void 0", "true");
+    fold("null === void 0", "false");
+
+    fold("undefined !== void 0", "false");
+    fold("undefined === void 0", "true");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testNullComparison1
+  public void testNullComparison1() {
+    fold("null == undefined", "true");
+    fold("null == null", "true");
+    fold("null == void 0", "true");
+
+    fold("null == 0", "false");
+    fold("null == 1", "false");
+    fold("null == 'hi'", "false");
+    fold("null == true", "false");
+    fold("null == false", "false");
+
+    fold("null === undefined", "false");
+    fold("null === null", "true");
+    fold("null === void 0", "false");
+
+    foldSame("null == this");
+    foldSame("null == x");
+
+    fold("null != undefined", "false");
+    fold("null != null", "false");
+    fold("null != void 0", "false");
+
+    fold("null != 0", "true");
+    fold("null != 1", "true");
+    fold("null != 'hi'", "true");
+    fold("null != true", "true");
+    fold("null != false", "true");
+
+    fold("null !== undefined", "true");
+    fold("null !== void 0", "true");
+    fold("null !== null", "false");
+
+    foldSame("null != this");
+    foldSame("null != x");
+
+    fold("null < null", "false");
+    fold("null > null", "false");
+    fold("null >= null", "true");
+    fold("null <= null", "true");
+
+    foldSame("0 < null"); 
+    fold("true > null", "true");
+    foldSame("'hi' >= null"); 
+    fold("null <= null", "true");
+
+    foldSame("null < 0");  
+    fold("null > true", "false");
+    foldSame("null >= 'hi'"); 
+    fold("null <= null", "true");
+
+    fold("null == null", "true");
+    fold("0 == null", "false");
+    fold("1 == null", "false");
+    fold("'hi' == null", "false");
+    fold("true == null", "false");
+    fold("false == null", "false");
+    fold("null === null", "true");
+    fold("void 0 === null", "false");
+
+    fold("null == NaN", "false");
+    fold("NaN == null", "false");
+    fold("null == Infinity", "false");
+    fold("Infinity == null", "false");
+    fold("null == -Infinity", "false");
+    fold("-Infinity == null", "false");
+    fold("({}) == null", "false");
+    fold("null == ({})", "false");
+    fold("([]) == null", "false");
+    fold("null == ([])", "false");
+    fold("(/a/g) == null", "false");
+    fold("null == (/a/g)", "false");
+    fold("(function(){}) == null", "false");
+    fold("null == (function(){})", "false");
+
+    fold("null != NaN", "true");
+    fold("NaN != null", "true");
+    fold("null != Infinity", "true");
+    fold("Infinity != null", "true");
+    fold("null != -Infinity", "true");
+    fold("-Infinity != null", "true");
+    fold("({}) != null", "true");
+    fold("null != ({})", "true");
+    fold("([]) != null", "true");
+    fold("null != ([])", "true");
+    fold("(/a/g) != null", "true");
+    fold("null != (/a/g)", "true");
+    fold("(function(){}) != null", "true");
+    fold("null != (function(){})", "true");
+
+    foldSame("({a:f()}) == null");
+    foldSame("null == ({a:f()})");
+    foldSame("([f()]) == null");
+    foldSame("null == ([f()])");
+
+    foldSame("this == null");
+    foldSame("x == null");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUnaryOps
+  public void testUnaryOps() {
+    
+    foldSame("!foo()");
+    foldSame("~foo()");
+    foldSame("-foo()");
+
+    
+    fold("a=!true", "a=false");
+    fold("a=!10", "a=false");
+    fold("a=!false", "a=true");
+    fold("a=!foo()", "a=!foo()");
+    fold("a=-0", "a=-0.0");
+    fold("a=-(0)", "a=-0.0");
+    fold("a=-Infinity", "a=-Infinity");
+    fold("a=-NaN", "a=NaN");
+    fold("a=-foo()", "a=-foo()");
+    fold("a=~~0", "a=0");
+    fold("a=~~10", "a=10");
+    fold("a=~-7", "a=6");
+
+    fold("a=+true", "a=1");
+    fold("a=+10", "a=10");
+    fold("a=+false", "a=0");
+    foldSame("a=+foo()");
+    foldSame("a=+f");
+    fold("a=+(f?true:false)", "a=+(f?1:0)"); 
+    fold("a=+0", "a=0");
+    fold("a=+Infinity", "a=Infinity");
+    fold("a=+NaN", "a=NaN");
+    fold("a=+-7", "a=-7");
+    fold("a=+.5", "a=.5");
+
+    fold("a=~0x100000000", "a=~0x100000000",
+         PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("a=~-0x100000000", "a=~-0x100000000",
+         PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("a=~.5", "~.5", PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testUnaryOpsStringCompare
+  public void testUnaryOpsStringCompare() {
+    
+    assertResultString("a=-1", "a=-1");
+    assertResultString("a=~0", "a=-1");
+    assertResultString("a=~1", "a=-2");
+    assertResultString("a=~101", "a=-102");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLogicalOp
+  public void testFoldLogicalOp() {
+    fold("x = true && x", "x = x");
+    foldSame("x = [foo()] && x");
+
+    fold("x = false && x", "x = false");
+    fold("x = true || x", "x = true");
+    fold("x = false || x", "x = x");
+    fold("x = 0 && x", "x = 0");
+    fold("x = 3 || x", "x = 3");
+    fold("x = false || 0", "x = 0");
+
+    
+    fold("a = x && true", "a=x&&true");
+    fold("a = x && false", "a=x&&false");
+    fold("a = x || 3", "a=x||3");
+    fold("a = x || false", "a=x||false");
+    fold("a = b ? c : x || false", "a=b?c:x||false");
+    fold("a = b ? x || false : c", "a=b?x||false:c");
+    fold("a = b ? c : x && true", "a=b?c:x&&true");
+    fold("a = b ? x && true : c", "a=b?x&&true:c");
+
+    
+    foldSame("a = x || false ? b : c");
+    foldSame("a = x && true ? b : c");
+
+    fold("x = foo() || true || bar()", "x = foo()||true");
+    fold("x = foo() || false || bar()", "x = foo()||bar()");
+    fold("x = foo() || true && bar()", "x = foo()||bar()");
+    fold("x = foo() || false && bar()", "x = foo()||false");
+    fold("x = foo() && false && bar()", "x = foo()&&false");
+    fold("x = foo() && true && bar()", "x = foo()&&bar()");
+    fold("x = foo() && false || bar()", "x = foo()&&false||bar()");
+
+    fold("1 && b()", "b()");
+    fold("a() && (1 && b())", "a() && b()");
+    
+    
+    fold("(a() && 1) && b()", "(a() && 1) && b()");
+
+    
+    
+    
+    foldSame("x = foo() && true || bar()");
+    foldSame("foo() && true || bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitwiseOp
+  public void testFoldBitwiseOp() {
+    fold("x = 1 & 1", "x = 1");
+    fold("x = 1 & 2", "x = 0");
+    fold("x = 3 & 1", "x = 1");
+    fold("x = 3 & 3", "x = 3");
+
+    fold("x = 1 | 1", "x = 1");
+    fold("x = 1 | 2", "x = 3");
+    fold("x = 3 | 1", "x = 3");
+    fold("x = 3 | 3", "x = 3");
+
+    fold("x = 1 ^ 1", "x = 0");
+    fold("x = 1 ^ 2", "x = 3");
+    fold("x = 3 ^ 1", "x = 2");
+    fold("x = 3 ^ 3", "x = 0");
+
+    fold("x = -1 & 0", "x = 0");
+    fold("x = 0 & -1", "x = 0");
+    fold("x = 1 & 4", "x = 0");
+    fold("x = 2 & 3", "x = 2");
+
+    
+    
+    fold("x = 1 & 1.1", "x = 1");
+    fold("x = 1.1 & 1", "x = 1");
+    fold("x = 1 & 3000000000", "x = 0");
+    fold("x = 3000000000 & 1", "x = 0");
+
+    
+    fold("x = 1 | 4", "x = 5");
+    fold("x = 1 | 3", "x = 3");
+    fold("x = 1 | 1.1", "x = 1");
+    foldSame("x = 1 | 3E9");
+    fold("x = 1 | 3000000001", "x = -1294967295");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitwiseOp2
+  public void testFoldBitwiseOp2() {
+    fold("x = y & 1 & 1", "x = y & 1");
+    fold("x = y & 1 & 2", "x = y & 0");
+    fold("x = y & 3 & 1", "x = y & 1");
+    fold("x = 3 & y & 1", "x = y & 1");
+    fold("x = y & 3 & 3", "x = y & 3");
+    fold("x = 3 & y & 3", "x = y & 3");
+
+    fold("x = y | 1 | 1", "x = y | 1");
+    fold("x = y | 1 | 2", "x = y | 3");
+    fold("x = y | 3 | 1", "x = y | 3");
+    fold("x = 3 | y | 1", "x = y | 3");
+    fold("x = y | 3 | 3", "x = y | 3");
+    fold("x = 3 | y | 3", "x = y | 3");
+
+    fold("x = y ^ 1 ^ 1", "x = y ^ 0");
+    fold("x = y ^ 1 ^ 2", "x = y ^ 3");
+    fold("x = y ^ 3 ^ 1", "x = y ^ 2");
+    fold("x = 3 ^ y ^ 1", "x = y ^ 2");
+    fold("x = y ^ 3 ^ 3", "x = y ^ 0");
+    fold("x = 3 ^ y ^ 3", "x = y ^ 0");
+
+    fold("x = Infinity | NaN", "x=0");
+    fold("x = 12 | NaN", "x=12");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldingMixTypesLate
+  public void testFoldingMixTypesLate() {
+    late = true;
+    fold("x = x + '2'", "x+='2'");
+    fold("x = +x + +'2'", "x = +x + 2");
+    fold("x = x - '2'", "x-=2");
+    fold("x = x ^ '2'", "x^=2");
+    fold("x = '2' ^ x", "x^=2");
+    fold("x = '2' & x", "x&=2");
+    fold("x = '2' | x", "x|=2");
+
+    fold("x = '2' | y", "x=2|y");
+    fold("x = y | '2'", "x=y|2");
+    fold("x = y | (a && '2')", "x=y|(a&&2)");
+    fold("x = y | (a,'2')", "x=y|(a,2)");
+    fold("x = y | (a?'1':'2')", "x=y|(a?1:2)");
+    fold("x = y | ('x'?'1':'2')", "x=y|('x'?1:2)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldingMixTypesEarly
+  public void testFoldingMixTypesEarly() {
+    late = false;
+    foldSame("x = x + '2'");
+    fold("x = +x + +'2'", "x = +x + 2");
+    fold("x = x - '2'", "x = x - 2");
+    fold("x = x ^ '2'", "x = x ^ 2");
+    fold("x = '2' ^ x", "x = 2 ^ x");
+    fold("x = '2' & x", "x = 2 & x");
+    fold("x = '2' | x", "x = 2 | x");
+
+    fold("x = '2' | y", "x=2|y");
+    fold("x = y | '2'", "x=y|2");
+    fold("x = y | (a && '2')", "x=y|(a&&2)");
+    fold("x = y | (a,'2')", "x=y|(a,2)");
+    fold("x = y | (a?'1':'2')", "x=y|(a?1:2)");
+    fold("x = y | ('x'?'1':'2')", "x=y|('x'?1:2)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldingAdd
+  public void testFoldingAdd() {
+    fold("x = null + true", "x=1");
+    foldSame("x = a + true");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitwiseOpStringCompare
+  public void testFoldBitwiseOpStringCompare() {
+    assertResultString("x = -1 | 0", "x=-1");
+    
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitShifts
+  public void testFoldBitShifts() {
+    fold("x = 1 << 0", "x = 1");
+    fold("x = -1 << 0", "x = -1");
+    fold("x = 1 << 1", "x = 2");
+    fold("x = 3 << 1", "x = 6");
+    fold("x = 1 << 8", "x = 256");
+
+    fold("x = 1 >> 0", "x = 1");
+    fold("x = -1 >> 0", "x = -1");
+    fold("x = 1 >> 1", "x = 0");
+    fold("x = 2 >> 1", "x = 1");
+    fold("x = 5 >> 1", "x = 2");
+    fold("x = 127 >> 3", "x = 15");
+    fold("x = 3 >> 1", "x = 1");
+    fold("x = 3 >> 2", "x = 0");
+    fold("x = 10 >> 1", "x = 5");
+    fold("x = 10 >> 2", "x = 2");
+    fold("x = 10 >> 5", "x = 0");
+
+    fold("x = 10 >>> 1", "x = 5");
+    fold("x = 10 >>> 2", "x = 2");
+    fold("x = 10 >>> 5", "x = 0");
+    fold("x = -1 >>> 1", "x = 2147483647"); 
+    fold("x = -1 >>> 0", "x = 4294967295"); 
+    fold("x = -2 >>> 0", "x = 4294967294"); 
+
+    fold("3000000000 << 1", "3000000000<<1",
+         PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("1 << 32", "1<<32",
+        PeepholeFoldConstants.SHIFT_AMOUNT_OUT_OF_BOUNDS);
+    fold("1 << -1", "1<<32",
+        PeepholeFoldConstants.SHIFT_AMOUNT_OUT_OF_BOUNDS);
+    fold("3000000000 >> 1", "3000000000>>1",
+        PeepholeFoldConstants.BITWISE_OPERAND_OUT_OF_RANGE);
+    fold("1 >> 32", "1>>32",
+        PeepholeFoldConstants.SHIFT_AMOUNT_OUT_OF_BOUNDS);
+    fold("1.5 << 0",  "1.5<<0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1 << .5",   "1.5<<0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1.5 >>> 0", "1.5>>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1 >>> .5",  "1.5>>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1.5 >> 0",  "1.5>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+    fold("1 >> .5",   "1.5>>0",
+        PeepholeFoldConstants.FRACTIONAL_BITWISE_OPERAND);
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBitShiftsStringCompare
+  public void testFoldBitShiftsStringCompare() {
+    
+    assertResultString("x = -1 << 1", "x=-2");
+    assertResultString("x = -1 << 8", "x=-256");
+    assertResultString("x = -1 >> 1", "x=-1");
+    assertResultString("x = -2 >> 1", "x=-1");
+    assertResultString("x = -1 >> 0", "x=-1");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testStringAdd
+  public void testStringAdd() {
+    fold("x = 'a' + \"bc\"", "x = \"abc\"");
+    fold("x = 'a' + 5", "x = \"a5\"");
+    fold("x = 5 + 'a'", "x = \"5a\"");
+    fold("x = 'a' + ''", "x = \"a\"");
+    fold("x = \"a\" + foo()", "x = \"a\"+foo()");
+    fold("x = foo() + 'a' + 'b'", "x = foo()+\"ab\"");
+    fold("x = (foo() + 'a') + 'b'", "x = foo()+\"ab\"");  
+    fold("x = foo() + 'a' + 'b' + 'cd' + bar()", "x = foo()+\"abcd\"+bar()");
+    fold("x = foo() + 2 + 'b'", "x = foo()+2+\"b\"");  
+    fold("x = foo() + 'a' + 2", "x = foo()+\"a2\"");
+    fold("x = '' + null", "x = \"null\"");
+    fold("x = true + '' + false", "x = \"truefalse\"");
+    fold("x = '' + []", "x = ''");      
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldConstructor
+  public void testFoldConstructor() {
+    fold("x = this[new String('a')]", "x = this['a']");
+    fold("x = ob[new String(12)]", "x = ob['12']");
+    fold("x = ob[new String(false)]", "x = ob['false']");
+    fold("x = ob[new String(null)]", "x = ob['null']");
+    fold("x = 'a' + new String('b')", "x = 'ab'");
+    fold("x = 'a' + new String(23)", "x = 'a23'");
+    fold("x = 2 + new String(1)", "x = '21'");
+    foldSame("x = ob[new String(a)]");
+    foldSame("x = new String('a')");
+    foldSame("x = (new String('a'))[3]");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmetic
+  public void testFoldArithmetic() {
+    fold("x = 10 + 20", "x = 30");
+    fold("x = 2 / 4", "x = 0.5");
+    fold("x = 2.25 * 3", "x = 6.75");
+    fold("z = x * y", "z = x * y");
+    fold("x = y * 5", "x = y * 5");
+    fold("x = 1 / 0", "x = 1 / 0");
+    fold("x = 3 % 2", "x = 1");
+    fold("x = 3 % -2", "x = 1");
+    fold("x = -1 % 3", "x = -1");
+    fold("x = 1 % 0", "x = 1 % 0");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmetic2
+  public void testFoldArithmetic2() {
+    foldSame("x = y + 10 + 20");
+    foldSame("x = y / 2 / 4");
+    fold("x = y * 2.25 * 3", "x = y * 6.75");
+    fold("z = x * y", "z = x * y");
+    fold("x = y * 5", "x = y * 5");
+    fold("x = y + (z * 24 * 60 * 60 * 1000)", "x = y + z * 864E5");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmetic3
+  public void testFoldArithmetic3() {
+    fold("x = null * undefined", "x = NaN");
+    fold("x = null * 1", "x = 0");
+    fold("x = (null - 1) * 2", "x = -2");
+    fold("x = (null + 1) * 2", "x = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmeticInfinity
+  public void testFoldArithmeticInfinity() {
+    fold("x=-Infinity-2", "x=-Infinity");
+    fold("x=Infinity-2", "x=Infinity");
+    fold("x=Infinity*5", "x=Infinity");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArithmeticStringComp
+  public void testFoldArithmeticStringComp() {
+    
+    assertResultString("x = 10 - 20", "x=-10");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComparison
+  public void testFoldComparison() {
+    fold("x = 0 == 0", "x = true");
+    fold("x = 1 == 2", "x = false");
+    fold("x = 'abc' == 'def'", "x = false");
+    fold("x = 'abc' == 'abc'", "x = true");
+    fold("x = \"\" == ''", "x = true");
+    fold("x = foo() == bar()", "x = foo()==bar()");
+
+    fold("x = 1 != 0", "x = true");
+    fold("x = 'abc' != 'def'", "x = true");
+    fold("x = 'a' != 'a'", "x = false");
+
+    fold("x = 1 < 20", "x = true");
+    fold("x = 3 < 3", "x = false");
+    fold("x = 10 > 1.0", "x = true");
+    fold("x = 10 > 10.25", "x = false");
+    fold("x = y == y", "x = y==y");
+    fold("x = y < y", "x = false");
+    fold("x = y > y", "x = false");
+    fold("x = 1 <= 1", "x = true");
+    fold("x = 1 <= 0", "x = false");
+    fold("x = 0 >= 0", "x = true");
+    fold("x = -1 >= 9", "x = false");
+
+    fold("x = true == true", "x = true");
+    fold("x = false == false", "x = true");
+    fold("x = false == null", "x = false");
+    fold("x = false == true", "x = false");
+    fold("x = true == null", "x = false");
+
+    fold("0 == 0", "true");
+    fold("1 == 2", "false");
+    fold("'abc' == 'def'", "false");
+    fold("'abc' == 'abc'", "true");
+    fold("\"\" == ''", "true");
+    foldSame("foo() == bar()");
+
+    fold("1 != 0", "true");
+    fold("'abc' != 'def'", "true");
+    fold("'a' != 'a'", "false");
+
+    fold("1 < 20", "true");
+    fold("3 < 3", "false");
+    fold("10 > 1.0", "true");
+    fold("10 > 10.25", "false");
+    foldSame("x == x");
+    fold("x < x", "false");
+    fold("x > x", "false");
+    fold("1 <= 1", "true");
+    fold("1 <= 0", "false");
+    fold("0 >= 0", "true");
+    fold("-1 >= 9", "false");
+
+    fold("true == true", "true");
+    fold("false == null", "false");
+    fold("false == true", "false");
+    fold("true == null", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComparison2
+  public void testFoldComparison2() {
+    fold("x = 0 === 0", "x = true");
+    fold("x = 1 === 2", "x = false");
+    fold("x = 'abc' === 'def'", "x = false");
+    fold("x = 'abc' === 'abc'", "x = true");
+    fold("x = \"\" === ''", "x = true");
+    fold("x = foo() === bar()", "x = foo()===bar()");
+
+    fold("x = 1 !== 0", "x = true");
+    fold("x = 'abc' !== 'def'", "x = true");
+    fold("x = 'a' !== 'a'", "x = false");
+
+    fold("x = y === y", "x = y===y");
+
+    fold("x = true === true", "x = true");
+    fold("x = false === false", "x = true");
+    fold("x = false === null", "x = false");
+    fold("x = false === true", "x = false");
+    fold("x = true === null", "x = false");
+
+    fold("0 === 0", "true");
+    fold("1 === 2", "false");
+    fold("'abc' === 'def'", "false");
+    fold("'abc' === 'abc'", "true");
+    fold("\"\" === ''", "true");
+    foldSame("foo() === bar()");
+
+    
+    foldSame("1 === '1'");
+    foldSame("1 === true");
+    foldSame("1 !== '1'");
+    foldSame("1 !== true");
+
+    fold("1 !== 0", "true");
+    fold("'abc' !== 'def'", "true");
+    fold("'a' !== 'a'", "false");
+
+    foldSame("x === x");
+
+    fold("true === true", "true");
+    fold("false === null", "false");
+    fold("false === true", "false");
+    fold("true === null", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComparison3
+  public void testFoldComparison3() {
+    fold("x = !1 == !0", "x = false");
+
+    fold("x = !0 == !0", "x = true");
+    fold("x = !1 == !1", "x = true");
+    fold("x = !1 == null", "x = false");
+    fold("x = !1 == !0", "x = false");
+    fold("x = !0 == null", "x = false");
+
+    fold("!0 == !0", "true");
+    fold("!1 == null", "false");
+    fold("!1 == !0", "false");
+    fold("!0 == null", "false");
+
+    fold("x = !0 === !0", "x = true");
+    fold("x = !1 === !1", "x = true");
+    fold("x = !1 === null", "x = false");
+    fold("x = !1 === !0", "x = false");
+    fold("x = !0 === null", "x = false");
+
+    fold("!0 === !0", "true");
+    fold("!1 === null", "false");
+    fold("!1 === !0", "false");
+    fold("!0 === null", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldGetElem
+  public void testFoldGetElem() {
+    fold("x = [,10][0]", "x = void 0");
+    fold("x = [10, 20][0]", "x = 10");
+    fold("x = [10, 20][1]", "x = 20");
+    fold("x = [10, 20][0.5]", "",
+        PeepholeFoldConstants.INVALID_GETELEM_INDEX_ERROR);
+    fold("x = [10, 20][-1]",    "",
+        PeepholeFoldConstants.INDEX_OUT_OF_BOUNDS_ERROR);
+    fold("x = [10, 20][2]",     "",
+        PeepholeFoldConstants.INDEX_OUT_OF_BOUNDS_ERROR);
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldComplex
+  public void testFoldComplex() {
+    fold("x = (3 / 1.0) + (1 * 2)", "x = 5");
+    fold("x = (1 == 1.0) && foo() && true", "x = foo()&&true");
+    fold("x = 'abc' + 5 + 10", "x = \"abc510\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLeft
+  public void testFoldLeft() {
+    foldSame("(+x - 1) + 2"); 
+    fold("(+x + 1) + 2", "+x + 3");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldArrayLength
+  public void testFoldArrayLength() {
+    
+    fold("x = [].length", "x = 0");
+    fold("x = [1,2,3].length", "x = 3");
+    fold("x = [a,b].length", "x = 2");
+
+    
+    fold("x = [,,1].length", "x = 3");
+
+    
+    fold("x = [foo(), 0].length", "x = [foo(),0].length");
+    fold("x = y.length", "x = y.length");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldStringLength
+  public void testFoldStringLength() {
+    
+    fold("x = ''.length", "x = 0");
+    fold("x = '123'.length", "x = 3");
+
+    
+    fold("x = '123\u01dc'.length", "x = 4");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldTypeof
+  public void testFoldTypeof() {
+    fold("x = typeof 1", "x = \"number\"");
+    fold("x = typeof 'foo'", "x = \"string\"");
+    fold("x = typeof true", "x = \"boolean\"");
+    fold("x = typeof false", "x = \"boolean\"");
+    fold("x = typeof null", "x = \"object\"");
+    fold("x = typeof undefined", "x = \"undefined\"");
+    fold("x = typeof void 0", "x = \"undefined\"");
+    fold("x = typeof []", "x = \"object\"");
+    fold("x = typeof [1]", "x = \"object\"");
+    fold("x = typeof [1,[]]", "x = \"object\"");
+    fold("x = typeof {}", "x = \"object\"");
+    fold("x = typeof function() {}", "x = 'function'");
+
+    foldSame("x = typeof[1,[foo()]]");
+    foldSame("x = typeof{bathwater:baby()}");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldInstanceOf
+  public void testFoldInstanceOf() {
+    
+    fold("64 instanceof Object", "false");
+    fold("64 instanceof Number", "false");
+    fold("'' instanceof Object", "false");
+    fold("'' instanceof String", "false");
+    fold("true instanceof Object", "false");
+    fold("true instanceof Boolean", "false");
+    fold("!0 instanceof Object", "false");
+    fold("!0 instanceof Boolean", "false");
+    fold("false instanceof Object", "false");
+    fold("null instanceof Object", "false");
+    fold("undefined instanceof Object", "false");
+    fold("NaN instanceof Object", "false");
+    fold("Infinity instanceof Object", "false");
+
+    
+    fold("[] instanceof Object", "true");
+    fold("({}) instanceof Object", "true");
+
+    
+    foldSame("new Foo() instanceof Object");
+    
+    foldSame("[] instanceof Foo");
+    foldSame("({}) instanceof Foo");
+
+    fold("(function() {}) instanceof Object", "true");
+
+    
+    foldSame("x instanceof Foo");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testDivision
+  public void testDivision() {
+    
+    fold("print(1/3)", "print(1/3)");
+
+    
+    
+    fold("print(1/2)", "print(0.5)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testAssignOpsLate
+  public void testAssignOpsLate() {
+    late = true;
+    fold("x=x+y", "x+=y");
+    foldSame("x=y+x");
+    fold("x=x*y", "x*=y");
+    fold("x=y*x", "x*=y");
+    fold("x.y=x.y+z", "x.y+=z");
+    foldSame("next().x = next().x + 1");
+
+    fold("x=x-y", "x-=y");
+    foldSame("x=y-x");
+    fold("x=x|y", "x|=y");
+    fold("x=y|x", "x|=y");
+    fold("x=x*y", "x*=y");
+    fold("x=y*x", "x*=y");
+    fold("x.y=x.y+z", "x.y+=z");
+    foldSame("next().x = next().x + 1");
+    
+    fold("({a:1}).a = ({a:1}).a + 1", "({a:1}).a = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testAssignOpsEarly
+ public void testAssignOpsEarly() {
+    late = false;
+    foldSame("x=x+y");
+    foldSame("x=y+x");
+    foldSame("x=x*y");
+    foldSame("x=y*x");
+    foldSame("x.y=x.y+z");
+    foldSame("next().x = next().x + 1");
+
+    foldSame("x=x-y");
+    foldSame("x=y-x");
+    foldSame("x=x|y");
+    foldSame("x=y|x");
+    foldSame("x=x*y");
+    foldSame("x=y*x");
+    foldSame("x.y=x.y+z");
+    foldSame("next().x = next().x + 1");
+    
+    fold("({a:1}).a = ({a:1}).a + 1", "({a:1}).a = 2");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldAdd1
+  public void testFoldAdd1() {
+    fold("x=false+1","x=1");
+    fold("x=true+1","x=2");
+    fold("x=1+false","x=1");
+    fold("x=1+true","x=2");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLiteralNames
+  public void testFoldLiteralNames() {
+    foldSame("NaN == NaN");
+    foldSame("Infinity == Infinity");
+    foldSame("Infinity == NaN");
+    fold("undefined == NaN", "false");
+    fold("undefined == Infinity", "false");
+
+    foldSame("Infinity >= Infinity");
+    foldSame("NaN >= NaN");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLiteralsTypeMismatches
+  public void testFoldLiteralsTypeMismatches() {
+    fold("true == true", "true");
+    fold("true == false", "false");
+    fold("true == null", "false");
+    fold("false == null", "false");
+
+    
+    fold("null <= null", "true"); 
+    fold("null >= null", "true");
+    fold("null > null", "false");
+    fold("null < null", "false");
+
+    fold("false >= null", "true"); 
+    fold("false <= null", "true");
+    fold("false > null", "false");
+    fold("false < null", "false");
+
+    fold("true >= null", "true");  
+    fold("true <= null", "false");
+    fold("true > null", "true");
+    fold("true < null", "false");
+
+    fold("true >= false", "true");  
+    fold("true <= false", "false");
+    fold("true > false", "true");
+    fold("true < false", "false");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLeftChildConcat
+  public void testFoldLeftChildConcat() {
+    foldSame("x +5 + \"1\"");
+    fold("x+\"5\" + \"1\"", "x + \"51\"");
+    
+    fold("\"a\"+(\"b\"+c)","\"ab\"+c");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLeftChildOp
+  public void testFoldLeftChildOp() {
+    fold("x * Infinity * 2", "x * Infinity");
+    foldSame("x - Infinity - 2"); 
+    foldSame("x - 1 + Infinity");
+    foldSame("x - 2 + 1");
+    foldSame("x - 2 + 3");
+    foldSame("1 + x - 2 + 1");
+    foldSame("1 + x - 2 + 3");
+    foldSame("1 + x - 2 + 3 - 1");
+    foldSame("f(x)-0");
+    foldSame("x-0-0");
+    foldSame("x+2-2+2");
+    foldSame("x+2-2+2-2");
+    foldSame("x-2+2");
+    foldSame("x-2+2-2");
+    foldSame("x-2+2-2+2");
+
+    foldSame("1+x-0-NaN");
+    foldSame("1+f(x)-0-NaN");
+    foldSame("1+x-0+NaN");
+    foldSame("1+f(x)-0+NaN");
+
+    foldSame("1+x+NaN"); 
+    foldSame("x+2-2");   
+    foldSame("x+2");  
+    foldSame("x-2");  
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldSimpleArithmeticOp
+  public void testFoldSimpleArithmeticOp() {
+    foldSame("x*NaN");
+    foldSame("NaN/y");
+    foldSame("f(x)-0");
+    foldSame("f(x)*1");
+    foldSame("1*f(x)");
+    foldSame("0+a+b");
+    foldSame("0-a-b");
+    foldSame("a+b-0");
+    foldSame("(1+x)*NaN");
+
+    foldSame("(1+f(x))*NaN"); 
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldLiteralsAsNumbers
+  public void testFoldLiteralsAsNumbers() {
+    fold("x/'12'","x/12");
+    fold("x/('12'+'6')", "x/126");
+    fold("true*x", "1*x");
+    fold("x/false", "x/0");  
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testNotFoldBackToTrueFalse
+  public void testNotFoldBackToTrueFalse() {
+    late = false;
+    fold("!0", "true");
+    fold("!1", "false");
+    fold("!3", "false");
+
+    late = true;
+    foldSame("!0");
+    foldSame("!1");
+    fold("!3", "false");
+    foldSame("false");
+    foldSame("true");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldBangConstants
+  public void testFoldBangConstants() {
+    fold("1 + !0", "2");
+    fold("1 + !1", "1");
+    fold("'a ' + !1", "'a false'");
+    fold("'a ' + !0", "'a true'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldMixed
+  public void testFoldMixed() {
+    fold("''+[1]", "'1'");
+    foldSame("false+[]"); 
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldVoid
+  public void testFoldVoid() {
+    foldSame("void 0");
+    fold("void 1", "void 0");
+    fold("void x", "void 0");
+    fold("void x()", "void x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testObjectLiteral
+  public void testObjectLiteral() {
+    test("(!{})", "false");
+    test("(!{a:1})", "false");
+    testSame("(!{a:foo()})");
+    testSame("(!{'a':foo()})");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testArrayLiteral
+  public void testArrayLiteral() {
+    test("(![])", "false");
+    test("(![1])", "false");
+    test("(![a])", "false");
+    testSame("(![foo()])");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testIssue601
+  public void testIssue601() {
+    testSame("'\\v' == 'v'");
+    testSame("'v' == '\\v'");
+    testSame("'\\u000B' == '\\v'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldObjectLiteralRef1
+  public void testFoldObjectLiteralRef1() {
+    
+    testSame("var x = ({a:foo(),b:bar()}).a");
+    testSame("var x = ({a:1,b:bar()}).a");
+    testSame("function f() { return {b:foo(), a:2}.a; }");
+
+    
+    testSame("({a:x}).a = 1");
+    test("({a:x}).a += 1", "({a:x}).a = x + 1");
+    testSame("({a:x}).a ++");
+    testSame("({a:x}).a --");
+
+    
+    testSame("({a:function(){return this}}).a");
+    testSame("({get a() {return this}}).a");
+    testSame("({set a(b) {return this}}).a");
+
+    
+    testSame("({}).a");
+
+    
+    testSame("({}).a");
+    testSame("({set a(b) {}}).a");
+    
+    test("({a:1,set a(b) {}}).a", "1");
+
+    
+    test("({get a() {}}).a", "(function (){})()");
+    
+    test("({get a() {},set a(b) {}}).a", "(function (){})()");
+
+    
+    test("var x = ({a:function(){return 1}}).a",
+         "var x = function(){return 1}");
+
+    test("var x = ({a:1}).a", "var x = 1");
+    test("var x = ({a:1, a:2}).a", "var x = 2");
+    test("var x = ({a:1, a:foo()}).a", "var x = foo()");
+    test("var x = ({a:foo()}).a", "var x = foo()");
+
+    test("function f() { return {a:1, b:2}.a; }",
+         "function f() { return 1; }");
+
+    
+    test("var x = ({'a':1})['a']", "var x = 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testFoldObjectLiteralRef2
+  public void testFoldObjectLiteralRef2() {
+    late = false;
+    test("({a:x}).a += 1", "({a:x}).a = x + 1");
+    late = true;
+    testSame("({a:x}).a += 1");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testIEString
+  public void testIEString() {
+    testSame("!+'\\v1'");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testIssue522
+  public void testIssue522() {
+    testSame("[][1] = 1;");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testInvertibleOperators
+  public void testInvertibleOperators() {
+    Map<String, String> inverses = ImmutableMap.<String, String>builder()
+        .put("==", "!=")
+        .put("===", "!==")
+        .put("<=", ">")
+        .put("<", ">=")
+        .put(">=", "<")
+        .put(">", "<=")
+        .put("!=", "==")
+        .put("!==", "===")
+        .build();
+    Set<String> comparators = ImmutableSet.of("<=", "<", ">=", ">");
+    Set<String> equalitors = ImmutableSet.of("==", "===");
+    Set<String> uncomparables = ImmutableSet.of("undefined", "void 0");
+    List<String> operators = ImmutableList.copyOf(inverses.values());
+    for (int iOperandA = 0; iOperandA < LITERAL_OPERANDS.size(); iOperandA++) {
+      for (int iOperandB = 0;
+           iOperandB < LITERAL_OPERANDS.size();
+           iOperandB++) {
+        for (int iOp = 0; iOp < operators.size(); iOp++) {
+          String a = LITERAL_OPERANDS.get(iOperandA);
+          String b = LITERAL_OPERANDS.get(iOperandB);
+          String op = operators.get(iOp);
+          String inverse = inverses.get(op);
+
+          
+          if (comparators.contains(op) &&
+              (uncomparables.contains(a) || uncomparables.contains(b))) {
+            assertSameResults(join(a, op, b), "false");
+            assertSameResults(join(a, inverse, b), "false");
+          } else if (a.equals(b) && equalitors.contains(op)) {
+            if (a.equals("NaN") || a.equals("Infinity")) {
+              foldSame(join(a, op, b));
+              foldSame(join(a, inverse, b));
+            } else {
+              assertSameResults(join(a, op, b), "true");
+              assertSameResults(join(a, inverse, b), "false");
+            }
+          } else {
+            assertNotSameResults(join(a, op, b), join(a, inverse, b));
+          }
+        }
+      }
+    }
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldConstantsTest::testCommutativeOperators
+  public void testCommutativeOperators() {
+    late = true;
+    List<String> operators =
+        ImmutableList.of(
+            "==",
+            "!=",
+            "===",
+            "!==",
+            "*",
+            "|",
+            "&",
+            "^");
+    for (int iOperandA = 0; iOperandA < LITERAL_OPERANDS.size(); iOperandA++) {
+      for (int iOperandB = iOperandA;
+           iOperandB < LITERAL_OPERANDS.size();
+           iOperandB++) {
+        for (int iOp = 0; iOp < operators.size(); iOp++) {
+          String a = LITERAL_OPERANDS.get(iOperandA);
+          String b = LITERAL_OPERANDS.get(iOperandB);
+          String op = operators.get(iOp);
+
+          
+          
+          assertSameResultsOrUncollapsed(join(a, op, b), join(b, op, a));
+        }
+      }
+    }
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofObject
+  public void testFoldTypeofObject() {
+    test("var x = {};typeof x",
+         "var x = {};\"object\"");
+
+    test("var x = [];typeof x",
+         "var x = [];\"object\"");
+
+    
+    test("var x = null;typeof x",
+         "var x = null;\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofString
+  public void testFoldTypeofString() {
+    test("var x = \"foo\";typeof x",
+         "var x = \"foo\";\"string\"");
+
+    test("var x = new String(\"foo\");typeof x",
+         "var x = new String(\"foo\");\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofNumber
+  public void testFoldTypeofNumber() {
+    test("var x = 10;typeof x",
+         "var x = 10;\"number\"");
+
+    test("var x = new Number(6);typeof x",
+         "var x = new Number(6);\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofBoolean
+  public void testFoldTypeofBoolean() {
+    test("var x = false;typeof x",
+         "var x = false;\"boolean\"");
+
+    test("var x = new Boolean(true);typeof x",
+         "var x = new Boolean(true);\"object\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testFoldTypeofUndefined
+  public void testFoldTypeofUndefined() {
+    test("var x = undefined;typeof x",
+         "var x = undefined;\"undefined\"");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testDontFoldTypeofUnionTypes
+  public void testDontFoldTypeofUnionTypes() {
+    
+    testSame("var x = (unknown ? {} : null);typeof x");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testDontFoldTypeofSideEffects
+  public void testDontFoldTypeofSideEffects() {
+    
+    testSame("var x = 6 ;typeof (x++)");
+  }
+
+// com.google.javascript.jscomp.PeepholeFoldWithTypesTest::testDontFoldTypeofWithTypeCheckDisabled
+  public void testDontFoldTypeofWithTypeCheckDisabled() {
+    disableTypeCheck();
+    testSame("var x = {};typeof x");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testTrueFalse
+  public void testTrueFalse() {
+    late = false;
+    foldSame("x = true");
+    foldSame("x = false");
+    fold("x = !1", "x = false");
+    fold("x = !0", "x = true");
+    late = true;
+    fold("x = true", "x = !0");
+    fold("x = false", "x = !1");
+    foldSame("x = !1");
+    foldSame("x = !0");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldOneChildBlocksIntegration
+  public void testFoldOneChildBlocksIntegration() {
+     fold("function f(){switch(foo()){default:{break}}}",
+          "function f(){foo()}");
+
+     fold("function f(){switch(x){default:{break}}}",
+          "function f(){}");
+
+     fold("function f(){switch(x){default:x;case 1:return 2}}",
+          "function f(){switch(x){default:case 1:return 2}}");
+
+     
+     fold("if(x){if(true){foo();foo()}else{bar();bar()}}",
+          "if(x){foo();foo()}");
+
+     fold("if(x){if(false){foo();foo()}else{bar();bar()}}",
+          "if(x){bar();bar()}");
+
+     
+     fold("if(x()){}", "x()");
+
+     fold("if(x()){} else {x()}", "x()||x()");
+     fold("if(x){}", ""); 
+     fold("if(a()){A()} else if (b()) {} else {C()}", "a()?A():b()||C()");
+
+     fold("if(a()){} else if (b()) {} else {C()}",
+          "a()||b()||C()");
+     fold("if(a()){A()} else if (b()) {} else if (c()) {} else{D()}",
+          "a()?A():b()||c()||D()");
+     fold("if(a()){} else if (b()) {} else if (c()) {} else{D()}",
+          "a()||b()||c()||D()");
+     fold("if(a()){A()} else if (b()) {} else if (c()) {} else{}",
+          "a()?A():b()||c()");
+
+     
+     fold("function foo(){if(x()){}}", "function foo(){x()}");
+
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldOneChildBlocksStringCompare
+  public void testFoldOneChildBlocksStringCompare() {
+    
+    assertResultString("if(x){if(y){var x;}}else{var z;}",
+        "if(x){if(y)var x}else var z");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testNecessaryDanglingElse
+  public void testNecessaryDanglingElse() {
+    
+    
+    
+    assertResultString(
+        "if(x)if(y){y();z()}else;else x()", "if(x){if(y){y();z()}}else x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldReturnsIntegration
+  public void testFoldReturnsIntegration() {
+    
+    fold("function f(){if(x)return;else return}",
+         "function f(){}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBug1059649
+  public void testBug1059649() {
+    
+    fold("if(x){var y=3;}var z=5", "if(x)var y=3;var z=5");
+
+    
+    foldSame("if(x){var y=3;}else{var y=4;}var z=5");
+    fold("while(x){var y=3;}var z=5", "while(x)var y=3;var z=5");
+    fold("for(var i=0;i<10;i++){var y=3;}var z=5",
+         "for(var i=0;i<10;i++)var y=3;var z=5");
+    fold("for(var i in x){var y=3;}var z=5",
+         "for(var i in x)var y=3;var z=5");
+    fold("do{var y=3;}while(x);var z=5", "do var y=3;while(x);var z=5");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testHookIfIntegration
+  public void testHookIfIntegration() {
+    fold("if (false){ x = 1; } else if (cond) { x = 2; } else { x = 3; }",
+         "x=cond?2:3");
+
+    fold("x?void 0:y()", "x||y()");
+    fold("!x?void 0:y()", "(!x)||y()");
+    fold("x?y():void 0", "x&&y()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testRemoveDuplicateStatementsIntegration
+  public void testRemoveDuplicateStatementsIntegration() {
+    fold("function z() {if (a) { return true }" +
+         "else if (b) { return true }" +
+         "else { return true }}",
+         "function z() {return !0;}");
+
+    fold("function z() {if (a()) { return true }" +
+         "else if (b()) { return true }" +
+         "else { return true }}",
+         "function z() {a()||b();return !0;}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldLogicalOpIntegration
+  public void testFoldLogicalOpIntegration() {
+    test("if(x && true) z()", "x&&z()");
+    test("if(x && false) z()", "");
+    fold("if(x || 3) z()", "z()");
+    fold("if(x || false) z()", "x&&z()");
+    test("if(x==y && false) z()", "");
+    
+    fold("if(y() || x || 3) z()", "(y()||1)&&z()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldBitwiseOpStringCompareIntegration
+  public void testFoldBitwiseOpStringCompareIntegration() {
+    assertResultString("while(-1 | 0){}", "while(1);");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testVarLiftingIntegration
+  public void testVarLiftingIntegration() {
+    fold("if(true);else var a;", "var a");
+    fold("if(false) foo();else var a;", "var a");
+    fold("if(true)var a;else;", "var a");
+    fold("if(false)var a;else;", "var a");
+    fold("if(false)var a,b;", "var b; var a");
+    fold("if(false){var a;var a;}", "var a");
+    fold("if(false)var a=function(){var b};", "var a");
+    fold("if(a)if(false)var a;else var b;", "var a;if(a)var b");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBug1438784
+  public void testBug1438784() throws Exception {
+    fold("for(var i=0;i<10;i++)if(x)x.y;", "for(var i=0;i<10;i++);");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldUselessWhileIntegration
+  public void testFoldUselessWhileIntegration() {
+    fold("while(!true) { foo() }", "");
+    fold("while(!false) foo() ", "while(1) foo()");
+    fold("while(!void 0) foo()", "while(1) foo()");
+
+    
+    fold("if(foo())while(false){foo()}else bar()", "foo()||bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldUselessForIntegration
+  public void testFoldUselessForIntegration() {
+    fold("for(;!true;) { foo() }", "");
+    fold("for(;void 0;) { foo() }", "");
+    fold("for(;undefined;) { foo() }", "");
+    fold("for(;1;) foo()", "for(;;) foo()");
+    fold("for(;!void 0;) foo()", "for(;;) foo()");
+
+    
+    fold("if(foo())for(;false;){foo()}else bar()", "foo()||bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldUselessDoIntegration
+  public void testFoldUselessDoIntegration() {
+    test("do { foo() } while(!true);", "foo()");
+    fold("do { foo() } while(void 0);", "foo()");
+    fold("do { foo() } while(undefined);", "foo()");
+    fold("do { foo() } while(!void 0);", "do { foo() } while(1);");
+
+    
+    test("if(foo())do {foo()} while(false) else bar()", "foo()?foo():bar()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testMinimizeWhileConstantConditionIntegration
+  public void testMinimizeWhileConstantConditionIntegration() {
+    fold("while(!false) foo()", "while(1) foo()");
+    fold("while(202) foo()", "while(1) foo()");
+    fold("while(Infinity) foo()", "while(1) foo()");
+    fold("while('text') foo()", "while(1) foo()");
+    fold("while([]) foo()", "while(1) foo()");
+    fold("while({}) foo()", "while(1) foo()");
+    fold("while(/./) foo()", "while(1) foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testMinimizeExpr
+  public void testMinimizeExpr() {
+    test("!!true", "");
+
+    fold("!!x()", "x()");
+    test("!(!x()&&!y())", "x()||y()");
+    fold("x()||!!y()", "x()||y()");
+
+    
+    fold("!!x()&&y()", "x()&&y()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBug1509085
+  public void testBug1509085() {
+    PeepholeIntegrationTest oneRepetitiontest = new PeepholeIntegrationTest() {
+      @Override
+      protected int getNumRepetitions() {
+        return 1;
+      }
+    };
+
+    oneRepetitiontest.test("x ? x() : void 0", "x&&x();");
+    oneRepetitiontest.foldSame("y = x ? x() : void 0");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBugIssue3
+  public void testBugIssue3() {
+    foldSame("function foo() {" +
+             "  if(sections.length != 1) children[i] = 0;" +
+             "  else var selectedid = children[i]" +
+             "}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testBugIssue43
+  public void testBugIssue43() {
+    foldSame("function foo() {" +
+             "  if (a) { var b = 1; } else { a.b = 1; }" +
+             "}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldNegativeBug
+  public void testFoldNegativeBug() {
+    fold("while(-3){};", "while(1);");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testNoNormalizeLabeledExpr
+  public void testNoNormalizeLabeledExpr() {
+    enableNormalize(true);
+    foldSame("var x; foo:{x = 3;}");
+    foldSame("var x; foo:x = 3;");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit1
+  public void testShortCircuit1() {
+    test("1 && a()", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit2
+  public void testShortCircuit2() {
+    test("1 && a() && 2", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit3
+  public void testShortCircuit3() {
+    test("a() && 1 && 2", "a()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testShortCircuit4
+  public void testShortCircuit4() {
+    test("a() && (1 && b())", "a() && b()");
+    test("a() && 1 && b()", "a() && b()");
+    test("(a() && 1) && b()", "a() && b()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testMinimizeExprCondition
+  public void testMinimizeExprCondition() {
+    fold("(x || true) && y()", "y()");
+    fold("(x || false) && y()", "x&&y()");
+    fold("(x && true) && y()", "x && y()");
+    fold("(x && false) && y()", "");
+    fold("a = x || false ? b : c", "a=x?b:c");
+    fold("do {x()} while((x && false) && y())", "x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testTrueFalseFolding
+  public void testTrueFalseFolding() {
+    fold("x = true", "x = !0");
+    fold("x = false", "x = !1");
+    fold("x = !3", "x = !1");
+    fold("x = true && !0", "x = !0");
+    fold("x = !!!!!!!!!!!!3", "x = !0");
+    fold("if(!3){x()}", "");
+    fold("if(!!3){x()}", "x()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testCommaSplitingConstantCondition
+  public void testCommaSplitingConstantCondition() {
+    fold("(b=0,b=1);if(b)x=b;", "b=0;b=1;x=b;");
+    fold("(b=0,b=1);if(b)x=b;", "b=0;b=1;x=b;");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testAvoidCommaSplitting
+  public void testAvoidCommaSplitting() {
+    fold("x(),y(),z()", "x();y();z()");
+    late = false;
+    foldSame("x(),y(),z()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testObjectLiteral
+  public void testObjectLiteral() {
+    test("({})", "");
+    test("({a:1})", "");
+    test("({a:foo()})", "foo()");
+    test("({'a':foo()})", "foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testArrayLiteral
+  public void testArrayLiteral() {
+    test("([])", "");
+    test("([1])", "");
+    test("([a])", "");
+    test("([foo()])", "foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldIfs1
+  public void testFoldIfs1() {
+    fold("function f() {if (x) return 1; else if (y) return 1;}",
+         "function f() {if (x||y) return 1;}");
+    fold("function f() {if (x) return 1; else {if (y) return 1; else foo();}}",
+         "function f() {if (x||y) return 1; foo();}");
+  }
+
+// com.google.javascript.jscomp.PeepholeIntegrationTest::testFoldIfs2
+  public void testFoldIfs2() {
+    fold("function f() {if (x) { a(); } else if (y) { a() }}",
+         "function f() {x?a():y&&a();}");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testEmptyPass
+  public void testEmptyPass() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of();
+
+    testSame("var x; var y;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationOrder
+  public void testOptimizationOrder() {
+    
+
+    final List<String> visitationLog = Lists.newArrayList();
+
+    AbstractPeepholeOptimization note1Applied =
+        new AbstractPeepholeOptimization() {
+      @Override
+      public Node optimizeSubtree(Node node) {
+        if (node.isName()) {
+          visitationLog.add(node.getString() + "1");
+        }
+
+        return node;
+      }
+    };
+
+    AbstractPeepholeOptimization note2Applied =
+        new AbstractPeepholeOptimization() {
+      @Override
+      public Node optimizeSubtree(Node node) {
+        if (node.isName()) {
+          visitationLog.add(node.getString() + "2");
+        }
+
+        return node;
+      }
+    };
+
+    currentPeepholePasses =
+      ImmutableList.<
+       AbstractPeepholeOptimization>of(note1Applied, note2Applied);
+
+    test("var x; var y", "var x; var y");
+
+    
+
+    assertEquals(4, visitationLog.size());
+    assertEquals("x1", visitationLog.get(0));
+    assertEquals("x2", visitationLog.get(1));
+    assertEquals("y1", visitationLog.get(2));
+    assertEquals("y2", visitationLog.get(3));
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationRemovingSubtreeChild
+  public void testOptimizationRemovingSubtreeChild() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(new
+          RemoveNodesNamedXUnderVarOptimization());
+
+    test("var x,y;", "var y;");
+    test("var y,x;", "var y;");
+    test("var x,y,x;", "var y;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationRemovingSubtree
+  public void testOptimizationRemovingSubtree() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(new
+          RemoveNodesNamedXOptimization());
+
+    test("var x,y;", "var y;");
+    test("var y,x;", "var y;");
+    test("var x,y,x;", "var y;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationRemovingSubtreeParent
+  public void testOptimizationRemovingSubtreeParent() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(new
+          RemoveParentVarsForNodesNamedX());
+
+    test("var x; var y", "var y");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationsRemoveParentAfterRemoveChild
+  public void testOptimizationsRemoveParentAfterRemoveChild() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(
+          new RemoveNodesNamedXOptimization(),
+          new RemoveParentVarsForNodesNamedX());
+
+    test("var x,y; var z;", "var y; var z;");
+  }
+
+// com.google.javascript.jscomp.PeepholeOptimizationsPassTest::testOptimizationReplacingNode
+  public void testOptimizationReplacingNode() {
+    currentPeepholePasses = ImmutableList.<AbstractPeepholeOptimization>of(
+          new RenameYToX(),
+          new RemoveParentVarsForNodesNamedX());
+
+    test("var y; var z;", "var z;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldBlock
+  public void testFoldBlock() {
+    fold("{{foo()}}", "foo()");
+    fold("{foo();{}}", "foo()");
+    fold("{{foo()}{}}", "foo()");
+    fold("{{foo()}{bar()}}", "foo();bar()");
+    fold("{if(false)foo(); {bar()}}", "bar()");
+    fold("{if(false)if(false)if(false)foo(); {bar()}}", "bar()");
+
+    fold("{'hi'}", "");
+    fold("{x==3}", "");
+    fold("{ (function(){x++}) }", "");
+    fold("function f(){return;}", "function f(){return;}");
+    fold("function f(){return 3;}", "function f(){return 3}");
+    fold("function f(){if(x)return; x=3; return; }",
+         "function f(){if(x)return; x=3; return; }");
+    fold("{x=3;;;y=2;;;}", "x=3;y=2");
+
+    
+    fold("while(x()){x}", "while(x());");
+    fold("while(x()){x()}", "while(x())x()");
+    fold("for(x=0;x<100;x++){x}", "for(x=0;x<100;x++);");
+    fold("for(x in y){x}", "for(x in y);");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldBlocksWithManyChildren
+  public void testFoldBlocksWithManyChildren() {
+    fold("function f() { if (false) {} }", "function f(){}");
+    fold("function f() { { if (false) {} if (true) {} {} } }",
+         "function f(){}");
+    fold("{var x; var y; var z; function f() { { var a; { var b; } } } }",
+         "var x;var y;var z;function f(){var a;var b}");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testIf
+  public void testIf() {
+    fold("if (1){ x=1; } else { x = 2;}", "x=1");
+    fold("if (false){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (undefined){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (null){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (void 0){ x = 1; } else { x = 2; }", "x=2");
+    fold("if (void foo()){ x = 1; } else { x = 2; }",
+         "foo();x=2");
+    fold("if (false){ x = 1; } else if (true) { x = 3; } else { x = 2; }",
+         "x=3");
+    fold("if (x){ x = 1; } else if (false) { x = 3; }",
+         "if(x)x=1");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testHook
+  public void testHook() {
+    fold("true ? a() : b()", "a()");
+    fold("false ? a() : b()", "b()");
+
+    fold("a() ? b() : true", "a() && b()");
+    fold("a() ? true : b()", "a() || b()");
+
+    fold("(a = true) ? b() : c()", "a = true, b()");
+    fold("(a = false) ? b() : c()", "a = false, c()");
+    fold("do {f()} while((a = true) ? b() : c())",
+         "do {f()} while((a = true) , b())");
+    fold("do {f()} while((a = false) ? b() : c())",
+         "do {f()} while((a = false) , c())");
+
+    fold("var x = (true) ? 1 : 0", "var x=1");
+    fold("var y = (true) ? ((false) ? 12 : (cond ? 1 : 2)) : 13",
+         "var y=cond?1:2");
+
+    foldSame("var z=x?void 0:y()");
+    foldSame("z=x?void 0:y()");
+    foldSame("z*=x?void 0:y()");
+
+    foldSame("var z=x?y():void 0");
+    foldSame("(w?x:void 0).y=z");
+    foldSame("(w?x:void 0).y+=z");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testConstantConditionWithSideEffect1
+  public void testConstantConditionWithSideEffect1() {
+    fold("if (b=true) x=1;", "b=true;x=1");
+    fold("if (b=/ab/) x=1;", "b=/ab/;x=1");
+    fold("if (b=/ab/){ x=1; } else { x=2; }", "b=/ab/;x=1");
+    fold("var b;b=/ab/;if(b)x=1;", "var b;b=/ab/;x=1");
+    foldSame("var b;b=f();if(b)x=1;");
+    fold("var b=/ab/;if(b)x=1;", "var b=/ab/;x=1");
+    foldSame("var b=f();if(b)x=1;");
+    foldSame("b=b++;if(b)x=b;");
+    fold("(b=0,b=1);if(b)x=b;", "b=0,b=1;if(b)x=b;");
+    fold("b=1;if(foo,b)x=b;","b=1;x=b;");
+    foldSame("b=1;if(foo=1,b)x=b;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testConstantConditionWithSideEffect2
+  public void testConstantConditionWithSideEffect2() {
+    fold("(b=true)?x=1:x=2;", "b=true,x=1");
+    fold("(b=false)?x=1:x=2;", "b=false,x=2");
+    fold("if (b=/ab/) x=1;", "b=/ab/;x=1");
+    fold("var b;b=/ab/;(b)?x=1:x=2;", "var b;b=/ab/;x=1");
+    foldSame("var b;b=f();(b)?x=1:x=2;");
+    fold("var b=/ab/;(b)?x=1:x=2;", "var b=/ab/;x=1");
+    foldSame("var b=f();(b)?x=1:x=2;");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testVarLifting
+  public void testVarLifting() {
+    fold("if(true)var a", "var a");
+    fold("if(false)var a", "var a");
+
+    
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldUselessWhile
+  public void testFoldUselessWhile() {
+    fold("while(false) { foo() }", "");
+
+    fold("while(void 0) { foo() }", "");
+    fold("while(undefined) { foo() }", "");
+
+    foldSame("while(true) foo()");
+
+    fold("while(false) { var a = 0; }", "var a");
+
+    
+    fold("while(false) { foo(); continue }", "");
+
+    fold("while(0) { foo() }", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldUselessFor
+  public void testFoldUselessFor() {
+    fold("for(;false;) { foo() }", "");
+    fold("for(;void 0;) { foo() }", "");
+    fold("for(;undefined;) { foo() }", "");
+    fold("for(;true;) foo() ", "for(;;) foo() ");
+    foldSame("for(;;) foo()");
+    fold("for(;false;) { var a = 0; }", "var a");
+
+    
+    fold("for(;false;) { foo(); continue }", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldUselessDo
+  public void testFoldUselessDo() {
+    fold("do { foo() } while(false);", "foo()");
+    fold("do { foo() } while(void 0);", "foo()");
+    fold("do { foo() } while(undefined);", "foo()");
+    fold("do { foo() } while(true);", "do { foo() } while(true);");
+    fold("do { var a = 0; } while(false);", "var a=0");
+
+    fold("do { var a = 0; } while(!{a:foo()});", "var a=0;foo()");
+
+    
+    foldSame("do { foo(); continue; } while(0)");
+    foldSame("do { foo(); break; } while(0)");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testMinimizeWhileConstantCondition
+  public void testMinimizeWhileConstantCondition() {
+    fold("while(true) foo()", "while(true) foo()");
+    fold("while(0) foo()", "");
+    fold("while(0.0) foo()", "");
+    fold("while(NaN) foo()", "");
+    fold("while(null) foo()", "");
+    fold("while(undefined) foo()", "");
+    fold("while('') foo()", "");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testFoldConstantCommaExpressions
+  public void testFoldConstantCommaExpressions() {
+    fold("if (true, false) {foo()}", "");
+    fold("if (false, true) {foo()}", "foo()");
+    fold("true, foo()", "foo()");
+    fold("(1 + 2 + ''), foo()", "foo()");
+  }
+
+// com.google.javascript.jscomp.PeepholeRemoveDeadCodeTest::testRemoveUselessOps
+  public void testRemoveUselessOps() {
+    
+    
+    
+    
+    
+
+    
+    fold("Math.random()", "");
+    fold("Math.random(f() + g())", "f(),g();");
+    fold("Math.random(f(),g(),h())", "f(),g(),h();");
+
+    
+    foldSame("f();");
+    foldSame("(function () { f(); })();");
+
+    
+    
+    fold("(function () {})();", "");
+
+    
+    fold("(function () {});", "");
+    fold("(function f() {});", "");
+    
+    fold("(function () {foo();});", "");
+
+    
+    fold("+f()", "f()");
+    fold("a=(+f(),g())", "a=(f(),g())");
+    fold("a=(true,g())", "a=g()");
+    fold("f(),true", "f()");
+    fold("f() + g()", "f(),g()");
+
+    fold("for(;;+f()){}", "for(;;f()){}");
+    fold("for(+f();;g()){}", "for(f();;g()){}");
+    fold("for(;;Math.random(f(),g(),h())){}", "for(;;f(),g(),h()){}");
+
+    
+    fold("g() && +f()", "g() && f()");
+    fold("g() || +f()", "g() || f()");
+    fold("x ? g() : +f()", "x ? g() : f()");
+
+    fold("+x()", "x()");
+    fold("+x() * 2", "x()");
+    fold("-(+x() * 2)", "x()");
+    fold("2 -(+x() * 2)", "x()");
+    fold("x().foo", "x()");
+    foldSame("x().foo()");
+
+    foldSame("x++");
+    foldSame("++x");
+    foldSame("x--");
+    foldSame("--x");
+    foldSame("x = 2");
+    foldSame("x *= 2");
+
+    
+    foldSame("function f() {}");
+    foldSame("var x;");
+  }

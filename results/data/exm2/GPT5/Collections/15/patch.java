@@ -1,0 +1,20 @@
+public Object set(int index, Object object) {
+    int pos = indexOf(object);
+    Object removed = super.set(index, object);
+
+    if (pos == -1) {
+        set.add(object);
+        set.remove(removed);
+        return removed;
+    }
+    if (pos == index) {
+        // the object is already in the uniq list
+        // (and it hasn't been swapped with itself)
+        return removed;
+    }
+
+    super.remove(pos);
+    set.remove(removed);  // remove the item deleted by the set
+
+    return removed;  // return the item deleted by the set
+}

@@ -1,0 +1,55 @@
+// buggy function
+    public RealMatrix getCorrelationPValues() throws MathException {
+        TDistribution tDistribution = new TDistributionImpl(nObs - 2);
+        int nVars = correlationMatrix.getColumnDimension();
+        double[][] out = new double[nVars][nVars];
+        for (int i = 0; i < nVars; i++) {
+            for (int j = 0; j < nVars; j++) {
+                if (i == j) {
+                    out[i][j] = 0d;
+                } else {
+                    double r = correlationMatrix.getEntry(i, j);
+                    double t = Math.abs(r * Math.sqrt((nObs - 2)/(1 - r * r)));
+                    out[i][j] = 2 * (1 - tDistribution.cumulativeProbability(t));
+                }
+            }
+        }
+        return new BlockRealMatrix(out);
+    }
+
+// trigger testcase
+// org/apache/commons/math/stat/correlation/PearsonsCorrelationTest.java::testPValueNearZero
+public void testPValueNearZero() throws Exception {
+        /*
+         * Create a dataset that has r -> 1, p -> 0 as dimension increases.
+         * Prior to the fix for MATH-371, p vanished for dimension >= 14.
+         * Post fix, p-values diminish smoothly, vanishing at dimension = 127.
+         * Tested value is ~1E-303.
+         */
+        int dimension = 120; 
+        double[][] data = new double[dimension][2];
+        for (int i = 0; i < dimension; i++) {
+            data[i][0] = i;
+            data[i][1] = i + 1/((double)i + 1);
+        }
+        PearsonsCorrelation corrInstance = new PearsonsCorrelation(data);
+        assertTrue(corrInstance.getCorrelationPValues().getEntry(0, 1) > 0);
+    }
+
+// org/apache/commons/math/stat/correlation/PearsonsCorrelationTest.java::testPValueNearZero
+public void testPValueNearZero() throws Exception {
+        /*
+         * Create a dataset that has r -> 1, p -> 0 as dimension increases.
+         * Prior to the fix for MATH-371, p vanished for dimension >= 14.
+         * Post fix, p-values diminish smoothly, vanishing at dimension = 127.
+         * Tested value is ~1E-303.
+         */
+        int dimension = 120; 
+        double[][] data = new double[dimension][2];
+        for (int i = 0; i < dimension; i++) {
+            data[i][0] = i;
+            data[i][1] = i + 1/((double)i + 1);
+        }
+        PearsonsCorrelation corrInstance = new PearsonsCorrelation(data);
+        assertTrue(corrInstance.getCorrelationPValues().getEntry(0, 1) > 0);
+    }

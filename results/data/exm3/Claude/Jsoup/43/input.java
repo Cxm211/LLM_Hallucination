@@ -1,0 +1,35 @@
+// buggy function
+    private static <E extends Element> Integer indexInList(Element search, List<E> elements) {
+        Validate.notNull(search);
+        Validate.notNull(elements);
+
+        for (int i = 0; i < elements.size(); i++) {
+            E element = elements.get(i);
+            if (element.equals(search))
+                return i;
+        }
+        return null;
+    }
+
+// trigger testcase
+// org/jsoup/nodes/ElementTest.java::testElementSiblingIndexSameContent
+@Test public void testElementSiblingIndexSameContent() {
+        Document doc = Jsoup.parse("<div><p>One</p>...<p>One</p>...<p>One</p>");
+        Elements ps = doc.select("p");
+        assertTrue(0 == ps.get(0).elementSiblingIndex());
+        assertTrue(1 == ps.get(1).elementSiblingIndex());
+        assertTrue(2 == ps.get(2).elementSiblingIndex());
+    }
+
+// org/jsoup/nodes/ElementTest.java::testGetSiblingsWithDuplicateContent
+@Test public void testGetSiblingsWithDuplicateContent() {
+        Document doc = Jsoup.parse("<div><p>Hello<p id=1>there<p>this<p>this<p>is<p>an<p id=last>element</div>");
+        Element p = doc.getElementById("1");
+        assertEquals("there", p.text());
+        assertEquals("Hello", p.previousElementSibling().text());
+        assertEquals("this", p.nextElementSibling().text());
+        assertEquals("this", p.nextElementSibling().nextElementSibling().text());
+        assertEquals("is", p.nextElementSibling().nextElementSibling().nextElementSibling().text());
+        assertEquals("Hello", p.firstElementSibling().text());
+        assertEquals("element", p.lastElementSibling().text());
+    }

@@ -1,0 +1,13 @@
+public void visit(NodeTraversal t, Node n, Node parent) {
+  switch (n.getType()) {
+    case Token.WHILE:
+      if (CONVERT_WHILE_TO_FOR) {
+        Node expr = n.getFirstChild();
+        n.setType(Token.FOR);
+        n.addChildBefore(new Node(Token.EMPTY), expr);
+        n.addChildToBack(new Node(Token.EMPTY));
+        reportCodeChange("WHILE node");
+      }
+      break;
+  }
+}

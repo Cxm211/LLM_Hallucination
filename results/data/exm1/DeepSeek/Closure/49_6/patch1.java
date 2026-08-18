@@ -1,0 +1,3 @@
+public boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {
+    return true;
+  }

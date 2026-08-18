@@ -1,0 +1,439 @@
+We are given two buggy functions and a trigger testcase. We need to analyze and fix the bug, then generate additional trigger testcases that fail on buggy code and pass on fixed code.
+
+First, let's understand the bug. The testcase testLongerFloatingPoint constructs a number with 200 '1's then ".0". So it's a very long integer part followed by fraction. The test likely triggers a bug in number parsing when the integer part length exceeds the output buffer size, causing buffer segment management issues. The function _parseNumber2 is used for parsing numbers, and _parseFloat is another function for parsing floats (maybe a different path). The bug may be related to buffer handling or integer length counting.
+
+Looking at _parseNumber2:
+- It uses _textBuffer to get segments.
+- It writes characters into outBuf, and when outPtr >= outBuf.length, it calls _textBuffer.finishCurrentSegment() and resets outPtr=0. This is typical for expanding buffer.
+- However, note that after resetting outPtr to 0, we are writing into a new segment but the previous segment's length is set via _textBuffer.setCurrentLength(outPtr) at the end. Actually, _textBuffer.setCurrentLength sets the length of the entire buffer based on the current outPtr (which is relative to the current segment). The typical pattern in Jackson is that _textBuffer.emptyAndGetCurrentSegment() returns the first segment, and then when we call finishCurrentSegment, it adds the current segment to the buffer and returns a new segment. The outPtr is reset to 0 for the new segment. At the end, setCurrentLength(outPtr) sets the length of the last segment.
+
+But there is a bug: In the integer parsing loop, after writing a digit, we check if outPtr >= outBuf.length and if so, we call finishCurrentSegment() and set outPtr=0. However, after that we assign outBuf = new segment, but we also need to update outBuf reference. That seems correct.
+
+Now, what about the integer length count? intLen is incremented for each digit, but when we switch segments, we still increment intLen correctly.
+
+But maybe the bug is in the reset() method that uses intLen, fractLen, expLen to determine the token type? Or maybe the bug is in _parseFloat which has similar code but handles char vs int differently.
+
+The trigger testcase likely triggers an ArrayIndexOutOfBoundsException or incorrect number parsing due to mishandling of buffer segments when the integer part is very long.
+
+Let's examine the code more carefully:
+
+In _parseNumber2, after the integer loop, we have:
+    if (intLen == 0) {
+        return _handleInvalidNumberStart(c, neg);
+    }
+
+That's fine.
+
+Now, the fraction loop: It starts after c == '.' . In that loop, we read characters and write to outBuf. However, note that when we break out of the fraction loop because c is not a digit, c holds the non-digit character. That character is then used for exponent check. That's okay.
+
+But there is a potential bug: When we break out of the fraction loop due to non-digit, we have already read that non-digit character and stored it in c. That's correct.
+
+However, consider the case where we are in the fraction loop and we hit EOF: we set eof = true and break. In that case, c is not updated after the break? Actually, look at the fraction loop:
+
+    fract_loop:
+    while (true) {
+        if (_inputPtr >= _inputEnd && !loadMore()) {
+            eof = true;
+            break fract_loop;
+        }
+        c = _inputBuffer[_inputPtr++];
+        if (c < INT_0 || c > INT_9) {
+            break fract_loop;
+        }
+        ...
+    }
+
+If we break due to EOF (loadMore returns false), we set eof=true and break without reading a new c. So c still holds the previous character (the last digit or the '.'? Actually, note that when we entered the fraction loop, c is '.' because we just processed the decimal point. Then inside the loop, we first check for input and loadMore; if EOF, we break with eof=true, but c is still '.'? That seems wrong because after the decimal point we haven't read any digit. In that case, fractLen would be 0 and we will report an error. That might be correct: a decimal point at EOF is invalid.
+
+But the trigger testcase is not about EOF; it's about a very long integer part. However, the integer part is long enough to possibly cause multiple buffer segment switches. The bug might be that the integer length count (intLen) is incorrectly used later, or that the buffer management for the fractional part does not account for the fact that the buffer might have switched segments during the integer part, and the outPtr might be non-zero when starting the fraction part.
+
+Actually, after the integer loop, outPtr points to the position after the last digit written. If we had switched segments, outPtr is reset to 0 after the switch, but after writing digits, outPtr is >0. That's fine.
+
+Now, when we encounter '.' we write it to outBuf. But note that before writing '.', we might have just switched segments at the end of integer loop? Let's see: In integer loop, after writing a digit, we check if outPtr >= outBuf.length and if so, we call finishCurrentSegment and reset outPtr=0. So after the last digit, if the buffer was exactly full, we would have switched and outPtr would be 0. If not, outPtr is some value less than length.
+
+Then we proceed to write '.' . We do not check buffer bounds before writing '.'? Actually, we write outBuf[outPtr++] = c; without checking if outPtr is within bounds. That's because we assume there is space. But if outPtr == outBuf.length from previous step? Wait, we only check and switch in the integer loop after incrementing intLen and before writing? Let's re-examine:
+
+In integer loop:
+    while (c >= '0' && c <= '9') {
+        ++intLen;
+        if (outPtr >= outBuf.length) {
+            outBuf = _textBuffer.finishCurrentSegment();
+            outPtr = 0;
+        }
+        outBuf[outPtr++] = c;
+        ...
+    }
+
+So we check outPtr >= outBuf.length BEFORE writing. That means if outPtr equals length, we switch and set outPtr=0, then write. So after the loop, outPtr is always less than outBuf.length (since we wrote and then incremented, so outPtr is at most length). Actually, if the buffer becomes full exactly after writing, then outPtr becomes equal to length. But then the next operation (writing '.') would happen without a check. So we need to ensure that before writing '.' we have space. The same applies for exponent sign etc.
+
+In the fraction part, we write '.' without checking buffer. That could cause an ArrayIndexOutOfBoundsException if outPtr == outBuf.length. Indeed, after the integer loop, if the buffer became exactly full, outPtr would be outBuf.length. Then writing '.' would overflow.
+
+But does the integer loop guarantee that after writing the last digit, outPtr < outBuf.length? Let's see: Suppose we have a buffer of size N. We start with outPtr = 0. For each digit, we check if outPtr >= N, then switch. So when we write a digit, outPtr is guaranteed to be < N because we check before writing. After writing, outPtr increments. So after writing the last digit, outPtr could be equal to N if the last write filled the buffer. For example, if N=10 and we write 10 digits, after the 10th digit, we would have checked outPtr (which was 9) < N? Actually, we check outPtr >= outBuf.length before writing. For the 10th digit, outPtr is 9, which is less than N, so we write and outPtr becomes 10. So after the loop, outPtr = 10, which equals N. So the buffer is full. Then we try to write '.' without checking, causing overflow.
+
+Thus, we need to ensure that before writing any character (including '.', 'e', sign, etc.), we check buffer space and possibly switch segments.
+
+Similarly, in _parseFloat, same issue.
+
+Moreover, in _parseNumber2, when we write the sign for exponent, we have a check:
+
+            if (c == '-' || c == '+') {
+                if (outPtr >= outBuf.length) {
+                    outBuf = _textBuffer.finishCurrentSegment();
+                    outPtr = 0;
+                }
+                outBuf[outPtr++] = c;
+                ...
+
+But before writing the exponent letter 'e' or 'E', we have a check:
+
+        if (c == 'e' || c == 'E') { // exponent?
+            if (outPtr >= outBuf.length) {
+                outBuf = _textBuffer.finishCurrentSegment();
+                outPtr = 0;
+            }
+            outBuf[outPtr++] = c;
+
+So that's good. But for the decimal point, we don't have a check.
+
+Also, in _parseNumber2, when we prepend the minus sign, we write it before the integer loop, but there we also don't check buffer? Actually, we do:
+
+        if (neg) {
+            outBuf[outPtr++] = '-';
+        }
+
+But at that point, outBuf is from _textBuffer.emptyAndGetCurrentSegment() which returns a segment with some length, and outPtr is 0. So writing '-' is safe because outPtr is 0 and buffer length is at least 1. However, if we had multiple segments? No, we just started, so it's fine.
+
+But after integer loop, we might need to check before writing '.'.
+
+Now, what about the trigger testcase? It builds a number with 200 '1's then ".0". The buffer segment size in _textBuffer is likely something like 200 or 1000? In Jackson, the text buffer segment size is typically 200 (CharArrayWriter default). So with 200 digits, we might fill exactly one segment? If segment size is 200, then after writing 200 digits, outPtr becomes 200, which equals segment length. Then writing '.' would overflow. But note: we also have a minus sign? The number is positive. So no minus sign. So we start with outPtr=0. We write 200 digits, each time checking buffer. The segment size might be 200, but the initial segment from emptyAndGetCurrentSegment might be of size 200. However, _textBuffer.emptyAndGetCurrentSegment() returns a segment that is at least 200 characters? Actually, in Jackson's TextBuffer, the initial segment is from a small buffer, but if you call emptyAndGetCurrentSegment, it returns the current segment, which might be a fixed size, say 200. But when you call finishCurrentSegment, it allocates a new segment of maybe 200. So after writing 200 digits, we would have exactly filled the first segment? Let's simulate: Suppose segment size = 200. outPtr starts at 0. For each digit, we check outPtr >= 200? For the first 199 digits, outPtr goes from 0 to 199, all less than 200. Before writing the 200th digit, outPtr is 199, so condition fails, we write and outPtr becomes 200. After the integer loop, outPtr = 200. Then we encounter '.', we try outBuf[200] = '.' but index 200 is out of bounds (0..199). So ArrayIndexOutOfBoundsException.
+
+Thus the bug is that after the integer loop, we need to ensure there is space before writing the decimal point. The same applies for exponent letter and sign.
+
+Now, in _parseFloat, the same issue exists: after integer part, we call _parseFloat with outBuf and outPtr from the caller (maybe from _parseNumber?). Actually _parseFloat is called from somewhere else, but it also has a similar pattern: it receives outBuf and outPtr, and then writes '.' without checking. So we need to fix both functions.
+
+Additionally, we must also check for other places where we write without checking: In _parseNumber2, after fraction loop, when we write 'e' or 'E', we have a check. For exponent sign, we have a check. That's fine.
+
+But also, after the exponent loop, we might have written the last digit and outPtr might be at the segment length, but we don't write anything after that.
+
+Now, what about the reset and resetFloat methods? They likely use the lengths to determine token type. But that's not the bug.
+
+Therefore, the fix: Before writing the decimal point in _parseNumber2, we should check if outPtr >= outBuf.length and if so, call finishCurrentSegment and reset outPtr.
+
+Similarly, in _parseFloat, before writing '.' (INT_PERIOD) we need to check.
+
+Also, in _parseNumber2, we should also check before writing the decimal point? Actually, we have:
+
+        if (c == '.') { // yes, fraction
+            outBuf[outPtr++] = c;
+
+We need to insert a buffer check.
+
+Similarly, in _parseFloat:
+
+        if (c == INT_PERIOD) { // yes, fraction
+            outBuf[outPtr++] = (char) c;
+
+Insert check.
+
+But note that in _parseFloat, the parameter c is an int, but we cast to char. That's fine.
+
+Now, we must also consider that after the integer part, we might have already switched segments, and outBuf might be a new segment. The check should use the current outBuf.
+
+So the fix for _parseNumber2:
+
+Inside the block for fraction, before writing '.', add:
+
+            if (outPtr >= outBuf.length) {
+                outBuf = _textBuffer.finishCurrentSegment();
+                outPtr = 0;
+            }
+
+But careful: We already have outBuf and outPtr from the integer loop. So we should do:
+
+        int fractLen = 0;
+        // And then see if we get other parts
+        if (c == '.') { // yes, fraction
+            if (outPtr >= outBuf.length) {
+                outBuf = _textBuffer.finishCurrentSegment();
+                outPtr = 0;
+            }
+            outBuf[outPtr++] = c;
+
+And similarly for _parseFloat.
+
+Now, what about the case where we have no fraction but exponent? We already have checks before writing 'e' and before writing exponent sign. That's good.
+
+But also, after the exponent sign, we write the sign character with a check. That's already done.
+
+Now, we must also check before writing the exponent letter? That's already done.
+
+Now, is there any other place? In _parseNumber2, after writing the minus sign at the beginning, we don't check, but that's fine because outPtr is 0 and buffer length is at least 1.
+
+Now, we should also consider that the integer loop may have ended because of a non-digit, and that non-digit could be '.' or something else. If it is '.', we need to write '.' after the check. So we are adding the check.
+
+Now, we must ensure that the fix is minimal and doesn't break anything else.
+
+Now, about generating additional testcases: We need to create new testcases that fail on the original buggy code and pass on the fixed code. The bug is triggered when the integer part length exactly fills a buffer segment, causing overflow on writing the decimal point. Also, similar for exponent, and for negative numbers? Actually, the same bug could occur for exponent: if after fraction part the buffer becomes full, then writing 'e' could overflow. But the provided testcase only covers integer part filling buffer. We should create testcases that cover other scenarios:
+
+1. Integer part length such that after integer part, the buffer is exactly full, and then we have a decimal point (like the trigger but maybe different lengths). The trigger already uses 200 ones. But we can vary the length to match the buffer segment size. Since we don't know the exact segment size, we can try lengths that are multiples of typical size. But to be safe, we can create a test that builds a number with many digits until the buffer is full. However, we cannot rely on internal buffer size. Instead, we can create a number that is long enough to guarantee at least one segment switch. The bug manifests when the segment becomes full exactly. So we need to cause the segment to become full exactly. We can try lengths like 200, 400, etc. But the segment size might be 200, 250, etc. It might be dynamic. However, we can write a test that uses a very long integer part (say 1000 digits) and then ".0". That will cause multiple segment switches, and at some point a segment might become full. But the bug occurs only when after integer part the outPtr equals segment length. With multiple segments, it's possible that the last segment becomes full. So a long integer part will likely trigger the bug if the segment size is fixed. But we don't know the size. However, the original test uses 200 digits, which likely matches the default segment size in TextBuffer (which is 200 in Jackson). So we can assume segment size is 200. Therefore, we need to cover cases where integer part length is exactly 200, and also cases where integer part length is 200 + something so that after integer part, the buffer is not full but after fraction part it becomes full before exponent, etc.
+
+But we must minimize the number of testcases while maximizing coverage of different behaviors. We should cover:
+- Integer part fills buffer, then decimal point.
+- Integer part fills buffer, then exponent (no fraction). For example, "1...200 times" + "e1".
+- Fraction part fills buffer, then exponent. For example, "1.111...200 digits after decimal" + "e1".
+- Negative numbers with similar patterns.
+- Also, the bug in _parseFloat function, which might be called in other contexts (like when number starts with '0.'?). We need to ensure our testcases also exercise _parseFloat? Actually, the trigger testcase likely uses _parseNumber2 because the number is long and starts with digits. But we can also create testcases that trigger _parseFloat. Perhaps numbers like "0.111...200 digits" might go through a different path.
+
+But we need to generate testcases that are runnable as Java test methods similar to the provided trigger. The trigger testcase is from a file "com/fasterxml/jackson/core/json/TestNumericValues.java". We need to output new testcases with the same path. So we can create additional methods in that same file.
+
+We must generate the minimal number of testcases. Let's think: The bug is the missing buffer check before writing decimal point and before writing exponent letter? Actually exponent letter already has check. But also before writing decimal point. So the main missing check is for decimal point. However, there might be other missing checks: In _parseNumber2, after the fraction loop, we break and c holds the non-digit. Then we go to exponent check. But if we break due to non-digit, we have already read that character. That's fine.
+
+Now, to cover different branches, we need testcases that cause the decimal point to be written when the buffer is full. That's the main bug. But also, we should test the case where the buffer becomes full exactly at the point where we need to write the exponent letter. However, exponent letter already has a check, so maybe that's already handled. But we can still test to ensure it works.
+
+Given the requirement to maximize coverage of different behaviors/branches, we can create:
+1. A testcase with integer part length that exactly fills the buffer, followed by a decimal point and fractional digits. This will trigger the missing check for decimal point.
+2. A testcase with integer part length that exactly fills the buffer, followed by an exponent (no decimal point). This will test the exponent letter check (which is present) but also ensure that the integer loop doesn't cause overflow before exponent.
+3. A testcase with a negative number with integer part filling buffer, then decimal point.
+4. A testcase with a number that has integer part and fraction, and the fraction part fills the buffer before exponent. But the missing check is only for decimal point? Actually, in fraction loop, we have a check before writing each digit. So fraction digits are safe. But what about the decimal point? Already covered.
+
+However, we must also consider _parseFloat. We need a testcase that triggers _parseFloat. How is _parseFloat called? It is likely called from _parseNumber when the first character is '0'? Not sure. Looking at the code, _parseFloat takes parameters outBuf, outPtr, c, negative, integerPartLength. It seems to be called after parsing the integer part? Actually, the function name suggests it parses the float part after integer part. Probably it is called from a different parsing method. We need to examine the surrounding code, but we don't have it. However, we can assume that the same bug exists in _parseFloat for the decimal point. So we need a testcase that goes through _parseFloat. Perhaps numbers starting with '0.'? But the integer part length is 1. That won't fill buffer. To trigger the buffer full condition in _parseFloat, we need a long integer part before calling _parseFloat? Actually, _parseFloat is called after some integer part has been parsed and stored in outBuf. So the integer part length could be long. So we can use a number with long integer part and then fraction, which might go through _parseNumber2 or _parseFloat depending on the path. Without full context, we cannot be sure. But we can create a testcase that triggers the decimal point bug regardless of which function is used. Since both functions have the same bug, any number with long integer part and decimal point will likely go through _parseNumber2 (because the trigger test uses that). But to cover _parseFloat, we might need a number that starts with '0'? For example, "0.111...200 digits". That might go through a different parsing path that calls _parseFloat. However, the trigger test already uses a number starting with '1's, not '0'. So we can add a test with "0." followed by many digits.
+
+But we need to be careful: The testcases must be runnable and fail on buggy code. We can write a generic helper method that takes a string and parses it, expecting correct number. We'll follow the pattern of the provided trigger: they have a method _testLongerFloat that presumably asserts the parsed value is correct. We don't have that method's code, but we can assume it exists. In the trigger, they call _testLongerFloat(p, DOC). So we can also call that method. To be safe, we can replicate the pattern: create a number string, parse with both parser types, and call _testLongerFloat. But we don't know what _testLongerFloat does. However, the test is part of a test suite; we can assume that _testLongerFloat validates that the number is parsed correctly. For our new testcases, we can also call _testLongerFloat with the constructed string. That should work.
+
+But we must ensure that the test fails on buggy code. The buggy code will throw ArrayIndexOutOfBoundsException when trying to write decimal point. So the test will fail with an exception. That's acceptable.
+
+Now, we need to generate the additional testcases as JSON output. We'll produce a list of testcases, each with path and code.
+
+Given we can only use the exact file paths of the provided trigger testcases. The provided trigger testcase path is "com/fasterxml/jackson/core/json/TestNumericValues.java". So all new testcases must have that same path.
+
+We'll create three additional testcases to cover:
+1. Positive number with integer part exactly filling buffer (200 digits) followed by decimal point and fraction. This is essentially the same as the provided trigger, but maybe we can use a different length to ensure coverage? Actually the trigger already uses 200 digits. So we need a different scenario. But the trigger already tests that. However, the trigger testcase is provided as a trigger, meaning it already exists and is failing? Actually, the trigger testcase is given to us as an example that triggers the bug. But we are to generate additional testcases that also trigger the bug but cover different behaviors. So we need to create testcases that are not already covered by the provided trigger.
+
+The provided trigger testcase is testLongerFloatingPoint which builds 200 '1's and ".0". That covers the case of integer part length 200 (maybe exact buffer size) with decimal point. So we don't need to duplicate that.
+
+We need to cover other branches:
+- Integer part fills buffer, then exponent (no fraction). Example: "111...200 times" + "e10".
+- Negative number with integer part fills buffer and decimal point.
+- Number with integer part and fraction where the decimal point is written when buffer is full, but the integer part length is not an exact multiple? Actually, the bug occurs when outPtr == outBuf.length. That can happen after integer part if the segment becomes full exactly. But also could happen after writing some fraction digits? The decimal point check is missing, but the fraction loop has checks for each digit. So if the buffer becomes full after writing a fraction digit, then the next fraction digit would trigger a segment switch. That's fine. However, the decimal point itself is written before the fraction loop, so we need to ensure that at that point outPtr is not equal to length. So we need to cause that condition.
+
+Thus, we need to create numbers where after integer part, outPtr equals buffer length. That can be achieved by making integer part length equal to buffer size (or buffer size * n). But if there are multiple segments, after a segment switch, outPtr resets to 0. So the condition occurs when the current segment becomes full. So we need integer part length that is a multiple of segment size. So we can use integer part length = 200, 400, etc.
+
+But we already have 200. So we can try 400. However, 400 may cause two segments: first segment full (200), second segment also full? After 200 digits, outPtr becomes 200, we check and switch? Actually, after writing the 200th digit, outPtr becomes 200, but we only check before writing the digit. So after writing the 200th digit, outPtr is 200, which equals length. The next operation (if there were more digits) would check and switch. But in our number, after integer part we have decimal point. So at the point after integer part, we have written 200 digits and outPtr=200. That's exactly the bug. So length 200 triggers. Length 400: after 200 digits, we switch segments, outPtr becomes 0, then write 200 more digits, outPtr becomes 200 again. So again the same condition. So essentially any multiple of segment size will trigger. So we can use 400 to test that multiple segment switches still cause the bug.
+
+But we already have 200, which is enough to expose the bug. However, to cover different behavior, we might want to test the case where integer part does NOT fill the buffer exactly, but the decimal point is written when buffer is not full. That might already be covered by other existing tests.
+
+We need to cover the exponent case. So create a test with integer part 200 digits and then "e10" (no decimal point). That will test writing 'e' after integer part. The exponent letter already has a check, so it should not fail. But we should verify that the bug does not exist there. However, the requirement is that the testcase must fail on the original buggy version. If the exponent letter check is present, then it might not fail. So we need to find a scenario that fails. The missing check is for decimal point, not for exponent. So a number with integer part exactly filling buffer and then exponent will not fail because the exponent letter check is there. Therefore, that testcase would pass on buggy code? Actually, after integer part, outPtr=200. Then we go to exponent check: we have if (c == 'e' || c == 'E'). c is the character after integer part, which is 'e'. Before writing 'e', we check if outPtr >= outBuf.length. outPtr is 200, outBuf.length is 200, so condition true, we call finishCurrentSegment and reset outPtr=0. Then we write 'e'. So it works. So that testcase would not fail on buggy code. So we should not include it as an additional trigger because it must fail on buggy code.
+
+Similarly, negative number: the minus sign is written at the beginning, so it doesn't affect buffer fullness after integer part. The bug is still about decimal point.
+
+Therefore, the only missing check is for decimal point. So any testcase that includes a decimal point after integer part that fills the buffer will fail. Also, if the number has no integer part? That would be invalid. So we need to cover decimal point after integer part.
+
+But we also need to cover _parseFloat. How to trigger _parseFloat? Perhaps numbers that start with '0' go through a different path. For example, "0.111...200 digits". The integer part is "0", which is short, so buffer not full. But the decimal point is written after integer part. At that point, outPtr is after writing '0', which is 1 (or 2 if negative). That is unlikely to equal buffer length. However, if we have a long fraction part, the decimal point is written before the fraction loop. So we need to make sure that when writing the decimal point, outPtr is equal to buffer length. That could happen if the integer part length plus any previous characters exactly fill the buffer. For example, if we have a negative number with integer part "0", then we write '-', '0', then decimal point. That's only 3 characters, unlikely to fill buffer. So to trigger the bug in _parseFloat, we need a scenario where the integer part length is long enough to fill buffer before decimal point. That would be the same as _parseNumber2. So maybe _parseFloat is called only when the integer part is already parsed and stored? Actually, looking at _parseFloat signature, it takes outBuf and outPtr, meaning the integer part has already been written to the buffer. So the integer part could be long. So we can still use a long integer part to trigger _parseFloat. But which parsing path calls _parseFloat? Without the full code, we cannot be sure. But we can create a testcase that triggers both functions? However, we only need to ensure our fix applies to both functions. The bug is the same, so fixing both will make any testcase pass.
+
+Thus, to minimize testcases, we can create one testcase that triggers the bug in _parseNumber2 (already covered by provided trigger). But we need additional testcases that cover different behaviors. What different behaviors? We can consider:
+- Negative numbers: the minus sign is written, which might affect buffer positioning. For a negative number with integer part length 199 (since minus sign takes one character), then after integer part, outPtr might be 200? For example, if buffer size is 200, minus sign takes index 0, then 199 digits take indexes 1-199, total 200. So after writing 199 digits, outPtr becomes 200 (since started at 1). That is exactly buffer length. Then decimal point would overflow. So a negative number with 199 digits integer part could trigger the bug. That is different from the provided trigger which is positive with 200 digits. So we can create a testcase with negative number and 199 ones (or 199 digits) followed by ".0". This will also fail on buggy code.
+
+- Another behavior: number with integer part that fills buffer exactly and then decimal point and then fraction digits that also cause buffer to fill again? But that's just continuation.
+
+- Number with integer part that fills buffer exactly, then decimal point, then no fraction digits? That would be invalid because fraction must have at least one digit. So that would throw an error, but the bug is before that error. So still fails.
+
+So we can create a testcase for negative number.
+
+Also, we can create a testcase for number with integer part length 200 (buffer size) and decimal point, but with exponent after fraction? That still triggers the same bug.
+
+To maximize coverage, we should also consider the case where the buffer size is not the default 200. But we cannot control that.
+
+Thus, I propose two additional testcases:
+
+1. Negative number with integer part length 199 (so that after integer part, buffer is full) and decimal point and fraction. This covers the negative sign branch and different integer length.
+
+2. Number with integer part length 400 (multiple of buffer size) and decimal point. This covers multiple segment switches.
+
+But does the provided trigger already cover integer part length 200? Yes. So 400 is a different length and ensures that after switching segments, the bug still occurs when the new segment becomes full.
+
+Now, we need to ensure these testcases fail on buggy code. They will because the decimal point write will overflow.
+
+Now, we must write the testcase code. We'll follow the pattern of the provided trigger:
+
+public void testLongerFloatingPointNegative() throws Exception
+{
+    StringBuilder input = new StringBuilder();
+    input.append('-');
+    for (int i = 1; i < 200; i++) { // 199 digits
+        input.append(1);
+    }
+    input.append(".0");
+    final String DOC = input.toString();
+
+    JsonParser p;
+
+    p = FACTORY.createParser(new StringReader(DOC));
+    _testLongerFloat(p, DOC);
+    p.close();
+
+    p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes("UTF-8")));
+    _testLongerFloat(p, DOC);
+    p.close();
+}
+
+And for 400 digits:
+
+public void testLongerFloatingPoint400() throws Exception
+{
+    StringBuilder input = new StringBuilder();
+    for (int i = 1; i < 401; i++) { // 400 digits
+        input.append(1);
+    }
+    input.append(".0");
+    final String DOC = input.toString();
+
+    JsonParser p;
+
+    p = FACTORY.createParser(new StringReader(DOC));
+    _testLongerFloat(p, DOC);
+    p.close();
+
+    p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes("UTF-8")));
+    _testLongerFloat(p, DOC);
+    p.close();
+}
+
+But note: 400 digits might be exactly two segments of 200 each. After writing 200 digits, we switch segments, then write 200 more, outPtr becomes 200 again, then decimal point overflow. So it fails.
+
+Now, we need to ensure that the test method names are unique. We'll use names: testLongerFloatingPointNegative and testLongerFloatingPoint400.
+
+But we must also consider that the test class already has a method testLongerFloatingPoint. Adding new methods is fine.
+
+Now, are there any other missing buffer checks? In _parseNumber2, after the fraction loop, we break and c holds non-digit. Then we go to exponent check. But if we break due to non-digit and that non-digit is 'e' or 'E', we will write 'e' after checking buffer. That's fine.
+
+But what about the case where we have no fraction and no exponent? Then after integer part, we exit and call reset. That doesn't write anything.
+
+Now, we also need to fix _parseFloat similarly. We'll apply the same fix.
+
+Now, output the fixed code for both functions.
+
+We need to provide the entire corrected implementation of each function. We'll write them as strings with proper escaping.
+
+Let's write the fixed _parseNumber2:
+
+Add buffer check before writing decimal point. Also, note that the variable names: outBuf, outPtr. We'll insert:
+
+        int fractLen = 0;
+        // And then see if we get other parts
+        if (c == '.') { // yes, fraction
+            if (outPtr >= outBuf.length) {
+                outBuf = _textBuffer.finishCurrentSegment();
+                outPtr = 0;
+            }
+            outBuf[outPtr++] = c;
+
+But also, we should consider that after writing the decimal point, we might need to check buffer before writing the first fraction digit? Actually, the fraction loop has a check before writing each digit, but the first digit is written after reading c and checking it's a digit. However, note that in the fraction loop, before writing the digit, we have:
+
+                ++fractLen;
+                if (outPtr >= outBuf.length) {
+                    outBuf = _textBuffer.finishCurrentSegment();
+                    outPtr = 0;
+                }
+                outBuf[outPtr++] = c;
+
+That is after incrementing fractLen. But we also have a check for buffer before writing the digit. That's fine.
+
+Now, we must also check before writing the decimal point in the case where we are already at the buffer boundary. That's what we added.
+
+Similarly for _parseFloat:
+
+        int fractLen = 0;
+        boolean eof = false;
+
+        // And then see if we get other parts
+        if (c == INT_PERIOD) { // yes, fraction
+            if (outPtr >= outBuf.length) {
+                outBuf = _textBuffer.finishCurrentSegment();
+                outPtr = 0;
+            }
+            outBuf[outPtr++] = (char) c;
+
+Now, we must ensure that we use the same variable names. In _parseFloat, the parameters are (char[] outBuf, int outPtr, int c, boolean negative, int integerPartLength). So we modify the outBuf and outPtr locally.
+
+Now, we also need to consider that in _parseFloat, after writing the decimal point, we have the same fraction loop. That's fine.
+
+Now, we should also check for any other missing buffer writes. In _parseFloat, when we write the exponent letter, we have a check:
+
+        if (c == INT_e || c == INT_E) { // exponent?
+            if (outPtr >= outBuf.length) {
+                outBuf = _textBuffer.finishCurrentSegment();
+                outPtr = 0;
+            }
+            outBuf[outPtr++] = (char) c;
+
+That's good.
+
+Now, let's write the fixed functions exactly as they should appear, with line numbers? We don't need line numbers, we just output the entire function.
+
+We'll output two strings: one for _parseNumber2, one for _parseFloat.
+
+Now, note that the original code might have other lines that we didn't change. We must include them all.
+
+We must be careful with escaping for JSON. We'll use a multi-line string with appropriate escapes.
+
+Now, generate the JSON output.
+
+First, fixed_code: an array of two strings.
+
+Second, additional_testcases: an array of two objects (for the two new testcases). We'll include the path and the testcase code.
+
+We'll produce:
+
+{
+  "fixed_code": [
+    "    private final JsonToken _parseNumber2(boolean neg, int startPtr) throws IOException\n    {\n        _inputPtr = neg ? (startPtr+1) : startPtr;\n        char[] outBuf = _textBuffer.emptyAndGetCurrentSegment();\n        int outPtr = 0;\n\n        // Need to prepend sign?\n        if (neg) {\n            outBuf[outPtr++] = '-';\n        }\n\n        // This is the place to do leading-zero check(s) too:\n        int intLen = 0;\n        char c = (_inputPtr < _inputEnd) ? _inputBuffer[_inputPtr++] : getNextChar(\"No digit following minus sign\");\n        if (c == '0') {\n            c = _verifyNoLeadingZeroes();\n        }\n        boolean eof = false;\n\n        // Ok, first the obligatory integer part:\n        int_loop:\n        while (c >= '0' && c <= '9') {\n            ++intLen;\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = c;\n            if (_inputPtr >= _inputEnd && !loadMore()) {\n                // EOF is legal for main level int values\n                c = CHAR_NULL;\n                eof = true;\n                break int_loop;\n            }\n            c = _inputBuffer[_inputPtr++];\n        }\n        // Also, integer part is not optional\n        if (intLen == 0) {\n            return _handleInvalidNumberStart(c, neg);\n        }\n\n        int fractLen = 0;\n        // And then see if we get other parts\n        if (c == '.') { // yes, fraction\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = c;\n\n            fract_loop:\n            while (true) {\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break fract_loop;\n                }\n                c = _inputBuffer[_inputPtr++];\n                if (c < INT_0 || c > INT_9) {\n                    break fract_loop;\n                }\n                ++fractLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = c;\n            }\n            // must be followed by sequence of ints, one minimum\n            if (fractLen == 0) {\n                reportUnexpectedNumberChar(c, \"Decimal point not followed by a digit\");\n            }\n        }\n\n        int expLen = 0;\n        if (c == 'e' || c == 'E') { // exponent?\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = c;\n            // Not optional, can require that we get one more char\n            c = (_inputPtr < _inputEnd) ? _inputBuffer[_inputPtr++]\n                : getNextChar(\"expected a digit for number exponent\");\n            // Sign indicator?\n            if (c == '-' || c == '+') {\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = c;\n                // Likewise, non optional:\n                c = (_inputPtr < _inputEnd) ? _inputBuffer[_inputPtr++]\n                    : getNextChar(\"expected a digit for number exponent\");\n            }\n\n            exp_loop:\n            while (c <= INT_9 && c >= INT_0) {\n                ++expLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = c;\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break exp_loop;\n                }\n                c = _inputBuffer[_inputPtr++];\n            }\n            // must be followed by sequence of ints, one minimum\n            if (expLen == 0) {\n                reportUnexpectedNumberChar(c, \"Exponent indicator not followed by a digit\");\n            }\n        }\n\n        // Ok; unless we hit end-of-input, need to push last char read back\n        if (!eof) {\n            --_inputPtr;\n            if (_parsingContext.inRoot()) {\n                _verifyRootSpace(c);\n            }\n        }\n        _textBuffer.setCurrentLength(outPtr);\n        // And there we have it!\n        return reset(neg, intLen, fractLen, expLen);\n    }",
+    "    private final JsonToken _parseFloat(char[] outBuf, int outPtr, int c,\n            boolean negative, int integerPartLength) throws IOException\n    {\n        int fractLen = 0;\n        boolean eof = false;\n\n        // And then see if we get other parts\n        if (c == INT_PERIOD) { // yes, fraction\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = (char) c;\n\n            fract_loop:\n            while (true) {\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break fract_loop;\n                }\n                c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n                if (c < INT_0 || c > INT_9) {\n                    break fract_loop;\n                }\n                ++fractLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = (char) c;\n            }\n            // must be followed by sequence of ints, one minimum\n            if (fractLen == 0) {\n                reportUnexpectedNumberChar(c, \"Decimal point not followed by a digit\");\n            }\n        }\n\n        int expLen = 0;\n        if (c == INT_e || c == INT_E) { // exponent?\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = (char) c;\n            // Not optional, can require that we get one more char\n            if (_inputPtr >= _inputEnd) {\n                loadMoreGuaranteed();\n            }\n            c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n            // Sign indicator?\n            if (c == '-' || c == '+') {\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = (char) c;\n                // Likewise, non optional:\n                if (_inputPtr >= _inputEnd) {\n                    loadMoreGuaranteed();\n                }\n                c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n            }\n\n            exp_loop:\n            while (c <= INT_9 && c >= INT_0) {\n                ++expLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = (char) c;\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break exp_loop;\n                }\n                c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n            }\n            // must be followed by sequence of ints, one minimum\n            if (expLen == 0) {\n                reportUnexpectedNumberChar(c, \"Exponent indicator not followed by a digit\");\n            }\n        }\n\n        // Ok; unless we hit end-of-input, need to push last char read back\n        if (!eof) {\n            --_inputPtr;\n            // As per [core#105], need separating space between root values; check here\n            if (_parsingContext.inRoot()) {\n                _verifyRootSpace(c);\n            }\n        }\n        _textBuffer.setCurrentLength(outPtr);\n\n        // And there we have it!\n        return resetFloat(negative, integerPartLength, fractLen, expLen);\n    }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "com/fasterxml/jackson/core/json/TestNumericValues.java",
+      "testcase": "public void testLongerFloatingPointNegative() throws Exception\n    {\n        StringBuilder input = new StringBuilder();\n        input.append('-');\n        for (int i = 1; i < 200; i++) {\n            input.append(1);\n        }\n        input.append(\".0\");\n        final String DOC = input.toString();\n\n        JsonParser p;\n\n        p = FACTORY.createParser(new StringReader(DOC));\n        _testLongerFloat(p, DOC);\n        p.close();\n        \n        p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes(\"UTF-8\")));\n        _testLongerFloat(p, DOC);\n        p.close();\n    }"
+    },
+    {
+      "path": "com/fasterxml/jackson/core/json/TestNumericValues.java",
+      "testcase": "public void testLongerFloatingPoint400() throws Exception\n    {\n        StringBuilder input = new StringBuilder();\n        for (int i = 1; i < 401; i++) {\n            input.append(1);\n        }\n        input.append(\".0\");\n        final String DOC = input.toString();\n\n        JsonParser p;\n\n        p = FACTORY.createParser(new StringReader(DOC));\n        _testLongerFloat(p, DOC);\n        p.close();\n        \n        p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes(\"UTF-8\")));\n        _testLongerFloat(p, DOC);\n        p.close();\n    }"
+    }
+  ]
+}
+
+We must ensure that the testcase code is valid Java and uses the same style as the trigger (indentation, etc.). We'll use the same indentation level (4 spaces per level). The trigger testcase had the method body indented with 4 spaces. We'll follow that.
+
+Now, we should also consider that the test class may have a field FACTORY and method _testLongerFloat. We assume they exist.
+
+Now, output the JSON object. Remember to escape quotes and newlines properly in the strings. We'll write the JSON with escaped newlines as \n and escaped quotes as \". We'll produce a compact representation? But we need to embed multi-line strings. We'll use actual newlines in the JSON string, but we must escape them as \n. However, in JSON, newlines in strings must be escaped. But we can also keep them as literal newlines if we are careful? The standard says they must be escaped. We'll generate the JSON with escaped newlines.
+
+We can write a Python script to produce the JSON, but here we'll manually write with escaped newlines. It might be messy. Alternatively, we can use a tool, but we are text-based.
+
+We'll produce the JSON as a single line? That would be unreadable but valid. We'll produce pretty-printed for readability, but we must ensure that the strings have escaped newlines. Actually, when we embed a multi-line string in JSON, we need to represent it as a single line with \n characters. So we should convert each function string to a single line with \n escapes.
+
+We'll do that: replace actual newlines with \n and escape double quotes.
+
+Let's prepare the fixed_code strings:
+
+For _parseNumber2, we have many lines. We'll join with \n.
+
+We'll write the JSON output accordingly.
+
+Given the constraints, we'll produce the JSON with escaped strings.
+
+I'll write the final answer now.{
+  "fixed_code": [
+    "    private final JsonToken _parseNumber2(boolean neg, int startPtr) throws IOException\n    {\n        _inputPtr = neg ? (startPtr+1) : startPtr;\n        char[] outBuf = _textBuffer.emptyAndGetCurrentSegment();\n        int outPtr = 0;\n\n        // Need to prepend sign?\n        if (neg) {\n            outBuf[outPtr++] = '-';\n        }\n\n        // This is the place to do leading-zero check(s) too:\n        int intLen = 0;\n        char c = (_inputPtr < _inputEnd) ? _inputBuffer[_inputPtr++] : getNextChar(\"No digit following minus sign\");\n        if (c == '0') {\n            c = _verifyNoLeadingZeroes();\n        }\n        boolean eof = false;\n\n        // Ok, first the obligatory integer part:\n        int_loop:\n        while (c >= '0' && c <= '9') {\n            ++intLen;\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = c;\n            if (_inputPtr >= _inputEnd && !loadMore()) {\n                // EOF is legal for main level int values\n                c = CHAR_NULL;\n                eof = true;\n                break int_loop;\n            }\n            c = _inputBuffer[_inputPtr++];\n        }\n        // Also, integer part is not optional\n        if (intLen == 0) {\n            return _handleInvalidNumberStart(c, neg);\n        }\n\n        int fractLen = 0;\n        // And then see if we get other parts\n        if (c == '.') { // yes, fraction\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = c;\n\n            fract_loop:\n            while (true) {\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break fract_loop;\n                }\n                c = _inputBuffer[_inputPtr++];\n                if (c < INT_0 || c > INT_9) {\n                    break fract_loop;\n                }\n                ++fractLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = c;\n            }\n            // must be followed by sequence of ints, one minimum\n            if (fractLen == 0) {\n                reportUnexpectedNumberChar(c, \"Decimal point not followed by a digit\");\n            }\n        }\n\n        int expLen = 0;\n        if (c == 'e' || c == 'E') { // exponent?\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = c;\n            // Not optional, can require that we get one more char\n            c = (_inputPtr < _inputEnd) ? _inputBuffer[_inputPtr++]\n                : getNextChar(\"expected a digit for number exponent\");\n            // Sign indicator?\n            if (c == '-' || c == '+') {\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = c;\n                // Likewise, non optional:\n                c = (_inputPtr < _inputEnd) ? _inputBuffer[_inputPtr++]\n                    : getNextChar(\"expected a digit for number exponent\");\n            }\n\n            exp_loop:\n            while (c <= INT_9 && c >= INT_0) {\n                ++expLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = c;\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break exp_loop;\n                }\n                c = _inputBuffer[_inputPtr++];\n            }\n            // must be followed by sequence of ints, one minimum\n            if (expLen == 0) {\n                reportUnexpectedNumberChar(c, \"Exponent indicator not followed by a digit\");\n            }\n        }\n\n        // Ok; unless we hit end-of-input, need to push last char read back\n        if (!eof) {\n            --_inputPtr;\n            if (_parsingContext.inRoot()) {\n                _verifyRootSpace(c);\n            }\n        }\n        _textBuffer.setCurrentLength(outPtr);\n        // And there we have it!\n        return reset(neg, intLen, fractLen, expLen);\n    }",
+    "    private final JsonToken _parseFloat(char[] outBuf, int outPtr, int c,\n            boolean negative, int integerPartLength) throws IOException\n    {\n        int fractLen = 0;\n        boolean eof = false;\n\n        // And then see if we get other parts\n        if (c == INT_PERIOD) { // yes, fraction\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = (char) c;\n\n            fract_loop:\n            while (true) {\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break fract_loop;\n                }\n                c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n                if (c < INT_0 || c > INT_9) {\n                    break fract_loop;\n                }\n                ++fractLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = (char) c;\n            }\n            // must be followed by sequence of ints, one minimum\n            if (fractLen == 0) {\n                reportUnexpectedNumberChar(c, \"Decimal point not followed by a digit\");\n            }\n        }\n\n        int expLen = 0;\n        if (c == INT_e || c == INT_E) { // exponent?\n            if (outPtr >= outBuf.length) {\n                outBuf = _textBuffer.finishCurrentSegment();\n                outPtr = 0;\n            }\n            outBuf[outPtr++] = (char) c;\n            // Not optional, can require that we get one more char\n            if (_inputPtr >= _inputEnd) {\n                loadMoreGuaranteed();\n            }\n            c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n            // Sign indicator?\n            if (c == '-' || c == '+') {\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = (char) c;\n                // Likewise, non optional:\n                if (_inputPtr >= _inputEnd) {\n                    loadMoreGuaranteed();\n                }\n                c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n            }\n\n            exp_loop:\n            while (c <= INT_9 && c >= INT_0) {\n                ++expLen;\n                if (outPtr >= outBuf.length) {\n                    outBuf = _textBuffer.finishCurrentSegment();\n                    outPtr = 0;\n                }\n                outBuf[outPtr++] = (char) c;\n                if (_inputPtr >= _inputEnd && !loadMore()) {\n                    eof = true;\n                    break exp_loop;\n                }\n                c = (int) _inputBuffer[_inputPtr++] & 0xFF;\n            }\n            // must be followed by sequence of ints, one minimum\n            if (expLen == 0) {\n                reportUnexpectedNumberChar(c, \"Exponent indicator not followed by a digit\");\n            }\n        }\n\n        // Ok; unless we hit end-of-input, need to push last char read back\n        if (!eof) {\n            --_inputPtr;\n            // As per [core#105], need separating space between root values; check here\n            if (_parsingContext.inRoot()) {\n                _verifyRootSpace(c);\n            }\n        }\n        _textBuffer.setCurrentLength(outPtr);\n\n        // And there we have it!\n        return resetFloat(negative, integerPartLength, fractLen, expLen);\n    }"
+  ],
+  "additional_testcases": [
+    {
+      "path": "com/fasterxml/jackson/core/json/TestNumericValues.java",
+      "testcase": "public void testLongerFloatingPointNegative() throws Exception\n    {\n        StringBuilder input = new StringBuilder();\n        input.append('-');\n        for (int i = 1; i < 200; i++) {\n            input.append(1);\n        }\n        input.append(\".0\");\n        final String DOC = input.toString();\n\n        JsonParser p;\n\n        p = FACTORY.createParser(new StringReader(DOC));\n        _testLongerFloat(p, DOC);\n        p.close();\n        \n        p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes(\"UTF-8\")));\n        _testLongerFloat(p, DOC);\n        p.close();\n    }"
+    },
+    {
+      "path": "com/fasterxml/jackson/core/json/TestNumericValues.java",
+      "testcase": "public void testLongerFloatingPoint400() throws Exception\n    {\n        StringBuilder input = new StringBuilder();\n        for (int i = 1; i < 401; i++) {\n            input.append(1);\n        }\n        input.append(\".0\");\n        final String DOC = input.toString();\n\n        JsonParser p;\n\n        p = FACTORY.createParser(new StringReader(DOC));\n        _testLongerFloat(p, DOC);\n        p.close();\n        \n        p = FACTORY.createParser(new ByteArrayInputStream(DOC.getBytes(\"UTF-8\")));\n        _testLongerFloat(p, DOC);\n        p.close();\n    }"
+    }
+  ]
+}

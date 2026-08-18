@@ -1,0 +1,6 @@
+// buggy code
+    protected void setOptions(final Options options) {
+        this.options = options;
+        this.requiredOptions = options.getRequiredOptions();
+    }
+

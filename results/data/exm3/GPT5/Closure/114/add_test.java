@@ -1,0 +1,2 @@
+// com/google/javascript/jscomp/NameAnalyzerTest.java::testAssignWithCallComma
+public void testAssignWithCallComma() { test("var fun, x; (0, (fun = function(){ x; }))();", "var x; (0, (function(){ x; }))();"); }

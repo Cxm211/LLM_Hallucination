@@ -1,0 +1,472 @@
+We are given a source file that contains several buggy functions: `deepStub`, `newDeepStubMock`, and `withSettingsUsing`. The testcases are from many test classes. The task is to determine which testcase methods actually expose the bug and then provide the fixed code.
+
+First, analyze the buggy functions. The functions are related to deep stubbing:
+
+```java
+private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+    InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+    InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+    // matches invocation for verification
+    for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+        if (container.getInvocationForStubbing().matches(stubbedInvocationMatcher.getInvocation())) {
+            return stubbedInvocationMatcher.answer(invocation);
+        }
+    }
+
+    // record deep stub answer
+    return recordDeepStubAnswer(
+            newDeepStubMock(returnTypeGenericMetadata),
+            container
+    );
+}
+
+private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata) {
+    return mockitoCore().mock(
+            returnTypeGenericMetadata.rawType(),
+            withSettingsUsing(returnTypeGenericMetadata)
+    );
+}
+
+private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata) {
+    MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?
+            withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())
+            : withSettings();
+
+    return mockSettings.serializable()
+            .defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));
+}
+```
+
+The problem is likely in `deepStub`. The loop iterates over stubbed invocations and checks if the invocation for stubbing matches. But `container.getInvocationForStubbing()` returns the invocation that is currently being stubbed? Actually, in deep stubbing, when a method returns a mock, and then a call is made on that returned mock, we need to match against existing stubbings. The code seems to be using `container.getInvocationForStubbing()` which might be intended for something else. The typical deep stubbing logic should match the current invocation against the stubbed invocations. The bug is that it's using `container.getInvocationForStubbing()` instead of the actual invocation argument. That is, it should match `invocation` against the stubbed invocations, not `container.getInvocationForStubbing()`. This would cause a mismatch because `getInvocationForStubbing()` returns the invocation that is being stubbed, not the current actual invocation.
+
+Thus, the fix is to change the loop condition to match against `invocation` instead of `container.getInvocationForStubbing()`.
+
+Now, we need to identify which testcase methods expose this bug. Since the bug is in deep stubbing (RETURNS_DEEP_STUBS), we need to look for testcases that use `RETURNS_DEEP_STUBS`. Among the many testcases, we see:
+- `org.mockitousage.basicapi.MocksSerializationTest.BUG_ISSUE_399_try_some_mocks_with_current_answers` uses `RETURNS_DEEP_STUBS` and calls `serializeAndBack`. But that test might not directly trigger the deepStub method? Actually, when using deep stubs, the deepStub method is called when a method on the mock returns another mock. The test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` from `DeepStubsWronglyReportsSerializationProblemsTest` also uses `RETURNS_DEEP_STUBS` and accesses a deep stub. That test might expose the bug because it calls `getSomething()` which triggers deep stubbing.
+
+Also, there is `org.mockitousage.bugs.DeepStubsWronglyReportsSerializationProblemsTest.should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`. That test accesses a deep stub and expects no exception. The bug in `deepStub` could cause a ClassCastException or other issues because it uses the wrong invocation for matching.
+
+Additionally, tests that use `RETURNS_DEEP_STUBS` like `MocksSerializationTest.BUG_ISSUE_399_try_some_mocks_with_current_answers` might also trigger it.
+
+Let's look more carefully. The test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`:
+
+```java
+public void should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub() {
+    NotSerializableShouldBeMocked the_deep_stub = mock(ToBeDeepStubbed.class, RETURNS_DEEP_STUBS).getSomething();
+    assertThat(the_deep_stub).isNotNull();
+}
+```
+
+This calls `getSomething()` which returns a type, and then due to RETURNS_DEEP_STUBS, the deep stub mechanism will create a mock for the return type. During that process, `deepStub` is called. In the buggy code, it loops over stubbed invocations and matches using `container.getInvocationForStubbing()`. Since there may be no stubbed invocations, the loop does nothing and falls through to record a new deep stub answer. That might be okay. But if there are stubbed invocations from earlier, it might wrongly match. Actually, the bug could cause incorrect matching: if there is an existing stubbing, it might return the wrong answer or cause a ClassCastException because the invocation types don't match.
+
+However, we need to find testcases that actually fail due to this bug. Let's think about the typical usage: when you have a deep stub, and you call a method on it, then if you have stubbed something on that deep stub, when you later call that method, the deepStub method is invoked to find the stub. In the current code, it uses `container.getInvocationForStubbing()` which is the invocation that is being stubbed (i.e., the one used in `when(...)`). That is wrong because in deep stubbing, the matching should be done against the actual invocation that happened, not the one being stubbed.
+
+So a test that would fail is one that uses deep stubs and has stubbings on the deep stub, and then invokes that method, and expects the stubbed answer. For example, a test like `should_stub_and_verify_deep_stub` but we don't have that explicitly. However, we have `BUG_ISSUE_399_try_some_mocks_with_current_answers`:
+
+```java
+public void BUG_ISSUE_399_try_some_mocks_with_current_answers() throws Exception {
+    IMethods iMethods = mock(IMethods.class, withSettings().serializable().defaultAnswer(RETURNS_DEEP_STUBS));
+
+    when(iMethods.iMethodsReturningMethod().linkedListReturningMethod().contains(anyString())).thenReturn(false);
+
+    serializeAndBack(iMethods);
+}
+```
+
+This test stubs a chain of deep stubs: `iMethods.iMethodsReturningMethod().linkedListReturningMethod().contains(anyString())`. This will create stubs on the deep mock. Then it serializes and deserializes. The deepStub method is likely called during the stubbing and during the serialization? Actually, during stubbing, the `when` triggers calls on the deep mocks to get to the method. That will call deepStub. The bug might cause the stubbing to not be properly recorded or matched, leading to issues during serialization or later verification.
+
+But the test only serializes and does not assert any behavior after deserialization. So it might not fail even with the bug.
+
+Another test: `should_stub_and_verify_deep_stub` not present. However, we have many tests that use `RETURNS_DEEP_STUBS` in various contexts. For instance, in `MocksSerializationTest` there is `BUG_ISSUE_399_try_some_mocks_with_current_answers`. Also, in `DeepStubsWronglyReportsSerializationProblemsTest` there is that test. Are there any tests that actually verify the behavior of deep stubs? Possibly `should_stub_correctly_when_mixed_varargs_used` but that is not deep stubbing.
+
+Let's scan for tests that use `returnsDeepStubsAnswerUsing`? Not present.
+
+Given the bug is in `deepStub`, which is a private method called only when using `RETURNS_DEEP_STUBS`, any test that uses deep stubs could potentially be affected. However, the bug might not cause a failure in many tests if they don't rely on the matching logic (e.g., if there are no existing stubbed invocations). The bug only manifests when there are stubbed invocations and the matching is done against the wrong invocation. So tests that have multiple stubbings on the same deep mock or that chain calls might be affected.
+
+Specifically, consider a test that stubs a method on a deep stub and then calls that method. For example, if we have:
+
+```java
+SomeDeepMock deep = mock(SomeClass.class, RETURNS_DEEP_STUBS);
+when(deep.getSomething()).thenReturn("value");
+deep.getSomething(); // should return "value"
+```
+
+In the `when` line, `deep.getSomething()` will trigger deepStub because `getSomething()` is not a void method and returns something. The deepStub method will be called with the invocation of `getSomething()`. At that point, `container.getStubbedInvocations()` may be empty, so it goes to record a deep stub answer. That's fine. Then when we call `deep.getSomething()` again, the deepStub is called again. Now, `container.getStubbedInvocations()` will have the previous stubbing? Actually, the previous stubbing was recorded as a stub on the mock. But the deepStub method is called for the actual invocation. In the buggy code, it matches against `container.getInvocationForStubbing()` which returns the invocation that was used in `when`. That is not the current invocation. So the match will fail, and it will record a new deep stub answer, overriding the previous stubbing? That would cause the stubbing to be lost. So the second call would return a new deep stub instead of "value". That would cause a failure if the test expects "value".
+
+So tests that stub a deep stub and then call it should fail. Look for such tests. Among the test list, we have:
+- `should_stub_correctly_when_mixed_varargs_used`? Not deep stub.
+- `shouldAllowStubbingMocksConfiguredWithRETURNS_MOCKS` uses `RETURNS_MOCKS`, not deep stubs.
+- `should_stub_and_verify_deep_stub` not present.
+- There is `should_stub_even_if_some_methods_called_after_serialization` but that uses serialization, not deep stubs.
+- `should_combine_mock_name_and_extra_interfaces`? No.
+
+Actually, there is a test in `DeepStubsWronglyReportsSerializationProblemsTest` that only accesses a deep stub without stubbing. So it might pass because no stubbing exists.
+
+Wait, there is also `MocksSerializationTest.BUG_ISSUE_399_try_some_mocks_with_current_answers` which does stubbing on deep stubs: `when(iMethods.iMethodsReturningMethod().linkedListReturningMethod().contains(anyString())).thenReturn(false);`. This creates a stub on `contains`. The `iMethodsReturningMethod()` returns a deep mock, then `linkedListReturningMethod()` returns another deep mock, and `contains` is stubbed. The stubbing is recorded on the final mock. During serialization, the deep stubs are serialized. The bug might cause the stubbing to not be properly matched when the deep stubs are accessed later. However, test only serializes and does not call anything after. So it might not fail.
+
+We need to find a test that actually calls a stubbed deep stub method and asserts the return value. Does such test exist? Possibly in `PlaygroundWithDemoOfUnclonedParametersProblemTest`? No, that uses regular mocks.
+
+Given the input only provides the buggy code and a large list of testcases, but the testcases are just method signatures and bodies (some with code). We need to look at the test methods that actually exercise deep stubbing. Notably, the test `BUG_ISSUE_399_try_some_mocks_with_current_answers` is the only one that explicitly uses `RETURNS_DEEP_STUBS` and stubs something. However, it does not verify the return value after serialization; it just serializes. But maybe the serialization triggers access to the deep stubs, which might cause the bug to manifest as a serialization error (e.g., ClassCastException). The test name says "try some mocks with current answers", and it's a bug issue test. The bug might be that deep stubs cause serialization problems. Actually, the bug in the code might be that `withSettingsUsing` always calls `serializable()` which could cause serialization issues with non-serializable types, but that's a different issue. The test expects serialization to work. If the bug causes a ClassCastException because of the matching issue, it might fail.
+
+Alternatively, there is `MocksSerializationTest.should_be_able_to_serialize_type_that_implements_Serializable_but_but_dont_declare_a_no_arg_constructor`? No.
+
+Given the ambiguity, let's think about the test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` from `DeepStubsWronglyReportsSerializationProblemsTest`. This test was introduced to verify that accessing a deep stub does not raise a mockito exception about serialization. The bug might be that deep stubs reported serialization problems incorrectly. The issue might be in `withSettingsUsing` which always adds `.serializable()`. That causes the deep stub mock to be marked serializable, but if the type is not serializable, it might cause an exception. However, the test says it should not raise a mockito exception about serialization. So the bug might be that an exception is thrown, and the fix might be to not force serializable. But the provided buggy functions do force serializable. So that test might fail with the current code. Let's check: `withSettingsUsing` returns `mockSettings.serializable().defaultAnswer(...)`. This means even if the type is not serializable, it adds serializable. That could cause an exception when trying to create the mock. The test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` uses `NotSerializableShouldBeMocked` (note the name), so the return type is not serializable. The test expects that accessing the deep stub does not raise an exception. But with the current code, it would call `newDeepStubMock` which creates a mock with `withSettingsUsing`, which adds serializable. Since the type does not implement Serializable and may not have a no-arg constructor, it could throw a MockitoException. That would cause the test to fail. So that test is likely triggering the bug.
+
+Similarly, `BUG_ISSUE_399_try_some_mocks_with_current_answers` uses `IMethods` which is an interface and likely serializable, so it might not fail.
+
+Thus, the test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` is a candidate.
+
+Also, other tests that use deep stubs with non-serializable types might fail, but we don't see them.
+
+Now, we need to decide which tests to include. The instruction says: "Determine which testcase methods actually expose the bug." We should output only those that, when executed against the buggy code, would fail, and after the fix, would pass. Based on the analysis, the bug is that `deepStub` uses `container.getInvocationForStubbing()` instead of `invocation`. But also `withSettingsUsing` forces serializable without checking if the type is compatible. Both could be bugs. However, the input source includes all three functions. The bug may be in any of them. Let's re-read the problem statement: "Given: 1. Source: The complete functions where an error occurs. If multiple functions are buggy, all will be provided." So all three functions are buggy. We need to fix them all.
+
+Now, what is the correct fix? For `deepStub`, change the loop condition to use `invocation` instead of `container.getInvocationForStubbing()`. Also, we might need to ensure that `matches` is called correctly. The typical pattern in Mockito for deep stubbing is to iterate over stubbed invocations and see if the actual invocation matches any of them. So the fix should be:
+
+```java
+for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+    if (stubbedInvocationMatcher.matches(invocation)) {
+        return stubbedInvocationMatcher.answer(invocation);
+    }
+}
+```
+
+Note: `matches` method exists on `StubbedInvocationMatcher`? Probably yes.
+
+For `withSettingsUsing`, the issue is that it unconditionally calls `serializable()` even if the type may not be serializable. This could cause exceptions when creating the mock for a non-serializable type. The fix should be to only add serializable if the mock settings are already serializable? Or perhaps remove the serializable call entirely? But deep stubs need to be serializable? Usually, if the parent mock is serializable, the deep stubs should also be serializable. However, forcing serializable on all deep stubs is wrong. The correct approach is to propagate the serializable settings from the parent mock. That is, the `MockSettings` used for deep stubs should include serializable only if the original mock was created with serializable. The `withSettingsUsing` method has access only to `returnTypeGenericMetadata`, not the parent mock's settings. So it cannot know. The fix might be to not call `serializable()` unconditionally, but instead rely on the fact that deep stubs are created within the context of the parent mock and should inherit its settings. However, the current code doesn't have that context. Looking at the code, `withSettingsUsing` is called from `newDeepStubMock`, which is called from `deepStub`, which has access to the invocation and thus the mock. The mock knows its own settings. So we could pass the parent mock's settings or determine serializability from the parent. But the simpler fix is to not force serializable. The test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` expects that no exception is raised when accessing a deep stub for a non-serializable type. So removing `.serializable()` would fix that. However, we need to ensure that deep stubs for serializable mocks still work. The serialization tests presumably create mocks with `serializable()` in the settings, and then deep stubs should also be serializable. But if we remove the call, the deep stubs won't be serializable, which would break serialization tests. The correct fix is to conditionally add serializable based on whether the original mock settings had serializable. But we don't have that info in `withSettingsUsing`. Perhaps we should pass the parent mock's settings or the invocation mock's default answer settings.
+
+Alternatively, the bug might be that the serializable flag should be inherited, but it's not, and forcing it causes problems. There is also a bug issue #399 about deep stubs and serialization, so maybe the fix is to not force serializable and let the deep stub mock inherit serializability from the original mock. But how? The deep stubbing mechanism uses the `ReturnsDeepStubs` answer which calls `deepStub`. The `deepStub` method creates a new mock with `withSettingsUsing`. The `withSettingsUsing` method creates settings from scratch. It should incorporate the original mock's settings, including serializable. The fix could be to modify `deepStub` to pass the original settings to `newDeepStubMock`. But the current code doesn't.
+
+Given the complexity, the minimal fix might be to remove `.serializable()` from `withSettingsUsing`. But then tests that expect deep stubs to be serializable would fail. Let's check if any test expects that. The test `BUG_ISSUE_399_try_some_mocks_with_current_answers` creates a mock with `withSettings().serializable().defaultAnswer(RETURNS_DEEP_STUBS)`. Then it stubs on deep stubs and serializes. If we remove `.serializable()` from `withSettingsUsing`, then the deep stub mocks would not be serializable, and serializing the parent mock would fail because it contains non-serializable deep stubs. So that test would fail. Therefore, we need to preserve serializability for deep stubs when the parent is serializable.
+
+Thus, we need a more complete fix: propagate the serializable setting from the parent mock. How? In `deepStub`, we have access to the invocation's mock, and from the mock we can get its settings? There is `MockUtil.getMockSettings(mock)`. So we can get the original settings and use them to create the deep stub mock.
+
+The fix would be:
+
+1. In `deepStub`, get the original mock settings from the mock handler's mock creation settings.
+2. Pass those settings (or at least the serializable flag) to `withSettingsUsing` or directly to `newDeepStubMock`.
+
+Modify `newDeepStubMock` to take the original `MockSettings` or a boolean for serializable. But we need minimal changes.
+
+Alternatively, we can modify `withSettingsUsing` to accept an additional parameter indicating whether to be serializable. Or we can create the deep stub mock by starting from the original settings (excluding default answer) and then adding the default answer.
+
+Let's think about the minimal fix that addresses both bugs:
+- The matching bug in `deepStub`.
+- The unconditional serializable bug.
+
+The matching bug is clearly wrong. The serializable bug is also a problem because it forces serializable even when the type doesn't support it, causing exceptions.
+
+A reasonable fix: In `deepStub`, after getting the handler, we can retrieve the original mock settings and pass them along. But we need to change the signatures.
+
+Given the output format requires the fixed code as a JSON string, we can provide the corrected functions.
+
+Let's propose the following fixes:
+
+1. Fix `deepStub` loop: use `invocation` for matching.
+2. In `newDeepStubMock` and `withSettingsUsing`, we need to handle serializable properly. The simplest minimal change that doesn't break existing tests: Remove `.serializable()` from `withSettingsUsing`. Because the original mock's serializable setting is applied at the top level, but deep stubs should be serializable only if they implement Serializable or have default constructor? Actually, the deep stubs are created via `mock(type, settings)`. If `settings` does not include `serializable()`, then the mock is not serializable. That's fine. But if the parent mock is serializable, the deep stubs need to be serializable to allow serialization of the entire graph. Otherwise, serialization will fail. So removing it would break serialization of deep stubs.
+
+Looking at the code more, the `withSettingsUsing` method creates a `MockSettings` from scratch, not inheriting from the parent. The parent mock's settings include `serializable()`, but that is not passed down. So the deep stubs are created with `serializable()` regardless, which might be an attempt to make them serializable. However, for non-serializable types, this causes an error. The correct approach is to only add `serializable()` if the type is compatible (implements Serializable or has a no-arg constructor). That's what the `serializable()` method does internally: it checks if the type is serializable-compatible. If not, it throws an exception. So forcing it for types that are not serializable causes the exception. The test expects no exception, so the fix is to not call `serializable()` for types that are not compatible. But how to know? We can check if the raw type is serializable or has a no-arg constructor? Actually, the `serializable()` method in `MockSettingsImpl` might validate and throw. The safer approach is to not call `serializable()` unconditionally, but instead only add serializable if the deep stub type itself is serializable. But that might break serialization of deep stubs when the parent is serializable? Actually, if the parent is serializable, the deep stubs need to be serializable to allow the whole graph to be serialized. If the deep stub type is not serializable, then it's impossible to serialize the whole graph anyway. So it's okay to fail if the type is not serializable? But the test says it should not raise an exception about serialization when accessing a deep stub. The test uses `NotSerializableShouldBeMocked`, which presumably is not serializable. So the test expects that accessing the deep stub works fine, even though the type is not serializable. The deep stub mock itself doesn't need to be serializable because the parent mock might never be serialized. The issue is that the deep stubbing mechanism should not force serializable on deep stubs, because that would require the type to be serializable-compatible. The deep stubs should be created with the same settings as the parent, but if the parent is not serializable, deep stubs should not be serializable. If the parent is serializable, then deep stubs should also be serializable, but only if the type supports it; otherwise serialization will fail anyway.
+
+Given the test is specifically about not raising an exception when accessing a deep stub (not serializing), it's likely that the bug is that `withSettingsUsing` unconditionally adds `serializable()`, which causes an exception when the type is not serializable, even if the user never intends to serialize. The fix is to not add serializable unless the parent mock was created with serializable. But we don't have that information. However, we can get the parent mock's settings from the invocation. In `deepStub`, we have the invocation's mock. We can get its mock settings using `MockUtil.getMockSettings(mock)`. Then we can check if the original settings are serializable, and only then add serializable to the deep stub. Also, we should pass the original settings to configure other aspects (like listeners, etc.) but that might be overkill. For minimal fix, we can just propagate the serializable flag.
+
+Let's implement:
+
+In `deepStub`, get the original mock settings from the mock:
+
+```java
+MockSettings originalSettings = new MockUtil().getMockSettings(invocation.getMock());
+boolean isSerializable = originalSettings.isSerializable(); // hypothetical method
+```
+
+Then pass `isSerializable` to `withSettingsUsing` or `newDeepStubMock`.
+
+But `MockSettings` is an interface, we might not have `isSerializable()`. Actually, `MockSettings` has methods like `serializable()`, but not an accessor. We can use `MockCreationValidator` or something? Alternatively, we can use the `DefaultAnnotationEngine` to check? This is getting complex.
+
+Given the time, perhaps the intended minimal fix for the serializable issue is simply to remove the `.serializable()` call from `withSettingsUsing`. This is a common bug: deep stubs should not force serializable. The test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` was added to fix that. And the serialization tests that rely on deep stubs being serializable would then need to explicitly add serializable to the deep stub, but they use the parent mock's settings which already include serializable. However, the deep stub creation does not inherit that, so they would break. But maybe the deep stubs are not serialized directly; the parent mock is serialized, and the deep stubs are references to other mocks that are also serialized? Actually, when serializing a mock that uses RETURNS_DEEP_STUBS, the deep stub mocks are also serialized if they are reachable. They need to be serializable. If we remove `.serializable()` from `withSettingsUsing`, then deep stub mocks will not be serializable, and serialization of the parent will fail because it will try to serialize a non-serializable object (the deep stub). However, the serialization tests that use deep stubs (like `BUG_ISSUE_399_try_some_mocks_with_current_answers`) create the parent mock with `serializable()` and then stub a chain. The test expects serialization to succeed. If deep stubs are not serializable, serialization will fail. So removing `.serializable()` would break that test.
+
+Thus, we need a more nuanced fix: only call `.serializable()` if the type is compatible (i.e., implements Serializable or has a no-arg constructor). The `serializable()` method in `MockSettingsImpl` already does validation and throws if not compatible. So we can't just call it blindly. The fix is to conditionally call it only if the type is compatible. We can check compatibility using `MockCreationValidator.validateSerializable(type, false)` or something. Or we can wrap it in a try-catch and fall back to non-serializable? That would be messy.
+
+Alternatively, we can remove the `.serializable()` call and rely on the fact that deep stubs are not meant to be serializable by default; the parent mock's serialization will include the deep stubs as part of its state, but the deep stubs themselves are references to mock objects that are created by the serialization mechanism. In Mockito, when a mock is serialized, its deep stubs are also serialized if they are referenced. To be serializable, the deep stub mocks must themselves be serializable. If we don't set serializable on the deep stubs, they might still be serializable if the mock creation defaults to serializable? No, default is not serializable.
+
+Given the difficulty, maybe the bug is only the deepStub matching issue, and the serializable issue is a different bug not meant to be fixed here? But the instructions say all functions where an error occurs are provided. The serializable issue is clearly a potential error.
+
+Let's look at the test that specifically mentions serialization and deep stubs: `BUG_ISSUE_399_try_some_mocks_with_current_answers`. That test stubs on deep stubs and then serializes. If the matching bug is fixed, that test might still fail due to serialization? It might not, because the mock settings for deep stubs are forced serializable, and `IMethods` is an interface that likely implements Serializable? Not necessarily. But it might work.
+
+Another test: `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` uses `NotSerializableShouldBeMocked` which is not serializable. With the current code, `withSettingsUsing` forces serializable, which would cause an exception when creating the mock for that type. So that test would fail. Therefore, it's a triggering test.
+
+Thus, we need to fix both bugs.
+
+Given the constraints, I'll provide a fix that addresses both:
+- In `deepStub`, use `invocation` for matching.
+- In `withSettingsUsing`, do not call `serializable()` unconditionally. Instead, we should propagate the serializable setting from the parent mock. To get the parent mock's settings, we can modify `newDeepStubMock` to accept the original invocation's mock, and then get its settings. Alternatively, we can modify `withSettingsUsing` to accept a flag for serializable.
+
+But to keep it minimal, we can change `withSettingsUsing` to not call `serializable()` at all. Then, to ensure that deep stubs are serializable when the parent is, we need to modify the creation of deep stubs to incorporate the parent's serializable setting. The best way is to change `newDeepStubMock` to take the original mock as well, and then use its settings as a base.
+
+Let's design the fix:
+
+```java
+private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+    InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+    InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+    // matches invocation for verification
+    for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+        if (stubbedInvocationMatcher.matches(invocation)) {
+            return stubbedInvocationMatcher.answer(invocation);
+        }
+    }
+
+    // record deep stub answer
+    return recordDeepStubAnswer(
+            newDeepStubMock(returnTypeGenericMetadata, invocation.getMock()),
+            container
+    );
+}
+
+private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata, Object mock) {
+    MockSettings settings = withSettingsUsing(returnTypeGenericMetadata, mock);
+    return mockitoCore().mock(returnTypeGenericMetadata.rawType(), settings);
+}
+
+private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata, Object mock) {
+    MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?
+            withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())
+            : withSettings();
+
+    // propagate serializable from the parent mock if applicable
+    if (MockSettingsImpl.class.isInstance(mockSettings)) {
+        // not sure how to get parent's settings; we can get the handler
+        InternalMockHandler<Object> handler = new MockUtil().getMockHandler(mock);
+        // ... complex
+    }
+
+    // For now, do not force serializable; let the parent decide?
+    return mockSettings.defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));
+}
+```
+
+This is getting too complex. Maybe the intended fix is simpler: the bug is only the matching loop, and the serializable issue is not considered a bug for this set? The test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` might not be in the provided test list? It is: `DeepStubsWronglyReportsSerializationProblemsTest::should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`. Yes, it's there.
+
+Given the instruction to produce the minimal correct fix, I'll assume the bug is the matching in `deepStub`. The serializable issue might be a separate bug that we are not asked to fix? But the input includes `withSettingsUsing` which has the serializable call. However, the instruction says "Source: The complete functions where an error occurs." So all three functions are buggy. Therefore, we must fix all of them.
+
+Given the complexity, I'll provide a fix that modifies `withSettingsUsing` to not call `serializable()` unconditionally. To preserve serialization for deep stubs when the parent is serializable, we can check if the parent mock's settings include serializable by using the handler. We can retrieve the parent mock's creation settings from the handler's mock creation. The `InternalMockHandler` might have a method `getMockSettings()`. Actually, `DefaultMockCreation`? Not sure.
+
+Alternatively, we can simply remove `.serializable()` and also modify the test? But we cannot modify tests.
+
+Considering that the test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` expects no exception, and the current code throws because of serializable, removing it will fix that test. For the serialization tests, they might still pass because the deep stub mocks might be created with serializable if we incorporate the parent's settings. But if we remove it, they will fail. So we must propagate.
+
+I'll try to propagate by getting the parent mock's settings from the `MockHandler`. In `deepStub`, we have the handler. The handler might have a method to get the `MockSettings`. Actually, `InternalMockHandler` extends `MockHandler`. Possibly we can get the settings from the `MockCreationValidator`? Another way: we can use `MockUtil.getMockSettings(mock)` which returns a `MockSettings` object. But it's returned as an interface, we can cast to `DefaultMockCreation`? There's no such method.
+
+Given the time, I'll assume the minimal fix is:
+
+1. In `deepStub`, change the loop to use `invocation` for matching.
+2. In `withSettingsUsing`, remove the `.serializable()` call. (This will make deep stubs not serializable by default, which may break serialization tests, but perhaps those tests are not in the list? They are, but the instruction only asks to fix bugs that are exposed by testcases. If the serialization tests also fail, they would be triggering testcases. But the problem says we must output only those that actually trigger the bug. If removing serializable breaks serialization tests, they would also be triggering. So we need a fix that doesn't break them.
+
+I think the safest minimal fix is to propagate the serializable setting from the original mock. Let's assume we have a method to get the original settings. Since it's not provided, we can infer that the `InternalMockHandler` has a method `getMockSettings()`. Looking at Mockito source, the `MockHandlerFactory` creates a `MockHandlerImpl` that holds the `MockSettings`. The `InternalMockHandler` interface has `getInvocationContainer()` and others, but not `getMockSettings()`. However, in the code, we have `handler` which is an `InternalMockHandler`. We can get the mock's creation settings from the mock itself via `MockUtil.getMockSettings(mock)`. That method likely exists. So we can use that.
+
+Thus, the fix:
+
+In `deepStub`, after getting the handler, we can get the original mock settings:
+
+```java
+MockSettings originalSettings = MockUtil.getMockSettings(invocation.getMock());
+```
+
+And then pass them to `withSettingsUsing`.
+
+But `MockUtil` might not have `getMockSettings` method. Actually, it does: `public static MockSettings getMockSettings(Object mock)`. So we can use that.
+
+Then modify `withSettingsUsing` to accept the original settings and use its serializable flag.
+
+Implementation:
+
+```java
+private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+    InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+    InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+    for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+        if (stubbedInvocationMatcher.matches(invocation)) {
+            return stubbedInvocationMatcher.answer(invocation);
+        }
+    }
+
+    MockSettings originalSettings = new MockUtil().getMockSettings(invocation.getMock());
+    return recordDeepStubAnswer(
+            newDeepStubMock(returnTypeGenericMetadata, originalSettings),
+            container
+    );
+}
+
+private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata, MockSettings originalSettings) {
+    return mockitoCore().mock(
+            returnTypeGenericMetadata.rawType(),
+            withSettingsUsing(returnTypeGenericMetadata, originalSettings)
+    );
+}
+
+private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata, MockSettings originalSettings) {
+    MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?
+            withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())
+            : withSettings();
+
+    // Propagate serializable from original settings
+    if (originalSettings != null && originalSettings.isSerializable()) {
+        mockSettings = mockSettings.serializable();
+    }
+
+    return mockSettings.defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));
+}
+```
+
+But `MockSettings` interface does not have `isSerializable()` method. So we need to check in another way. Maybe we can check if the original settings instance is `DefaultMockCreation` and then cast. This is messy.
+
+Given the limited time, I'll provide a fix that only addresses the matching bug in `deepStub`. The serializable issue might be a separate bug that is not covered by the tests? But the test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` clearly expects no serialization exception, which would be thrown by the current `withSettingsUsing`. So it is a triggering test. Therefore, we must fix it.
+
+Given the complexity, perhaps the intended fix for `withSettingsUsing` is simply to remove `.serializable()` and not add it, because deep stubs are not meant to be serializable by default. The test `BUG_ISSUE_399_try_some_mocks_with_current_answers` might still pass if the parent mock is serializable and the deep stubs are not serializable? Actually, if the parent mock is serializable, serializing it will attempt to serialize the deep stub references, which are not serializable, causing failure. So that test would fail. But maybe that test is not in the list? It is. So we cannot remove serializable completely.
+
+Given the trade-off, I think the most likely fix that covers both bugs is to propagate the serializable setting. I'll assume that `MockSettings` has an `isSerializable()` method. In Mockito 1.x, there is `MockSettings.isSerializable()`? Actually, `MockSettings` interface has methods like `serializable()`, but no accessor. The implementation `DefaultMockCreation` has an internal field. So we cannot get it via the interface.
+
+Perhaps we can check if the parent mock itself is mockito serializable by examining its class? Not reliable.
+
+Given the difficulty, I'll focus on the matching bug and assume the serializable bug is not triggered by the testcases? Let's examine the test `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`: it calls `mock(ToBeDeepStubbed.class, RETURNS_DEEP_STUBS).getSomething()`. This creates a mock and calls getSomething(), which triggers deepStub. In deepStub, it calls newDeepStubMock, which calls withSettingsUsing, which adds serializable. If the return type `NotSerializableShouldBeMocked` is not serializable, the mock creation will throw an exception because `serializable()` validates. So the test would fail. Therefore, to make it pass, we need to fix withSettingsUsing. So this test is a triggering test.
+
+Similarly, the serialization test `BUG_ISSUE_399_try_some_mocks_with_current_answers` stubs on deep stubs and serializes. If we remove serializable from withSettingsUsing, the deep stubs won't be serializable, causing serialization to fail. That test would also fail. So both are triggering.
+
+We need a fix that makes both pass. The only way is to propagate serializable from the parent. Since the parent mock in `BUG_ISSUE_399_try_some_mocks_with_current_answers` is created with `withSettings().serializable()`, the deep stubs should also be serializable. In `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`, the parent mock is created with `RETURNS_DEEP_STUBS` only (no explicit serializable), so the deep stubs should not be serializable. So we need to conditionally add serializable based on the parent mock's settings.
+
+Thus, we need to get the parent mock's settings. Since we cannot directly get `isSerializable()` from the interface, we can try to see if the mock instance has a CGLIB proxy that implements Serializable? Not reliable.
+
+Another approach: we can modify `withSettingsUsing` to not call serializable, but instead, in `deepStub`, after creating the deep stub mock, we can set it to be serializable if the parent is serializable by using `((MockSettingsImpl)mockSettings).serializable()`? That is hacky.
+
+Given the complexity, I'll provide a fix that simply removes the `.serializable()` call from `withSettingsUsing`. This will make `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` pass, but `BUG_ISSUE_399_try_some_mocks_with_current_answers` will fail. However, maybe the latter test is not actually triggered? It might not be because the deep stubs are accessed only during stubbing, not during serialization? Wait, the test calls `serializeAndBack(iMethods)`. During serialization, the deep stub mocks are part of the object graph and need to be serializable. If they are not serializable, serialization will throw `NotSerializableException`. So the test will fail. So both are triggering.
+
+Given the constraint to produce the minimal correct fix, I'll include both fixes: matching loop and propagate serializable.
+
+I'll write the code assuming the existence of a method `MockSettings isSerializable()` or we can inspect the mock's serialization flag via `MockCreationValidator`. Actually, we can get the handler and then check the `mockCreationSettings` which holds a `serializable` flag. The `InternalMockHandler` might have a method `getMockSettings()` that returns `DefaultMockCreation`. Let's look at typical Mockito code: `MockHandlerImpl` holds `MockCreationSettings mockCreationSettings`. `MockCreationSettings` has `isSerializable()`. So we can get it via `handler.getMockSettings()`. But the code we have uses `InternalMockHandler` which is an interface. Possibly it's `MockHandlerImpl` that implements it. We can cast.
+
+Given the typical refactoring in Mockito, I'll assume we can do:
+
+```java
+MockSettings mockSettings = handler.getMockSettings();
+boolean isSerializable = ((DefaultMockCreation) mockSettings).isSerializable();
+```
+
+But it's not safe.
+
+To keep it simpler, I'll assume that the `MockSettings` returned by `withSettings()` is `DefaultMockCreation`, and we can pass the original mock's settings via a method that clones it. Actually, we can use `MockUtil.getMockSettings(mock)` which returns a `MockSettings` object. We can then iterate over its settings? Not.
+
+Given the time, I'll produce a fix that only addresses the matching bug, and for the serializable issue, I'll keep the call but only if the type is serializable? That would be:
+
+```java
+if (returnTypeGenericMetadata.rawType().isSerializable()) {
+    mockSettings = mockSettings.serializable();
+}
+return mockSettings.defaultAnswer(...);
+```
+
+This would avoid the exception for non-serializable types. But then deep stubs for serializable types will be serializable, which is good. For non-serializable types, they will not be serializable, which is fine because they can't be serialized anyway. This might make both tests pass: for `should_not_raise...` the type is not serializable, so no serializable call; for `BUG_ISSUE_399...`, the types are `IMethods` and `LinkedList`, which might implement Serializable? `IMethods` is an interface, not necessarily Serializable; `LinkedList` implements Serializable. So `IMethods` might not be serializable, but the test serializes successfully even without making deep stubs serializable? Actually, if the deep stub for `IMethods` is not serializable, then serializing the parent would fail. But the test does serialize and expects success. So `IMethods` must be serializable? The test uses `IMethods` which might extend Serializable? Not sure. In Mockito tests, `IMethods` is an interface that may not extend Serializable. However, the parent mock is created with `serializable()`, so the mock itself is serializable. The deep stubs for `IMethods` are created by `withSettingsUsing` in the current code with `serializable()`. If we remove that, they are not serializable. But they are references from the mock's fields? Actually, the deep stubs are not stored as fields; they are created on demand via the `returnsDeepStubsAnswer`. During serialization, the mock's `writeObject` method serializes the stubbings, which include the deep stub answers, which are `ReturnsDeepStubs` instances. These answers do not hold references to the deep stub mocks until they are called. During serialization, only the stubbing configuration is serialized, not the actual deep stub mocks. The deep stub mocks are recreated after deserialization when called. So actually, deep stub mocks themselves might not need to be serializable because they are not part of the serialized state; they are lazily created. The `ReturnsDeepStubs` answer is serializable, and it will recreate the deep stub mocks after deserialization using the same settings. So the serialization of deep stubs is about serializing the answer object, not the mock itself. Therefore, removing `.serializable()` from `withSettingsUsing` should not break serialization because the deep stub mocks are not serialized; they are recreated. The test `BUG_ISSUE_399_try_some_mocks_with_current_answers` serializes the parent mock and then deserializes it. After deserialization, it can still call methods on the deep stubs. That works because the deep stubs are recreated by the answer. So the deep stub mocks themselves do not need to be serializable. The current code forces them to be serializable unnecessarily. So removing `.serializable()` is safe and fixes the serialization exception for non-serializable types.
+
+Thus, the minimal fix is:
+1. Fix the matching loop in `deepStub`.
+2. Remove `.serializable()` from `withSettingsUsing`.
+
+This will make both tests pass because:
+- `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` will no longer throw an exception when creating the deep stub for a non-serializable type.
+- `BUG_ISSUE_399_try_some_mocks_with_current_answers` will still work because deep stubs are recreated after deserialization, and they don't need to be serializable.
+
+Therefore, I'll go with that.
+
+Now, identify the triggering testcases:
+- `org.mockitousage.bugs.DeepStubsWronglyReportsSerializationProblemsTest.should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub` (because it expects no exception but gets one).
+- Possibly `org.mockitousage.basicapi.MocksSerializationTest.BUG_ISSUE_399_try_some_mocks_with_current_answers` might also be triggered if the bug causes a ClassCastException in the matching loop? But that test stubs on deep stubs, and the matching bug might cause incorrect stubbing behavior. However, the test only serializes and does not verify actual return values. Maybe it still passes because the stubbing is not checked. But the stubbing might not be recorded correctly due to the matching bug. Let's analyze: In that test, it does `when(iMethods.iMethodsReturningMethod().linkedListReturningMethod().contains(anyString())).thenReturn(false);`. This chain of calls invokes deepStub multiple times. During the first call to `iMethodsReturningMethod()`, deepStub is called. At that point, there are no stubbed invocations, so it goes to record a deep stub answer. That's fine. Then `linkedListReturningMethod()` is called on that deep stub, again deepStub is called, no stubbed invocations, so new deep stub. Then `contains(anyString())` is called, which is a method on the deep stub's return type. At this point, `when` is executed, so there is a stubbing being set up. The `when` captures the invocation and, during `thenReturn`, it stubs it. Later, during serialization, no further calls are made. The matching bug might not affect this because the stub is set via the normal `when` mechanism, which uses `OngoingStubbing` and not the deep stubbing matching loop. The deepStub method's loop is only used when an actual invocation happens on the mock, to check if it matches a previously stubbed invocation. In this test, after stubbing, there is no additional invocation on the deep stubs. So the buggy matching loop is never exercised. Therefore, the test may not trigger the matching bug. It only triggers the serializable bug? Actually, the test serializes and might throw an exception if deep stubs are forced to be serializable and the type is not serializable. `IMethods` might be serializable? The `IMethods` interface likely extends Serializable? In Mockito tests, `IMethods` is often used as a mock type and may not be serializable. Even if it is, the chain `linkedListReturningMethod()` returns `LinkedList`, which is serializable. So the serialization exception might not occur. So this test may not trigger either bug. But it's in the list. To be safe, I'll include it because it uses deep stubs and the matching bug could affect if there are any stubbed invocations? Actually, there are no stubbed invocations at the time of deep stubbing, so the loop is skipped. So it's unaffected.
+
+Thus, the main triggering test is the DeepStubsWronglyReportsSerializationProblemsTest.
+
+Also, there is `org.mockito.verification.TimeoutTest` tests? They don't use deep stubs.
+
+Maybe there are other tests that use deep stubs? Looking at the list, I see only those two: `BUG_ISSUE_399_try_some_mocks_with_current_answers` and `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`. Possibly also `should_mock_class_with_interfaces_of_different_class_loader_AND_different_classpaths`? No.
+
+Additionally, there is `org.mockitousage.basicapi.MocksSerializationTest.should_serialize_with_real_object_spy` but that uses spy, not deep stubs.
+
+I'll include only the DeepStubsWronglyReportsSerializationProblemsTest test as triggering.
+
+But to be thorough, let's check if any of the other tests might trigger the matching bug. For example, tests that use `RETURNS_DEEP_STUBS` and then make multiple calls to the deep stub that should match stubbings. But I don't see any such test.
+
+Thus, I'll output:
+
+Trigger method: `org.mockitousage.bugs.DeepStubsWronglyReportsSerializationProblemsTest.should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`
+
+And the fixed code for all three functions.
+
+Now, produce the fixed code as strings.
+
+The original functions as given in the input. I'll output the fixed versions.
+
+Note: The input includes only these three functions, not the entire class. So the fixed_code array should contain the three functions in order.
+
+I'll write the fixed functions.
+
+Fix:
+- In `deepStub`, change the loop to use `stubbedInvocationMatcher.matches(invocation)`.
+- Remove `.serializable()` from `withSettingsUsing`.
+
+Also, note that `container.getInvocationForStubbing()` might be needed elsewhere? No.
+
+So the fixed functions:
+
+```java
+private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {
+    InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());
+    InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();
+
+    // matches invocation for verification
+    for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {
+        if (stubbedInvocationMatcher.matches(invocation)) {
+            return stubbedInvocationMatcher.answer(invocation);
+        }
+    }
+
+    // record deep stub answer
+    return recordDeepStubAnswer(
+            newDeepStubMock(returnTypeGenericMetadata),
+            container
+    );
+}
+
+private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata) {
+    return mockitoCore().mock(
+            returnTypeGenericMetadata.rawType(),
+            withSettingsUsing(returnTypeGenericMetadata)
+    );
+}
+
+private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata) {
+    MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?
+            withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())
+            : withSettings();
+
+    return mockSettings.defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));
+}
+```
+
+Note: I removed `.serializable()` from the return statement.
+
+Now, output in JSON.
+
+Trigger method: full path as shown in the list: `org.mockitousage.bugs.DeepStubsWronglyReportsSerializationProblemsTest.should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`
+
+Make sure to use the exact method name as given in the source file: `should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`.
+
+I'll include the package: `org.mockitousage.bugs.DeepStubsWronglyReportsSerializationProblemsTest.should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub`.
+
+Now, construct the JSON.{
+  "trigger_method": [
+    "org.mockitousage.bugs.DeepStubsWronglyReportsSerializationProblemsTest.should_not_raise_a_mockito_exception_about_serialization_when_accessing_deep_stub"
+  ],
+  "fixed_code": [
+    "private Object deepStub(InvocationOnMock invocation, GenericMetadataSupport returnTypeGenericMetadata) throws Throwable {\n    InternalMockHandler<Object> handler = new MockUtil().getMockHandler(invocation.getMock());\n    InvocationContainerImpl container = (InvocationContainerImpl) handler.getInvocationContainer();\n\n    // matches invocation for verification\n    for (StubbedInvocationMatcher stubbedInvocationMatcher : container.getStubbedInvocations()) {\n        if (stubbedInvocationMatcher.matches(invocation)) {\n            return stubbedInvocationMatcher.answer(invocation);\n        }\n    }\n\n    // record deep stub answer\n    return recordDeepStubAnswer(\n            newDeepStubMock(returnTypeGenericMetadata),\n            container\n    );\n}",
+    "private Object newDeepStubMock(GenericMetadataSupport returnTypeGenericMetadata) {\n    return mockitoCore().mock(\n            returnTypeGenericMetadata.rawType(),\n            withSettingsUsing(returnTypeGenericMetadata)\n    );\n}",
+    "private MockSettings withSettingsUsing(GenericMetadataSupport returnTypeGenericMetadata) {\n    MockSettings mockSettings = returnTypeGenericMetadata.hasRawExtraInterfaces() ?\n            withSettings().extraInterfaces(returnTypeGenericMetadata.rawExtraInterfaces())\n            : withSettings();\n\n    return mockSettings.defaultAnswer(returnsDeepStubsAnswerUsing(returnTypeGenericMetadata));\n}"
+  ]
+}

@@ -1,0 +1,39 @@
+public long computeMillis(boolean resetFields, String text) {
+    SavedField[] savedFields = iSavedFields;
+    int count = iSavedFieldsCount;
+    if (iSavedFieldsShared) {
+        iSavedFields = savedFields = (SavedField[])iSavedFields.clone();
+        iSavedFieldsShared = false;
+    }
+    sort(savedFields, count);
+    if (count > 0) {
+        DurationField months = DurationFieldType.months().getField(iChrono);
+        DurationField days = DurationFieldType.days().getField(iChrono);
+        DurationField first = savedFields[0].iField.getDurationField();
+        if (compareReverse(first, months) >= 0 && compareReverse(first, days) <= 0) {
+            saveField(DateTimeFieldType.year(), iDefaultYear);
+            return computeMillis(resetFields, text);
+        }
+    }
+
+    long millis = iMillis;
+    try {
+        for (int i = 0; i < count; i++) {
+            millis = savedFields[i].set(millis, resetFields);
+        }
+    } catch (IllegalFieldValueException e) {
+        if (text != null) {
+            e.prependMessage("Cannot parse \"" + text + '"');
+        }
+        throw e;
+    }
+
+    if (iZone == null) {
+        millis -= iOffset;
+    } else {
+        int offset = iZone.getOffsetFromLocal(millis);
+        millis -= offset;
+    }
+
+    return millis;
+}

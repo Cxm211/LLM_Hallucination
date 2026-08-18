@@ -1,0 +1,17 @@
+// buggy code
+    public void writeObject(Object value) throws IOException
+    {
+            _append(JsonToken.VALUE_EMBEDDED_OBJECT, value);
+            /* 28-May-2014, tatu: Tricky choice here; if no codec, should we
+             *   err out, or just embed? For now, do latter.
+             */
+//          throw new JsonMappingException("No ObjectCodec configured for TokenBuffer, writeObject() called");
+    }
+
+    public void writeTree(TreeNode node) throws IOException
+    {
+
+            // as with 'writeObject()', is codec optional?
+            _append(JsonToken.VALUE_EMBEDDED_OBJECT, node);
+    }
+

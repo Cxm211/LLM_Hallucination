@@ -1,0 +1,14 @@
+    public char[] expandCurrentSegment()
+    {
+        final char[] curr = _currentSegment;
+        // Let's grow by 50% by default
+        final int len = curr.length;
+        // but above intended maximum, slow to increase by 25%
+        int newLen;
+        if (len < MAX_SEGMENT_LEN) {
+            newLen = Math.min(MAX_SEGMENT_LEN, len + (len >> 1));
+        } else {
+            newLen = len + (len >> 2);
+        }
+        return (_currentSegment = Arrays.copyOf(curr, newLen));
+    }

@@ -1,0 +1,4 @@
+boolean isSpecial(Element el) {
+    String name = el.nodeName();
+    return inSorted(name, TagSearchSpecial);
+}

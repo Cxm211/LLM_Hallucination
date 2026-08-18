@@ -1,0 +1,52 @@
+void replace() {
+  if (firstNode == null) {
+    replacementNode = candidateDefinition;
+    return;
+  }
+
+  if (candidateDefinition != null && explicitNode != null) {
+    explicitNode.detachFromParent();
+    compiler.reportCodeChange();
+
+    replacementNode = candidateDefinition;
+    if (NodeUtil.isExpressionNode(candidateDefinition)) {
+      candidateDefinition.putBooleanProp(Node.IS_NAMESPACE, true);
+      Node assignNode = candidateDefinition.getFirstChild();
+      Node nameNode = assignNode.getFirstChild();
+      if (nameNode.getType() == Token.NAME) {
+        Node valueNode = nameNode.getNext();
+        Node varNode = new Node(Token.VAR, nameNode.cloneTree());
+        varNode.copyInformationFrom(candidateDefinition);
+        nameNode.cloneTree().addChildToFront(valueNode.cloneTree());
+        varNode.getFirstChild().addChildToFront(valueNode.cloneTree());
+        candidateDefinition.getParent().replaceChild(
+            candidateDefinition, varNode);
+        varNode.getFirstChild().setJSDocInfo(assignNode.getJSDocInfo());
+        compiler.reportCodeChange();
+        replacementNode = varNode;
+      }
+    }
+  } else {
+    replacementNode = createDeclarationNode();
+    if (firstModule == minimumModule) {
+      firstNode.getParent().addChildBefore(replacementNode, firstNode);
+    } else {
+      int indexOfDot = namespace.indexOf('.');
+      if (indexOfDot == -1) {
+        compiler.getNodeForCodeInsertion(minimumModule)
+            .addChildToBack(replacementNode);
+      } else {
+        ProvidedName parentName =
+            providedNames.get(namespace.substring(0, indexOfDot));
+        Preconditions.checkNotNull(parentName);
+        Preconditions.checkNotNull(parentName.replacementNode);
+        parentName.replacementNode.getParent().addChildAfter(
+            replacementNode, parentName.replacementNode);
+      }
+    }
+    if (explicitNode != null) {
+      explicitNode.detachFromParent();
+    }
+    compiler.reportCodeChange();
+  }
+}

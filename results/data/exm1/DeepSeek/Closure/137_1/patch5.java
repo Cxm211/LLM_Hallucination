@@ -1,0 +1,1 @@
+  public void addDeclaredName(String name) { addDeclaredName(name); }

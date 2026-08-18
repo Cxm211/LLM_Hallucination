@@ -1,0 +1,22 @@
+    public void captureArgumentsFrom(Invocation invocation) {
+        for (int position = 0; position < matchers.size(); position++) {
+            Matcher m = matchers.get(position);
+            if (m instanceof CapturesArguments && invocation.getRawArguments().length > position) {
+                //TODO SF - this whole lot can be moved captureFrom implementation
+                if(isVariableArgument(invocation, position) && isVarargMatcher(m)) {
+                    Object array = invocation.getRawArguments()[position];
+                    if (array == null) {
+                        ((CapturesArguments) m).captureFrom(null);
+                    } else {
+                        for (int i = 0; i < Array.getLength(array); i++) {
+                            ((CapturesArguments) m).captureFrom(Array.get(array, i));
+                        }
+                    }
+                    //since we've captured all varargs already, it does not make sense to process other matchers.
+                    return;
+                } else {
+                    ((CapturesArguments) m).captureFrom(invocation.getRawArguments()[position]);
+                }
+            }
+        }
+    }

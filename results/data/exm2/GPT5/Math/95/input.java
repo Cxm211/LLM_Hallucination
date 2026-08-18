@@ -1,0 +1,22 @@
+    protected double getInitialDomain(double p) {
+        double ret;
+        double d = getDenominatorDegreesOfFreedom();
+            // use mean
+            ret = d / (d - 2.0);
+        return ret;
+    }
+
+// trigger testcase
+public void testSmallDegreesOfFreedom() throws Exception {
+        org.apache.commons.math.distribution.FDistributionImpl fd =
+            new org.apache.commons.math.distribution.FDistributionImpl(
+                1.0, 1.0);
+        double p = fd.cumulativeProbability(0.975);
+        double x = fd.inverseCumulativeProbability(p);
+        assertEquals(0.975, x, 1.0e-5);
+
+        fd.setDenominatorDegreesOfFreedom(2.0);
+        p = fd.cumulativeProbability(0.975);
+        x = fd.inverseCumulativeProbability(p);
+        assertEquals(0.975, x, 1.0e-5);
+    }

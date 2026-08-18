@@ -1,0 +1,66 @@
+    public void setTimeZone(TimeZone tz)
+    {
+        /* DateFormats are timezone-specific (via Calendar contained),
+         * so need to reset instances if timezone changes:
+         */
+        if (!tz.equals(_timezone)) {
+            _clearFormats();
+            _timezone = tz;
+        }
+    }
+
+    private final static DateFormat _cloneFormat(DateFormat df, String format,
+            TimeZone tz, Locale loc, Boolean lenient)
+    {
+        if (!loc.equals(DEFAULT_LOCALE)) {
+            df = new SimpleDateFormat(format, loc);
+            df.setTimeZone((tz == null) ? DEFAULT_TIMEZONE : tz);
+        } else {
+            df = (DateFormat) df.clone();
+            if (tz != null) {
+                df.setTimeZone(tz);
+            }
+        }
+        return df;
+    }
+
+// trigger testcase
+public void testLenient() throws Exception
+    {
+        StdDateFormat f = StdDateFormat.instance;
+
+        // default should be lenient
+        assertTrue(f.isLenient());
+
+        StdDateFormat f2 = f.clone();
+        assertTrue(f2.isLenient());
+
+        f2.setLenient(false);
+        assertFalse(f2.isLenient());
+
+        f2.setLenient(true);
+        assertTrue(f2.isLenient());
+
+        // and for testing, finally, leave as non-lenient
+        f2.setLenient(false);
+        assertFalse(f2.isLenient());
+        StdDateFormat f3 = f2.clone();
+        assertFalse(f3.isLenient());
+
+        // first, legal dates are... legal
+        Date dt = f3.parse("2015-11-30");
+        assertNotNull(dt);
+
+        // but as importantly, when not lenient, do not allow
+        try {
+            f3.parse("2015-11-32");
+            fail("Should not pass");
+        } catch (ParseException e) {
+            verifyException(e, "can not parse date");
+        }
+
+        // ... yet, with lenient, do allow
+        f3.setLenient(true);
+        dt = f3.parse("2015-11-32");
+        assertNotNull(dt);
+    }

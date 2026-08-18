@@ -1,0 +1,20 @@
+// buggy function
+    public void combine(ExtendedProperties props) {
+        for (Iterator it = props.getKeys(); it.hasNext();) {
+            String key = (String) it.next();
+            setProperty(key, props.get(key));
+        }
+    }
+
+// trigger testcase
+// org/apache/commons/collections/TestExtendedProperties.java::testCollections271
+public void testCollections271() {
+        ExtendedProperties props = new ExtendedProperties();
+        props.setProperty("test", "\\\\\\\\192.168.1.91\\\\test");
+        props.getProperty("test");
+        assertEquals( "\\\\192.168.1.91\\test", props.getProperty("test") );
+
+        ExtendedProperties props2 = new ExtendedProperties();
+        props2.combine(props);
+        assertEquals( "\\\\192.168.1.91\\test", props2.getProperty("test") );
+    }

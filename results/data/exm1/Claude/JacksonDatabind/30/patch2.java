@@ -1,0 +1,11 @@
+public TokenBuffer(JsonParser p, DeserializationContext ctxt)
+    {
+        _objectCodec = p.getCodec();
+        _generatorFeatures = DEFAULT_GENERATOR_FEATURES;
+        _writeContext = JsonWriteContext.createRootContext(null);
+        _first = _last = new Segment();
+        _appendAt = 0;
+        _hasNativeTypeIds = p.canReadTypeId();
+        _hasNativeObjectIds = p.canReadObjectId();
+        _mayHaveNativeIds = _hasNativeTypeIds | _hasNativeObjectIds;
+    }

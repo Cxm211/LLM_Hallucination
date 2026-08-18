@@ -1,0 +1,3 @@
+public static boolean isNamedEntity(String name) {
+        return full.containsKey(name);
+    }

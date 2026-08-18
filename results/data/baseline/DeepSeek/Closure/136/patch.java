@@ -1,0 +1,32 @@
+  private void addPossibleSignature(String name, Node node, NodeTraversal t) {
+    boolean signatureAdded = false;
+    if (node.getType() == Token.FUNCTION) {
+      // The node we're looking at is a function, so we can add it directly
+      addSignature(name, node, t.getSourceName());
+      signatureAdded = true;
+    } else if (node.getType() == Token.NAME) {
+      String functionName = node.getString();
+      Scope.Var v = t.getScope().getVar(functionName);
+      if (v == null) {
+        if (compiler.isIdeMode()) {
+          return;
+        } else {
+          throw new IllegalStateException(
+              "VarCheck should have caught this undefined function");
+        }
+      }
+      Node function = v.getInitialValue();
+      if (function != null &&
+          function.getType() == Token.FUNCTION) {
+        String inputName = v.getInputName();
+        if (inputName == null) {
+          inputName = t.getSourceName();
+        }
+        addSignature(name, function, inputName);
+        signatureAdded = true;
+      }
+    }
+    if (!signatureAdded) {
+      nonMethodProperties.add(name);
+    }
+  }

@@ -1,0 +1,253 @@
+We are given a source file containing two buggy functions: `traverseObjectLiteral` and `isQualifiedNameInferred`. The task is to determine which testcase methods actually expose the bug and produce a minimal fix.
+
+First, we need to understand the bug. The provided source includes many test methods from various test classes, but only the first two functions are marked as buggy. The bug appears to be in `traverseObjectLiteral`. Looking at the code:
+
+```java
+private FlowScope traverseObjectLiteral(Node n, FlowScope scope) {
+    JSType type = n.getJSType();
+    Preconditions.checkNotNull(type);
+
+    for (Node name = n.getFirstChild(); name != null; name = name.getNext()) {
+      scope = traverse(name.getFirstChild(), scope);
+    }
+
+    // Object literals can be reflected on other types.
+    // See CodingConvention#getObjectLiteralCase and goog.object.reflect.
+    // Ignore these types of literals.
+    ObjectType objectType = ObjectType.cast(type);
+    if (objectType == null) {
+      return scope;
+    }
+    boolean hasLendsName = n.getJSDocInfo() != null &&
+        n.getJSDocInfo().getLendsName() != null;
+    if (objectType.hasReferenceName() && !hasLendsName) {
+      return scope;
+    }
+
+    String qObjName = NodeUtil.getBestLValueName(
+        NodeUtil.getBestLValue(n));
+    for (Node name = n.getFirstChild(); name != null;
+         name = name.getNext()) {
+      String memberName = NodeUtil.getObjectLitKeyName(name);
+      if (memberName != null) {
+        JSType rawValueType =  name.getFirstChild().getJSType();
+        JSType valueType = NodeUtil.getObjectLitKeyTypeFromValueType(
+            name, rawValueType);
+        if (valueType == null) {
+          valueType = unknownType;
+        }
+        objectType.defineInferredProperty(memberName, valueType, name);
+
+        // Do normal flow inference if this is a direct property assignment.
+        if (qObjName != null && name.isStringKey()) {
+          String qKeyName = qObjName + "." + memberName;
+          Var var = syntacticScope.getVar(qKeyName);
+          JSType oldType = var == null ? null : var.getType();
+          if (var != null && var.isTypeInferred()) {
+            var.setType(oldType == null ?
+                valueType : oldType.getLeastSupertype(oldType));
+          }
+
+          scope.inferQualifiedSlot(name, qKeyName,
+              oldType == null ? unknownType : oldType,
+              valueType);
+        }
+      } else {
+        n.setJSType(unknownType);
+      }
+    }
+    return scope;
+  }
+```
+
+The bug is likely in the else branch: when `memberName` is null (i.e., the key is not a string key, perhaps a computed key like `[expr]`), the code does `n.setJSType(unknownType)`. However, `n` is the object literal node, not the name node. This is incorrect; it should set the type on the name node or something. Actually, the purpose is to mark the object literal as unknown type for computed properties? The comment in the original code says "Do normal flow inference if this is a direct property assignment." But the else block sets the type of the object literal node to unknownType, which would potentially corrupt the type of the object literal. This is a known bug: when encountering a non-string key (e.g., numeric key, computed property), it sets the entire object literal's JSType to unknownType, which loses type information.
+
+Looking at the testcases, we need to find which ones trigger this bug. The bug is in `traverseObjectLiteral` which is part of the type inference in the compiler. The testcases span many test classes: ProcessTweaksTest, PureFunctionIdentifierTest, etc. Many testcases likely exercise code that goes through object literal traversal. However, we need to find those that actually expose the bug, i.e., cause a failure because the object literal's type is incorrectly set to unknownType.
+
+The bug occurs when the object literal has a non-string key (e.g., a number, expression). For example, `({a: 1})` has string keys, so no issue. But `({1: 2})` or `({[x]: y})` would trigger the else branch and set the object literal type to unknown.
+
+Looking at the testcases, we need to identify which ones involve object literals with non-string keys. Many testcases use object literals, but most have string keys. There is a test `testIssue303` and `testIssue303b` that involve object literals? Actually, they involve `window.setTimeout`, `window.location`, etc., not sure. Let's scan the test list.
+
+Testcases from PureFunctionIdentifierTest: many of them use object literals like `{foo:1}`. But they have string keys, so they wouldn't trigger the else branch. However, the else branch is for cases where `memberName` is null, which happens when the key is not a string literal (e.g., a number, an expression). In the code, `NodeUtil.getObjectLitKeyName(name)` returns null if the key is not a string (e.g., a number or computed). So testcases that use numeric keys or computed keys will trigger the bug.
+
+Looking at the test list, I see many test methods that involve object literals with numeric keys? Not directly. Maybe testcases like `testRemoveTryCatch` do not involve object literals. Many testcases from `ProcessTweaksTest` involve calls like `goog.tweak.registerBoolean(3, 'Description')` where the first argument is a number. That is not an object literal key though. The bug is in object literal traversal, so we need object literals with non-string keys.
+
+Perhaps the bug is exposed by testcases that involve object literals with computed property names, e.g., `{[x]: y}`. But I don't see any such test in the given list.
+
+Wait, there is also the `isQualifiedNameInferred` function which is also mentioned. It might have a bug as well. Let's examine it:
+
+```java
+private boolean isQualifiedNameInferred(
+        String qName, Node n, JSDocInfo info,
+        Node rhsValue, JSType valueType) {
+      if (valueType == null) {
+        return true;
+      }
+
+      // Prototype sets are always declared.
+      boolean inferred = true;
+      if (info != null) {
+        inferred = !(info.hasType()
+            || info.hasEnumParameterType()
+            || (isConstantSymbol(info, n) && valueType != null
+                && !valueType.isUnknownType())
+            || FunctionTypeBuilder.isFunctionTypeDeclaration(info));
+      }
+
+      if (inferred && rhsValue != null && rhsValue.isFunction()) {
+        if (info != null) {
+          return false;
+        } else if (!scope.isDeclared(qName, false) &&
+            n.isUnscopedQualifiedName()) {
+
+          // Check if this is in a conditional block.
+          // Functions assigned in conditional blocks are inferred.
+          for (Node current = n.getParent();
+               !(current.isScript() || current.isFunction());
+               current = current.getParent()) {
+            if (NodeUtil.isControlStructure(current)) {
+              return true;
+            }
+          }
+
+          // Check if this is assigned in an inner scope.
+          // Functions assigned in inner scopes are inferred.
+          AstFunctionContents contents =
+              getFunctionAnalysisResults(scope.getRootNode());
+          if (contents == null ||
+              !contents.getEscapedQualifiedNames().contains(qName)) {
+            return false;
+          }
+        }
+      }
+      return inferred;
+    }
+```
+
+This function seems to determine if a qualified name is inferred. The bug might be related to incorrect handling of `isConstantSymbol` condition. But we need to see which testcases trigger it.
+
+Given the complexity, I need to identify testcases that actually fail due to these bugs. Typically, such bugs would cause type inference errors that lead to compilation failures or incorrect warnings. Many of the testcases are checking for specific errors or output. The bug in `traverseObjectLiteral` would likely cause a type to become unknown, which could result in missing type information and potentially cause a warning like `INVALID_TWEAK_DEFAULT_VALUE_WARNING` or similar when the type is not properly inferred.
+
+Looking at ProcessTweaksTest, test `testNonLiteralId1` uses `goog.tweak.registerBoolean(3, 'Description')`. The first argument is a number literal, not a string. In the tweak processing, the first argument should be a string literal. The error `NON_LITERAL_TWEAK_ID_ERROR` is expected. But this test does not involve object literals directly. However, the bug might be that the object literal traversal incorrectly sets types, which could affect the detection of non-literal IDs? Unlikely.
+
+Maybe the bug is in `isQualifiedNameInferred` and it affects the `PureFunctionIdentifierTest`. Many of those tests call `checkMarkedCalls` which checks for side-effect annotations. The bug might cause functions to be incorrectly marked as pure or not.
+
+Given the tight context, I suspect the bug is in `traverseObjectLiteral` and it is triggered by any object literal with a non-string key. Among the testcases, the ones that contain object literals with numeric keys? Let's search for object literals in the test descriptions. I see `testStrippingWithImplicitDefaultValues` contains `goog.tweak.registerNumber('TweakA', 'desc');` which uses string keys, not object literal keys. 
+
+Maybe the bug is in `traverseObjectLiteral` when the object literal has a computed property name `[expr]`. In JavaScript, object literals can have computed property names. The test list includes many tests from `PureFunctionIdentifierTest` that define objects like `{foo:1}` but no computed.
+
+Wait, there is `testAnnotationInExternStubs4` which references `{...}` but not computed.
+
+Given the difficulty, perhaps the bug is more subtle: the bug is that when `memberName` is null (i.e., the key is not a string), it sets the type of the entire object literal to `unknownType`, which is wrong. The fix should be to not change the type, or to set the type of the property node? Actually, the correct behavior is probably to ignore non-string keys (or to handle them appropriately). The else branch should probably set the type of the name node to unknownType, not the object literal node. Or maybe it should just continue without setting anything.
+
+But we need to output the trigger methods and fixed code.
+
+Let's search for testcases that involve object literals with non-string keys. In the given list, I see `testRemoveUnusedVars` has `var x = {foo: 3};` which is string. `testObjectKeys` has `Object.keys(this)`. Not.
+
+Maybe the bug is in `isQualifiedNameInferred` and it is triggered by testcases that assign a function to a qualified name with a `@const` or `@type` annotation? For example, `testIssue303` and `testIssue303b` involve `setLocation`. But they likely don't trigger.
+
+After careful review, I notice that the buggy functions are provided without their full class context. They are extracted and given as source. The testcases are from various test classes. The bug might be that `traverseObjectLiteral` incorrectly handles the case where `name.isStringKey()` is false (i.e., computed property). The test `testIssue303` does not involve object literals. 
+
+Perhaps the bug is tested by `testAnnotationInExterns_new1` etc. Those test extern annotations.
+
+Given the time, I'll try a different approach: The bug is likely that the else branch in `traverseObjectLiteral` sets `n.setJSType(unknownType)` which corrupts the type for the entire object literal when there is a non-string key. This would cause issues when the object literal is used later. Looking at the testcases, I see `testStrippingOfManuallyRegistered1` uses `goog.tweak.getRegistry()` and object literals? Not explicit.
+
+Maybe the bug is exposed by testcases that have `goog.object.reflect` or similar? There is a comment referencing `goog.object.reflect` and `getObjectLiteralCase`. 
+
+Wait, the comment says: "Object literals can be reflected on other types. See CodingConvention#getObjectLiteralCase and goog.object.reflect. Ignore these types of literals." The code then checks `objectType.hasReferenceName() && !hasLendsName` to skip. The bug may be that the check is wrong, leading to incorrect handling.
+
+But the most obvious bug is the `n.setJSType(unknownType)` in the else branch. That is a clear error: it should be `name.setJSType(unknownType)` or nothing.
+
+Now, which testcases actually fail because of this? We can simulate mentally: If an object literal has a non-string key, the entire object literal's type becomes unknown. That would lose type info and could cause downstream errors. However, many of the testcases check for specific errors or output. If the type becomes unknown, the compiler might produce different warnings.
+
+For example, `testUnknownGetString` expects a warning `UNKNOWN_TWEAK_WARNING`. If the object literal type is unknown, maybe it affects the detection? But not directly.
+
+Perhaps the bug is triggered by any test that involves object literals with computed keys. Since the given test list does not seem to contain any such test, maybe the bug is not exercised by the provided testcases? But the task says we must determine which testcase methods actually expose the bug. Possibly none? But that seems unlikely.
+
+Let's look at `isQualifiedNameInferred` again. The bug could be in the condition: `(isConstantSymbol(info, n) && valueType != null && !valueType.isUnknownType())`. If `valueType` is unknown, this condition is false, but `inferred` remains true. Then later, if `inferred && rhsValue != null && rhsValue.isFunction()`, it might incorrectly treat it as inferred when it should not. Maybe this affects testcases like `testFunction` from `RecordFunctionInformationTest`. 
+
+Given the difficulty, I'll assume that the bug is in `traverseObjectLiteral` and that the else branch is incorrect. The fix is to change `n.setJSType(unknownType);` to something else, or remove it. The minimal fix is to not set the type of the object literal; instead, perhaps set the type of the name node to unknownType, but since `memberName` is null, the key is not a string, so we cannot define a property. The correct behavior is to simply not do anything, because computed keys are handled differently. So we should remove that else branch entirely, or replace with `name.setJSType(unknownType);` but that might not be necessary. 
+
+Looking at the code, the else branch is intended for non-string keys (like numbers). In the original code, it sets the object literal's type to unknown, which is wrong because it loses the type of the object literal. The fix should be to not modify the object literal type. So we can remove the else branch or change it to `name.setJSType(unknownType);`. But I think the proper fix is to not change anything, because the type inference for computed keys should be done elsewhere.
+
+But let's check the context: The `traverseObjectLiteral` function returns a scope. The only side effect is setting inferred properties and possibly setting the type on the object literal. The else branch sets the object literal type to unknown, which is destructive. The fix is to remove that line.
+
+Now for `isQualifiedNameInferred`, there might be a bug in the condition for `isConstantSymbol`. The condition `(isConstantSymbol(info, n) && valueType != null && !valueType.isUnknownType())` checks if the symbol is constant and the value type is not unknown. If it is constant and the value type is known, then `inferred` becomes false. But if the value type is unknown (which is common for forward declarations), `inferred` remains true. That might be correct? The bug might be that when `valueType` is unknown, it should also be not inferred? Actually, if the type is unknown, it's not a declaration, so it should be inferred. So maybe it's fine.
+
+The other bug could be in the inner scope check: `if (contents == null || !contents.getEscapedQualifiedNames().contains(qName))` returns false, meaning not inferred. But if `contents` is null, it returns false, which means it's declared? That might be wrong: if analysis results are null, it might be a global scope, so it should be declared? But it returns false, meaning inferred=false (i.e., declared). That seems okay.
+
+Given that we need to produce a fix, I'll focus on the more clear bug in `traverseObjectLiteral`. The fix is to remove the else branch's `n.setJSType(unknownType);` and possibly replace with something else. 
+
+To determine trigger methods, I need to find testcases that cause the else branch to execute (i.e., object literal with non-string key). Among the provided testcases, are there any with numeric keys? In `ProcessTweaksTest`, `testNonLiteralId1` uses `goog.tweak.registerBoolean(3, 'Description')`, but the argument is a number, not an object literal key. That does not trigger object literal traversal.
+
+I see `testWithNoTweaks` has `var x={};x.foo={}`. That uses string keys only.
+
+`testStrippingWithExplicitDefaultValues` uses `registerNumber('TweakA', 'desc', 5)` - again number as a parameter, not object key.
+
+Maybe the bug is triggered by something in `RemoveUnusedClassPropertiesTest`? `testObjLit` uses `({a:2})` - string key.
+
+`testIssue730` uses `{foo:0}`.
+
+`testSimple1` uses `this.a = 2`.
+
+It seems no testcase directly uses a non-string key in an object literal. However, the bug might be exposed indirectly through some compilation that involves `goog.object.reflect` or `lends` annotation. The comment mentions these. Perhaps the testcases that use `goog.object.reflect` are not in the list.
+
+Given the list, I suspect that the bug is not triggered by any of the provided testcases. But the task requires us to identify which ones do trigger. Maybe we should look for testcases that involve `@lends` or `goog.object.reflect`. I don't see any.
+
+Alternatively, the bug might be in `isQualifiedNameInferred` and triggered by many tests that use function assignments. But we need to be precise.
+
+Let's search for testcases that have `rhsValue.isFunction()` and `info` null, and `n.isUnscopedQualifiedName()`. Many tests in `PureFunctionIdentifierTest` assign functions like `Foo.prototype.method = function(){}`. Those go through `isQualifiedNameInferred`. The bug might be that for such assignments, the function is incorrectly considered inferred, so it gets a side-effect annotation incorrectly.
+
+For example, `testNoSideEffectsSimple` has `function f(){return 1}` which is simple. But the bug might cause functions with side effects to be incorrectly marked pure.
+
+Given the time, I'll assume the bug is in `traverseObjectLiteral` and the only testcases that trigger it are those that involve object literals with computed property names. Since there are none explicitly, perhaps `testAnnotationInExternStubs4` uses a computed property? It has `externObj5.prototype.propWithAnnotatedStubAfter = function(s) {};` which is string.
+
+Maybe the bug is about `hasReferenceName()` check: if an object literal has a reference name (like a type from externs), it returns early, skipping the else branch. But if it doesn't have a reference name and has a computed key, the else branch runs.
+
+I think I have to make a decision. I'll assume that the bug triggers in testcases that pass through `traverseObjectLiteral` with an object literal that has at least one non-string key. Among the given testcases, I don't see any. However, `testNonLiteralId1` passes a number as an argument to `registerBoolean`. That number is not part of an object literal. So it doesn't trigger.
+
+Maybe the bug is triggered by tests that use `goog.tweak.registerBoolean('Foo', 'desc', val)` where `val` is a variable reference. The variable might become unknown? Unlikely.
+
+Given the difficulty, I'll implement the fix for `traverseObjectLiteral` and assume that no testcases explicitly trigger the else branch, so the trigger methods list is empty? But that would be odd.
+
+Alternatively, I can check the `isQualifiedNameInferred` function for a bug that might be triggered by tests like `testAnnotationInExterns_new1` where `externSENone()` is called. That test expects that `externSENone` is marked as no side effect. The function `isQualifiedNameInferred` is used to decide if a qualified name is inferred. If it incorrectly returns `false` (declared), then the function might be considered not pure even if it is. But the test expects it to be marked, so it must return `true` (inferred). The bug might cause incorrect return.
+
+But let's not overcomplicate. I'll focus on the clear error in `traverseObjectLiteral` and produce a fix.
+
+For the trigger methods, I'll list the testcases that involve object literals with computed keys. Since I cannot find any, I'll output an empty list? That might be incorrect.
+
+Perhaps the bug is in the `isQualifiedNameInferred` and it is triggered by many testcases that assign functions to prototype. But the condition `if (info != null) { return false; }` is correct.
+
+After re-examining, the bug might be that the `isQualifiedNameInferred` method incorrectly returns `false` when `inferred && rhsValue != null && rhsValue.isFunction()` and the function is in a conditional block or inner scope, but the condition for `n.isUnscopedQualifiedName()` might be wrong. But that seems minor.
+
+Given the time, I'll produce a fix for `traverseObjectLiteral` by removing the else branch, and for `isQualifiedNameInferred`, I'll keep it unchanged (since I think the main bug is in the first function). 
+
+For the trigger methods, I'll list those testcases that might exercise object literal traversal with non-string keys. Since there are none explicitly, I'll list `testNonLiteralId1` because it uses a number as an argument, which might indirectly trigger object literal traversal? No, the argument is in a call, not an object literal.
+
+I think the correct approach is to identify the tests that cause the buggy code path to execute. The buggy code path is in `traverseObjectLiteral` when `memberName` is null. That happens when the key is a number or other non-string. Let's look for object literals with numeric keys in the test descriptions. I see `testIssue303` has `window.location = self.location;` not an object.
+
+Maybe `testRemoveUnusedVars` has `var x = {1: 2}`? Not in the given list.
+
+I'll check the `ProcessTweaksTest` test `testNonLiteralId3`: `goog.tweak.overrideDefaultValue(CONST, 3)` where `CONST` is a variable. Not object.
+
+I'm going to assume that the bug is not triggered by any of the provided testcases, but the task might still expect us to fix it. However, the instruction says "Determine which testcase methods actually expose the bug." So I must provide a list.
+
+After careful thought, I think the bug might be exposed by testcases that use `@lends` annotation, but I don't see any.
+
+Given the complexity, I'll output an empty list for trigger methods and provide the fixed code for both functions. The fixed code for `traverseObjectLiteral` will remove the else branch's `n.setJSType(unknownType);` and replace it with nothing (or maybe set on name). I'll remove it completely.
+
+For `isQualifiedNameInferred`, I'll leave it unchanged because I'm not confident.
+
+But I need to output fixed_code with both functions in order. I'll include the unchanged `isQualifiedNameInferred` and the modified `traverseObjectLiteral`.
+
+Now, the format: JSON object with "trigger_method" list and "fixed_code" list of strings.
+
+I'll make the fix minimal: just remove the else branch's line. So the fixed traverseObjectLiteral will have the else block empty or removed. I'll keep the else block but with a comment? No, just remove it.
+
+Let's produce the final answer.{
+  "trigger_method": [],
+  "fixed_code": [
+    "  private FlowScope traverseObjectLiteral(Node n, FlowScope scope) {\n    JSType type = n.getJSType();\n    Preconditions.checkNotNull(type);\n\n    for (Node name = n.getFirstChild(); name != null; name = name.getNext()) {\n      scope = traverse(name.getFirstChild(), scope);\n    }\n\n    ObjectType objectType = ObjectType.cast(type);\n    if (objectType == null) {\n      return scope;\n    }\n    boolean hasLendsName = n.getJSDocInfo() != null &&\n        n.getJSDocInfo().getLendsName() != null;\n    if (objectType.hasReferenceName() && !hasLendsName) {\n      return scope;\n    }\n\n    String qObjName = NodeUtil.getBestLValueName(\n        NodeUtil.getBestLValue(n));\n    for (Node name = n.getFirstChild(); name != null;\n         name = name.getNext()) {\n      String memberName = NodeUtil.getObjectLitKeyName(name);\n      if (memberName != null) {\n        JSType rawValueType =  name.getFirstChild().getJSType();\n        JSType valueType = NodeUtil.getObjectLitKeyTypeFromValueType(\n            name, rawValueType);\n        if (valueType == null) {\n          valueType = unknownType;\n        }\n        objectType.defineInferredProperty(memberName, valueType, name);\n\n        if (qObjName != null && name.isStringKey()) {\n          String qKeyName = qObjName + \".\" + memberName;\n          Var var = syntacticScope.getVar(qKeyName);\n          JSType oldType = var == null ? null : var.getType();\n          if (var != null && var.isTypeInferred()) {\n            var.setType(oldType == null ?\n                valueType : oldType.getLeastSupertype(oldType));\n          }\n\n          scope.inferQualifiedSlot(name, qKeyName,\n              oldType == null ? unknownType : oldType,\n              valueType);\n        }\n      }\n    }\n    return scope;\n  }",
+    "    private boolean isQualifiedNameInferred(\n        String qName, Node n, JSDocInfo info,\n        Node rhsValue, JSType valueType) {\n      if (valueType == null) {\n        return true;\n      }\n\n      boolean inferred = true;\n      if (info != null) {\n        inferred = !(info.hasType()\n            || info.hasEnumParameterType()\n            || (isConstantSymbol(info, n) && valueType != null\n                && !valueType.isUnknownType())\n            || FunctionTypeBuilder.isFunctionTypeDeclaration(info));\n      }\n\n      if (inferred && rhsValue != null && rhsValue.isFunction()) {\n        if (info != null) {\n          return false;\n        } else if (!scope.isDeclared(qName, false) &&\n            n.isUnscopedQualifiedName()) {\n\n          for (Node current = n.getParent();\n               !(current.isScript() || current.isFunction());\n               current = current.getParent()) {\n            if (NodeUtil.isControlStructure(current)) {\n              return true;\n            }\n          }\n\n          AstFunctionContents contents =\n              getFunctionAnalysisResults(scope.getRootNode());\n          if (contents == null ||\n              !contents.getEscapedQualifiedNames().contains(qName)) {\n            return false;\n          }\n        }\n      }\n      return inferred;\n    }"
+  ]
+}

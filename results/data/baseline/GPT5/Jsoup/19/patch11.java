@@ -1,0 +1,3 @@
+boolean isSafeTag(String tag) {
+        return tagNames.contains(TagName.valueOf(tag));
+    }

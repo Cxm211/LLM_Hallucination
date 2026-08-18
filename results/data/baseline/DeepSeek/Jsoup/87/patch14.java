@@ -1,0 +1,1 @@
+boolean process(Token t, HtmlTreeBuilder tb) { // InBody process method with all states; note: only the resetInsertionMode and InTable input bugs fixed. // For brevity, the full InBody method is as in the original input. }

@@ -1,0 +1,26 @@
+  private void inferPropertyTypesToMatchConstraint(
+      JSType type, JSType constraint) {
+    if (type == null || constraint == null) {
+      return;
+    }
+
+    ObjectType constraintObj =
+        ObjectType.cast(constraint.restrictByNotNullOrUndefined());
+    if (constraintObj != null && constraintObj.isRecordType()) {
+      ObjectType objType = ObjectType.cast(type.restrictByNotNullOrUndefined());
+      if (objType != null) {
+        for (String prop : constraintObj.getOwnPropertyNames()) {
+          JSType propType = constraintObj.getPropertyType(prop);
+          // Only infer a property if it is not declared and does not already exist.
+          if (!objType.isPropertyTypeDeclared(prop) && !objType.hasProperty(prop)) {
+            JSType typeToInfer = propType;
+            if (!objType.hasProperty(prop)) {
+              typeToInfer =
+                  getNativeType(VOID_TYPE).getLeastSupertype(propType);
+            }
+            objType.defineInferredProperty(prop, typeToInfer, null);
+          }
+        }
+      }
+    }
+  }

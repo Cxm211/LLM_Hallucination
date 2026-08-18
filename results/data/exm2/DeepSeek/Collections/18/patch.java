@@ -1,0 +1,17 @@
+public boolean retainAll(Collection<?> coll) {
+    Set<?> targetSet = (coll instanceof Set) ? (Set<?>) coll : new HashSet<>(coll);
+    boolean result = collection.retainAll(targetSet);
+    if (result == false) {
+        return false;
+    }
+    if (collection.size() == 0) {
+        setOrder.clear();
+    } else {
+        for (Iterator<E> it = setOrder.iterator(); it.hasNext();) {
+            if (!collection.contains(it.next())) {
+                it.remove();
+            }
+        }
+    }
+    return result;
+}

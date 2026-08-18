@@ -6,8 +6,6 @@ Xuemeng Cai, Jiakun Liu, Linhan Yang, Wei Ma, Lingxiao Jiang
 
 Singapore Management University · Harbin Institute of Technology · Blekinge Institute of Technology
 
-📄 [Hallucination-3.pdf](Hallucination-3.pdf)
-
 ---
 
 ## Overview
@@ -56,113 +54,60 @@ A **baseline** setting, in which the model receives only the buggy functions and
 
 ```
 .
-├── Hallucination-3.pdf       # The paper
-├── prompt/                   # The exact system prompt for each of the four settings
-├── baseline/                 # Baseline repair setting (patch only, no intermediate artifact)
-├── exm1/                     # Task 1 — Triggering testcase identification
-├── exm2/                     # Task 2 — Line coverage prediction
-├── exm3/                     # Task 3 — Additional testcase generation
-├── test-logs/                # Raw Defects4J test-execution logs for every run
-│   ├── baseline/ exp1/ exp2/ exp3/
-└── human_labels/             # Manual annotation results and codebook
+├── prompt/               # The exact system prompt for each of the four settings
+├── scripts/              # The pipeline that queried the models
+├── results/              # Task inputs, model outputs, and evaluation artifacts
+└── human_labels/         # Case-level manual annotations behind Tables 5, 8, and 9
 ```
 
-Every experiment directory follows the same three-level shape:
+Throughout this repository and the scripts, the four settings are named `baseline`, `exm1`, `exm2`, and `exm3`, corresponding to the baseline and to Tasks 1–3 respectively. Models are named `Claude`, `DeepSeek`, and `GPT5`.
 
-```
-<experiment>/<Model>/<Project>/<BugID>/       # Model ∈ {Claude, DeepSeek, GPT5}
-```
+### [`prompt/`](prompt/)
 
-with 17 Defects4J projects: `Chart, Cli, Closure, Codec, Collections, Compress, Csv, Gson, JacksonCore, JacksonDatabind, JacksonXml, Jsoup, JxPath, Lang, Math, Mockito, Time`.
+The four system prompts, one per setting, exactly as sent to the models. [prompt/README.md](prompt/README.md) documents what each prompt is given and the JSON schema it must return.
 
-Directories prefixed `z_` hold aggregated pipeline state (API requests, raw responses, coverage tables, scores) rather than per-bug inputs/outputs.
-
-### Per-bug files
-
-| File | Present in | Content |
-|---|---|---|
-| `input.java` | all | The developer-modified buggy function(s) given to the model |
-| `output.json` | all | The model's parsed JSON response |
-| `patch.java`, `patch1.java`, … | all | Model-generated fixed function(s), extracted from `output.json`'s `fixed_code` |
-| `fixed.java` | exm1, exm2, exm3 | The developer-written fixed function(s) (ground truth) |
-| `trigger.json` | exm1 | Model-predicted set of bug-triggering test methods |
-| `expn.json` | exm2 | Model-predicted executed lines, per function, for the buggy and fixed versions |
-| `add_test.java`, `add_test1.java`, … | exm3 | Generated additional testcase; line 1 is `// <target test file path>` |
-
-Bug directories are named by Defects4J bug id. In `exm1`, bugs whose relevant test suite exceeds the 300-method slice limit are split into variants (`14`, `14_1`, `14_2`, …), each an independent task instance.
-
-### Shared per-model files
-
-| File | Content |
+| File | Setting |
 |---|---|
-| `prompt_*.txt` | A copy of that task's system prompt; the canonical, task-named versions live in [prompt/](prompt/) |
-| `z_requests/` | Generated batch-API request payloads, chunked per project |
-| `z_output/` | Raw batch-API results (`batch*_results.jsonl`) |
-| `report.csv`, `report.txt` | Extraction/parse diagnostics — bugs skipped or responses that failed to parse |
-| `sample_*.csv` | The randomly sampled cases sent to human annotation |
+| `baseline.txt` | Baseline repair |
+| `triggering_testcase_identification.txt` | Task 1 |
+| `line_coverage_prediction.txt` | Task 2 |
+| `additional_testcase_generation.txt` | Task 3 |
 
----
+### [`scripts/`](scripts/)
 
-## Experiment directories in detail
+One submit script per model, each covering all four settings through `--setting`. These are the scripts that produced this study's results, merged from the twelve per-(setting, model) originals. See [scripts/README.md](scripts/README.md).
 
-### `baseline/` — Baseline repair
+```
+scripts/
+├── build_requests.py     build batch payloads   (Claude, GPT5)
+├── submit_Claude.sh      Anthropic Message Batches
+├── submit_GPT5.sh        OpenAI Batch API
+└── submit_DeepSeek.py    DeepSeek synchronous chat completions
+```
 
-The model receives only the buggy functions and is asked for a minimal correct fix; no intermediate artifact is requested.
+Inputs come from `results/data/` and `prompt/`; output goes to `generated_requests/` and `generated_outputs/`, so nothing under `results/` is overwritten. Credentials come from the environment and each script fails fast if unset: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `DEEPSEEK_API_KEY`.
 
-- `z_final/<Project>.csv` — per-bug patch outcome.
-  Columns: `model, project, bug_id, status, log`, where `status ∈ {pass, not pass}` and `log` points into `test-logs/baseline/`.
-- `sample_87.csv` — sampled cases for annotation.
+DeepSeek has no batch endpoint, so `submit_DeepSeek.py` reads `input.java` and the prompt directly and issues the requests concurrently — which is why `build_requests.py` covers only Claude and GPT5.
 
-### `exm1/` — Task 1: Triggering testcase identification
+The pipeline stops at the raw API responses; `scripts/README.md` documents where the model's text sits in each provider's result record.
 
-- `z_final/<Project>.csv` — per-instance evaluation.
-  Columns: `model, project, bug_id, variant, status, trigger_appear, n_trigger_total, n_trigger_appear, n_trigger_pred_success, matched_triggers, pred_success_triggers`.
-  `trigger_appear` records whether an oracle triggering testcase was present in that slice — this is what supports the *trigger-insensitive / trigger-dependent / trigger-absent-only success* analysis (Table 7).
-- `sample_94.csv` — 94 sampled instances per model.
-- `make_sample.py` — regenerates `sample_94.csv` for all three models from `z_final/` with a fixed seed (42).
+### [`results/`](results/)
 
-### `exm2/` — Task 2: Line coverage prediction
+```
+results/
+├── data/<setting>/<Model>/<Project>/<BugID>/   what the models produced
+└── evaluation/<setting>/<Model>/<Project>.csv  what running the tests produced
+```
 
-- `z_prediction/{buggy,fixed}/<Project>.csv` — model prediction aligned to ground truth, one row per source line.
-  Columns: `bug_id, folder, function_id, line_in_method, executed, prediction`.
-- `z_buggy_jacoco/<Project>.csv`, `z_fixed_jacoco/<Project>.csv` — JaCoCo-collected ground-truth coverage mapped back onto the extracted functions.
-  Columns include `class_fqcn, file, method_sig_snippet, method_start, method_end, line, line_in_method, ci, mi, cb, mb, executed` (`ci`/`mi` = covered/missed instructions, `cb`/`mb` = covered/missed branches).
-- `z_fixed_info/<project>_methods.csv` — line ranges of each developer-fixed method, used to map coverage back to functions.
-- `z_scores/<Project>_scores.csv` — per-bug precision/recall/F1 aggregates (`bug_score`, `fix_score`, `code_score`, `total_score`).
-- `z_test_results/<Project>_results.csv` — patch outcome per bug: `bug, status, exit_code, failing_tests, log_file`, with `status ∈ {Pass, Not Pass, Uncompilable}`.
+`data/` holds the `input.java` given to each model, its parsed `output.json`, the `patch*.java` extracted from it, the setting's intermediate artifact (`trigger.json`, `expn.json`, or `add_test*.java`), and the developer-written `fixed.java` as ground truth. `evaluation/` holds the patch outcomes, coverage precision/recall/F1, and generated-testcase validity tables reported in the paper.
 
-### `exm3/` — Task 3: Additional testcase generation
+Every setting covers the same 832 Defects4J bugs; `exm1` additionally splits a bug into several slices when its relevant test suite exceeds the 300-method limit, giving 3586 instances. [results/README.md](results/README.md) documents every column.
 
-Each generated testcase is executed on **three** program versions — the buggy program, the developer-written fixed program (the behavioral oracle), and the model-generated patched program — hence the parallel directory families:
+### [`human_labels/`](human_labels/)
 
-| Directory | Meaning |
-|---|---|
-| `z_add_testcase_buggy/` | Generated testcase run on the **buggy** program |
-| `z_add_testcase_fixed/` | Generated testcase run on the **model-patched** program |
-| `z_add_groundtruth/` | Generated testcase run on the **developer-written fixed** program |
-| `z_add_testcase_{buggy,fixed}_coverage/` | Coverage collected while running the generated testcase |
-| `z_buggy_jacoco_*`, `z_fixed_jacoco_*` | Baseline coverage without the generated testcase, used to compute the coverage delta |
-| `*_individual/` vs. `*_combined/` | Each generated testcase evaluated alone vs. all testcases for a bug inserted together |
-| `z_fixed/`, `z_fixed_info/` | Developer-written fixed program and its method line ranges |
+Case-level manual annotations produced by the procedure in Section 3.6 of the paper: independent open coding by two annotators, codebook construction, then conflict resolution with two additional authors. Initial Cohen's κ = 0.82 for repair hallucination and 0.49 for understanding hallucination; every label released here is post-resolution.
 
-- `z_final_score/<Project>.csv` — the joined per-testcase result table. Key columns:
-  `project, bug_id, folder, add_test_file, class_fqcn, method_name, repair_result, buggy_result, fixed_result, groundtruth_result`, followed by coverage deltas (`buggy_inst_delta`, `buggy_branch_score`, …).
-  A testcase is **valid** iff `buggy_result = Not Pass` and `groundtruth_result = Pass`.
-- `z_final_score.csv` — the outcome-tuple contingency table (`repair_result, buggy_result, fixed_result, groundtruth_result, count, ratio`) that underlies Figure 11.
-- `z_pass_notpass_notpass.csv`, `z_notpass_pass_pass.csv`, … — slices of the contingency table isolating specific outcome combinations for inspection.
-- `sample_92.csv` — sampled cases for annotation (Claude; DeepSeek and GPT-5 use 90 and 87).
-- `get_batch.py` — builds the batch-API request payloads from `input.java` + the task prompt.
-- `step1_extract_output.py` — parses `z_output/*/batch*_results.jsonl` back into per-bug `output.json`, `patch*.java`, and `add_test*.java`.
-
-### `test-logs/`
-
-Raw Defects4J test-run logs for every patched program, organized as `test-logs/<setting>/<Model>/<Project>/<Project>-<BugID>-buggy.log`. `exp1`, `exp2`, `exp3` correspond to `exm1`, `exm2`, `exm3`. The `log_file` / `log` columns in the score CSVs point here.
-
-### `human_labels/`
-
-Case-level manual annotations behind Tables 5, 8, and 9 of the paper, produced by the procedure in Section 3.6 (independent open coding by two annotators, codebook construction, conflict resolution with two additional authors; initial Cohen's κ = 0.82 for repair hallucination and 0.49 for understanding hallucination, all conflicts resolved before final labeling).
-
-**[human_label.md](human_labels/human_label.md) is the codebook** — directory layout, per-file column schemas, the value domain of every label column, and join instructions. Read it before using the CSVs.
+**[human_label.md](human_labels/human_label.md) is the codebook** — directory layout, per-file column schemas, and the value domain of every label column. Read it before using the CSVs.
 
 - `Repair_hallucination/<Task>/<Model>.csv` — how the model-generated **patch** deviates from the developer-intended repair.
   Columns: `project, bug_id, label, overfitting, label_if_others`.
@@ -191,49 +136,37 @@ Sample sizes (Table 1), each meeting a 95% confidence level with a 10% margin of
 | **Benchmark** | [Defects4J](https://github.com/rjust/defects4j) — 832 bugs after filtering (checkout/compile/test succeeds; ≥1 triggering testcase; every developer-modified location lies inside an identifiable function, and the patch is not solely a new function) |
 | **Models** | GPT-5, DeepSeek-R1, Claude Sonnet 4.5 (`claude-sonnet-4-5`), zero-shot, one response per instance, no fine-tuning or tool use |
 | **Decoding** | temperature 0 for Claude Sonnet 4.5; provider defaults for GPT-5 and DeepSeek-R1, where effective temperature control is unavailable |
-| **Querying** | Provider batch APIs; requests chunked at 50 per file (`get_batch.py`), `max_tokens = 40000` |
-| **Context** | Buggy functions only — never full source files. Task 1 additionally slices relevant test methods into chunks of ≤300 methods |
-| **Coverage** | [JaCoCo](https://www.jacoco.org/jacoco/) line-level coverage, mapped back onto the extracted buggy / model-patched functions. Blank lines, comment-only lines, and brace-only lines are excluded |
+| **Querying** | Provider batch APIs where available; requests chunked at 50 per file for Anthropic and 15–20 for OpenAI, with `max_tokens` of 40000 |
+| **Context** | Buggy functions only — never full source files. Task 1 additionally slices relevant test methods into chunks of ≤300 methods, each slice an independent instance |
+| **Coverage** | [JaCoCo](https://www.jacoco.org/jacoco/) line-level coverage, mapped back onto the extracted buggy / model-patched functions. Blank lines, comment-only lines, and brace-only lines are excluded before scoring |
 | **Execution** | Isolated environments; 300 s timeout per build / test / coverage run, timeouts treated as failures. Java version and build tool (Maven, Gradle, Ant) configured per Defects4J project |
 
 ---
 
 ## Reproducing
 
-The pipeline runs in four stages. Stage 1 and 2 helper scripts are included; the Defects4J orchestration and scoring code is not part of this package, since it is tightly coupled to the local Defects4J checkout and JVM configuration — the resulting artifacts are provided instead.
+Stages 1 and 2 are scripted here. Stage 3 depends on a local Defects4J checkout and per-project JVM configuration, so its orchestration code is not part of this package.
 
-**1. Build requests.** `get_batch.py` walks `<Project>/<BugID>/input.java`, prepends the task prompt, and writes chunked batch payloads to `z_requests/<Project>/batch*.json`:
-
-```bash
-cd exm3/Claude
-python get_batch.py                 # all projects
-python get_batch.py --root Lang     # one project
-```
-
-**2. Submit and extract.** Submit the payloads to the provider batch API, place the results under `z_output/<Project>/batch*_results.jsonl`, then parse them back into per-bug files:
+**1. Query the models.** Claude and GPT5 go through their batch endpoints, so build the payloads first; DeepSeek is called directly.
 
 ```bash
-python step1_extract_output.py                     # writes output.json, patch*.java, add_test*.java
-python step1_extract_output.py --project Lang
+export ANTHROPIC_API_KEY='...'      # or OPENAI_API_KEY / DEEPSEEK_API_KEY
+
+python scripts/build_requests.py --setting exm3 --model Claude
+bash   scripts/submit_Claude.sh   --setting exm3
+bash   scripts/submit_GPT5.sh     --setting exm3 --project Lang
+python scripts/submit_DeepSeek.py --setting exm3 --workers 5
 ```
 
-**3. Evaluate.** Apply each `patch*.java` to a fresh Defects4J checkout, run the developer-written test suite (300 s timeout), and classify the outcome as `Pass` / `Not Pass` / `Uncompilable`. Collect JaCoCo coverage for Task 2, and run generated testcases against the buggy, developer-fixed, and model-patched programs for Task 3. Logs land in `test-logs/`; scores land in `z_scores/`, `z_test_results/`, and `z_final_score/`.
+The submit scripts read the payloads `build_requests.py` wrote, so the two stages chain without extra configuration. Raw responses land in `generated_outputs/`.
 
-**4. Sample for annotation.**
+**2. Read the responses.** Each result record carries the model's text at `result.message.content[0].text` (Claude), `response.body.output[type=="message"].content[0].text` (GPT5), or `response.choices[0].message.content` (DeepSeek). That text is the JSON object the prompt specifies — `fixed_code` plus the setting's intermediate artifact. The artifacts derived that way for this study are published under `results/data/<setting>/<Model>/<Project>/<BugID>/`.
 
-```bash
-cd exm1 && python make_sample.py    # regenerates sample_94.csv for all three models (seed 42)
-```
+**3. Evaluate.** Apply each patched function to a fresh Defects4J checkout, run the developer-written test suite (300 s timeout), and classify the outcome as `Pass` / `Not Pass` / `Uncompilable`. Collect JaCoCo coverage for Task 2, and run each generated testcase against the buggy, developer-fixed, and model-patched programs for Task 3.
 
-Only Python 3 with the standard library is needed for the included scripts. Reproducing stage 3 additionally requires Defects4J, JaCoCo, and the JDK/build-tool versions each Defects4J project expects.
+Only Python 3 with the standard library is needed for the included scripts. Stage 3 additionally requires Defects4J, JaCoCo, and the JDK and build tool each Defects4J project expects.
 
----
-
-## Notes and known gaps
-
-- Model outputs and evaluation artifacts are provided as-is from the original runs. Coverage of the auxiliary `z_*` directories is uneven across models — for instance, `exm2` JaCoCo and score tables were produced under `exm2/Claude/` and are shared across models, and `z_requests/` / `z_output/` were retained only where the batch API was driven from this working tree.
-- The full working tree is ~4 GB, dominated by `exm1/*/z_requests/` (raw API request payloads, which embed up to 300 test methods per request). Consider a shallow clone if you only need the aggregated result tables.
-- LLM APIs are not perfectly reproducible even at temperature 0; exact re-runs may differ from the recorded outputs.
+LLM APIs are not perfectly reproducible even at temperature 0, so re-runs will not match the recorded outputs exactly.
 
 ## Citation
 

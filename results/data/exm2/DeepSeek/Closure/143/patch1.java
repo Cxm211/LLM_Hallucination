@@ -1,0 +1,1 @@
+    private void trySimplify(Node parent, Node node) {\n      if (node.getType() != Token.EXPR_RESULT) {\n        return;\n      }\n\n      Node exprBody = node.getFirstChild();\n      if (!NodeUtil.mayHaveSideEffects(exprBody)\n      ) {\n        changeProxy.replaceWith(parent, node, getSideEffectNodes(exprBody));\n      }\n    }

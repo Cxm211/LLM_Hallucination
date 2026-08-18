@@ -1,0 +1,74 @@
+// buggy function
+  private boolean inferTemplatedTypesForCall(
+      Node n, FunctionType fnType) {
+    final ImmutableList<TemplateType> keys = fnType.getTemplateTypeMap()
+        .getTemplateKeys();
+    if (keys.isEmpty()) {
+      return false;
+    }
+
+    // Try to infer the template types
+    Map<TemplateType, JSType> inferred = 
+        inferTemplateTypesFromParameters(fnType, n);
+
+
+    // Replace all template types. If we couldn't find a replacement, we
+    // replace it with UNKNOWN.
+    TemplateTypeReplacer replacer = new TemplateTypeReplacer(
+        registry, inferred);
+    Node callTarget = n.getFirstChild();
+
+    FunctionType replacementFnType = fnType.visit(replacer)
+        .toMaybeFunctionType();
+    Preconditions.checkNotNull(replacementFnType);
+
+    callTarget.setJSType(replacementFnType);
+    n.setJSType(replacementFnType.getReturnType());
+
+    return replacer.madeChanges;
+  }
+
+// trigger testcase
+// com/google/javascript/jscomp/TypeCheckTest.java::testIssue1058
+public void testIssue1058() throws Exception {
+    testTypes(
+        "/**\n" +
+        "  * @constructor\n" +
+        "  * @template CLASS\n" +
+        "  */\n" +
+        "var Class = function() {};\n" +
+        "\n" +
+        "/**\n" +
+        "  * @param {function(CLASS):CLASS} a\n" +
+        "  * @template T\n" +
+        "  */\n" +
+        "Class.prototype.foo = function(a) {\n" +
+        "  return 'string';\n" +
+        "};\n" +
+        "\n" +
+        "/** @param {number} a\n" +
+        "  * @return {string} */\n" +
+        "var a = function(a) { return '' };\n" +
+        "\n" +
+        "new Class().foo(a);");
+  }
+
+// com/google/javascript/jscomp/TypeCheckTest.java::testTemplatized11
+public void testTemplatized11() throws Exception {
+    testTypes(
+        "/** \n" +
+        " * @template T\n" +
+        " * @constructor\n" +
+        " */\n" +
+        "function C() {}\n" +
+        "\n" +
+        "/**\n" +
+        " * @param {T|K} a\n" +
+        " * @return {T}\n" +
+        " * @template K\n" +
+        " */\n" +
+        "C.prototype.method = function (a) {};\n" +
+        "\n" +
+        // method returns "?"
+        "/** @type {void} */ var x = new C().method(1);");
+  }

@@ -1,0 +1,34 @@
+      public boolean apply(Node n) {
+        // When the node is null it means, we reached the implicit return
+        // where the function returns (possibly without an return statement)
+        if (n == null) {
+          return false;
+        }
+
+        // TODO(user): We only care about calls to functions that
+        // passes one of the dependent variable to a non-side-effect free
+        // function.
+        if (n.isCall() && NodeUtil.functionCallHasSideEffects(n)) {
+          return true;
+        }
+
+        if (n.isNew() && NodeUtil.constructorCallHasSideEffects(n)) {
+          return true;
+        }
+
+
+        for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
+          if (!ControlFlowGraph.isEnteringNewCfgNode(c) && apply(c)) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+// trigger testcase
+public void testSimpleForIn() {
+    inline("var a,b,x = a in b; x",
+           "var a,b,x; a in b");
+    noInline("var a, b; var x = a in b; print(1); x");
+    noInline("var a,b,x = a in b; delete a[b]; x");
+  }

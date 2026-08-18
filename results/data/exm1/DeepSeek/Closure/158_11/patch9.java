@@ -1,0 +1,7 @@
+void setWarningLevels(CompilerOptions options, java.util.List<String> diagnosticGroups, CheckLevel level) {
+    for (String name : diagnosticGroups) {
+      DiagnosticGroup group = forName(name);
+      Preconditions.checkNotNull(group, "No warning class for name: " + name);
+      options.setWarningLevel(group, level);
+    }
+  }

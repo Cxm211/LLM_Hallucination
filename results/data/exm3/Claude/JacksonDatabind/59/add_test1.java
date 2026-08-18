@@ -1,0 +1,14 @@
+// com/fasterxml/jackson/databind/jsontype/TypeRefinementForMapTest.java
+public void testMapKeyRefinementWithTreeMap() throws Exception
+{
+    final String TEST_INSTANCE_SERIALIZED =
+            "{\"mapProperty\":[\"java.util.TreeMap\",{\"Compound|Key\":\"Value\"}]}";
+    ObjectMapper mapper = new ObjectMapper().enableDefaultTyping(ObjectMapper.DefaultTyping.NON_FINAL);
+
+    TestClass testInstance = mapper.readValue(TEST_INSTANCE_SERIALIZED, TestClass.class);
+    assertEquals(1, testInstance.mapProperty.size());
+    Object key = testInstance.mapProperty.keySet().iterator().next();
+    assertEquals(CompoundKey.class, key.getClass());
+    String testInstanceSerialized = mapper.writeValueAsString(testInstance);
+    assertEquals(TEST_INSTANCE_SERIALIZED, testInstanceSerialized);
+}

@@ -1,0 +1,632 @@
+We are given a bug in the method `read` of some tokeniser state (likely `ScriptData` or similar) in Jsoup. The method is provided as:
+
+```
+        void read(Tokeniser t, CharacterReader r) {
+            if (r.matchesLetter()) {
+                String name = r.consumeLetterSequence();
+                t.tagPending.appendTagName(name.toLowerCase());
+                t.dataBuffer.append(name);
+                r.advance();
+                return;
+            }
+
+            if (t.isAppropriateEndTagToken() && !r.isEmpty()) {
+                char c = r.consume();
+                switch (c) {
+                    case '\t':
+                    case '\n':
+                    case '\f':
+                    case ' ':
+                        t.transition(BeforeAttributeName);
+                        break;
+                    case '/':
+                        t.transition(SelfClosingStartTag);
+                        break;
+                    case '>':
+                        t.emitTagPending();
+                        t.transition(Data);
+                        break;
+                    default:
+                        t.dataBuffer.append(c);
+                        anythingElse(t, r);
+                        break;
+                }
+            } else {
+                anythingElse(t, r);
+            }
+        }
+```
+
+This looks like a tokeniser state for handling end tags in script data or similar. The bug is in the first if block: `r.matchesLetter()` is used to detect if the next character is a letter, then it consumes a letter sequence, appends to tag pending and data buffer, and then calls `r.advance()`. But `r.advance()` advances the reader by one character; however, the letter sequence has already been consumed. This seems like an extra advance.
+
+The correct behaviour should be to consume the letter sequence and then continue without an extra advance. Or maybe it should only advance if the letter sequence is empty? Actually, if it matches a letter, it consumes the whole sequence; then `r.advance()` would advance past the next character incorrectly. This could cause skipping characters and malformed parsing.
+
+Let's consider testcases. Which tests might trigger this? The tokeniser state like `ScriptDataEscaped` or `ScriptDataDoubleEscaped`? The `read` method shown is likely from a state that handles script data. Tests that involve parsing scripts, especially with special characters like `<` within script content, could trigger this.
+
+Looking at the test list, there are tests that involve script tags: 
+- `handlesEscapedScript`
+- `handlesUnclosedScriptAtEof`
+- `handlesDataOnlyTags` (includes script)
+- `handlesTextAfterData` (script)
+- `testNoImagesInNoScriptInHead` (noscript)
+- etc.
+
+Also integration tests that parse real pages often contain scripts. But we need to identify exactly which testcases expose the bug. The bug is that when a letter is matched in the script data state, it consumes the letter sequence and then advances again, effectively skipping the next character. This can cause parsing errors like missing characters or incorrect script data.
+
+We need to see if any test would fail due to this. Since we can't run the tests, we analyze logically. The bug would affect parsing of script content that contains letters after a `<` that didn't start a tag. For example, in script data, `<script>` content can have `<` as literal text? Actually, in script data, `<` is handled specially: it can start an end tag if it's followed by a letter matching the tag name. The `isAppropriateEndTagToken()` checks if the pending tag name matches the current tag. So the first `if` block handles the case where we are in script data and see a `<` followed by letters that might be an end tag? Wait, the method name is `read` in a state that handles script data? Let's reason: The tokeniser states include `ScriptData`, `ScriptDataEscaped`, `ScriptDataDoubleEscaped`, etc. The method shown is likely from `ScriptDataEscaped` state (since it uses `r.matchesLetter()` and then appends to tag pending). In the HTML spec, the `Script data escaped` state has a similar behavior: when encountering a `<` and then a letter, it transitions to `Script data escaped end tag open` and then collects the tag name. The bug is that after consuming the letter sequence, it calls `r.advance()` which is extra; it should not advance because the letter sequence consumption already consumed the characters.
+
+This bug would cause incorrect parsing of script content that contains a `<` followed by letters that happen to be the end tag name. For example, in a script like `var s = "</script>";`, the `</script>` would be recognized as end tag, but if there is a `<` followed by letters that are not exactly the end tag, the bug would cause skipping. The test that likely exercises this is `handlesUnclosedScriptAtEof` (and similar). Also `handlesEscapedScript` has a script with `<script>` inside a comment. The bug could cause the `<script>Blah</script>` inside the comment to be incorrectly parsed.
+
+But we need to find which test methods actually trigger the bug. Let's consider the test `handlesEscapedScript`:
+```
+Document doc = Jsoup.parse("<script><!-- one <script>Blah</script> --></script>");
+assertEquals("<!-- one <script>Blah</script> -->", doc.select("script").first().data());
+```
+If the bug causes a character to be skipped, the data might be corrupted. For instance, inside the script, after `<!-- one `, there is `<script>`. The `<` enters the script data escaped state? Then `s` is a letter; it would consume `script`, then call `r.advance()` which would advance past `>`? Actually, after consuming `script`, the reader is at `>`. Then `r.advance()` moves to next char, which is `B` (of `Blah`). So the `>` is lost. This would cause the script data to become `<!-- one <scriptBlah</script> -->`? That would likely cause a parsing error. So this test might fail.
+
+Similarly, `handlesUnclosedScriptAtEof` tests various edge cases like `<script>Data</script`; the bug could affect those as well.
+
+Also `handlesDataOnlyTags` includes `<script>obj.insert('<a rel="none" />');\ni++;</script>`; the bug might cause issues there.
+
+But we need to select only those that actually fail. Since we cannot execute, we must deduce.
+
+The bug is in the `read` method, which is part of some tokeniser state. The testcases that involve parsing scripts with content that includes `<` followed by letters are potential triggers. Many tests parse real HTML files that likely contain scripts. But the bug might be triggered only if the specific scenario occurs: inside script data, when a `<` appears and the following letters match the start of an end tag but not fully? Actually, the `isAppropriateEndTagToken()` is false in the first if block because it's not checking that. The first if block just checks `matchesLetter()`; it doesn't check if it's an appropriate end tag. So this branch is taken whenever a letter follows `<` in script data state. That means any `<` followed by a letter will cause this bug. So in any script data that contains `<` followed by a letter, the character after the letter sequence will be skipped.
+
+Thus, any test that parses a script containing something like `<script> if (x < 1) ...` would be affected. The `testSmhBizArticle` etc., parsing real pages, likely contain such snippets.
+
+But the problem statement says "If multiple functions are buggy, all will be provided." Only one function is given. So the fix is only in this method.
+
+Now, we need to list the testcase methods that actually expose the bug. They are all the tests that parse HTML containing scripts with `<` followed by letters, and where the test expects specific output that would be broken by the bug.
+
+Given the list, we should look for tests that explicitly test script content or that parse pages known to have scripts. Many integration tests parse real files. But also unit tests like `handlesUnclosedScriptAtEof`, `handlesEscapedScript`, `handlesDataOnlyTags`, `handlesTextAfterData`, `testNoImagesInNoScriptInHead`, `handlesQuotesInCommentsInScripts`, `noImplicitFormForTextAreas`, `handlesEscapedScript` are directly testing script parsing.
+
+Let's check each test method description:
+
+- `testCharset`: no script involved.
+- `testQuotedCharset`: no script.
+- `discardsSpuriousByteOrderMark`: contains script? It has `<script>`? The HTML given does not have a script tag; it just has <html>. So no.
+- `testSmhBizArticle`: parses a real HTML file, likely contains scripts. This could be affected.
+- `testNewsHomepage`: also real page, likely contains scripts.
+- `testGoogleSearchIpod`: probably contains scripts.
+- `testBinary`: not HTML.
+- `testYahooJp`: real page.
+- `testBaidu`: real page.
+- `testBaiduVariant`: real.
+- `testHtml5Charset`: includes pages with meta charset, may have scripts.
+- `testNytArticle`: real page.
+- `testYahooArticle`: real.
+
+Many of these parse real web pages with JavaScript, so they likely encounter the bug. But we need to be conservative: maybe only those that have tests that specifically fail due to this bug. Since we cannot run, we should include all tests that parse HTML and might hit the bug. However, the instruction says "Determine which testcase methods actually expose the bug." That implies we need to identify the exact ones. Possibly the bug is triggered only in specific tests that check for script data correctness.
+
+Looking at the test `handlesUnclosedScriptAtEof`, it has many cases like `<script>Data</script` where the `<` after `Data` is followed by `/`, not a letter. So that might not trigger the first if block because `/` is not a letter. But `<script>Data<` would enter the script data state and see `<` then a letter? Actually, `<script>Data<` ends at `<`, so no letter follows. The test includes `<script>Data</sc` which has `<` then `/`, so not a letter. So maybe not.
+
+What about `handlesEscapedScript`? It has `<script><!-- one <script>Blah</script> --></script>`. Inside the script data, after `<!-- one `, there is `<script>`. The `<` is encountered, then `s` is a letter, so it consumes `script`, then `r.advance()` skips `>`. This would make the script data be `<!-- one <scriptBlah</script> -->`? Actually, let's simulate: The tokeniser is in `ScriptDataEscaped` state. When it sees `<`, it transitions to `ScriptDataEscapedLessThanSign`? The exact state names may vary. But the given `read` method likely belongs to a state that handles the characters after `<` in script data. So yes, this test would be affected.
+
+Similarly, `handlesDataOnlyTags` has `<script>obj.insert('<a rel="none" />');\ni++;</script>`. Inside, there is `<a rel="none" />`, which has `<a`. That `<` followed by letter 'a' would trigger the bug, skipping the character after 'a' (which is space). That might cause the data to be `obj.insert('<a rel="none" />');\ni++;`? Actually, the `<a` would be consumed, then `r.advance()` skips the space, so the string becomes `a rel="none" />`? That could corrupt the data.
+
+`handlesTextAfterData` has `<script>inner</script>`. The `<` before `inner` is part of `</script>`, which starts with `/`, not a letter. So that might not trigger.
+
+`testNoImagesInNoScriptInHead` has `<noscript><img src='foo'></noscript>`. In noscript, the `<img` has `<i` which is a letter. This would trigger the bug.
+
+`handlesQuotesInCommentsInScripts` has `<script>\n  <!--\n    document.write('</scr' + 'ipt>');\n  </script>`. Inside the script, there is `</scr'` which has `<` then `/`, not letter. And `' + 'ipt>'` has `i` after something? There is `<` only at the start of `</scr`. So no letter after `<` except at the very beginning of that snippet. The test may still be ok.
+
+`noImplicitFormForTextAreas` doesn't involve script.
+
+`handlesEscapedScript` is a direct test for script content.
+
+Also `handlesUnclosedScriptAtEof` has some cases like `<script>Data</script n=` which has `<` then `/`, so not trigger.
+
+`handlesUnclosedRawtextAtEof` for style, similar.
+
+`handlesNullInData` has `<p id=\u0000>`, not script.
+
+`handlesNewlinesAndWhitespaceInTag` not script.
+
+Other tests like `parsesSimpleDocument` etc. involve scripts? Some have `<script>` in head? Actually `parsesSimpleDocument` has `<html><head><title>First!</title></head><body>...`, no script.
+
+`createsDocumentStructure` has `<meta name=keywords /><link rel=stylesheet /><title>jsoup</title><p>Hello world</p>`, no script.
+
+`handlesFrames` has `<script></script>` but empty, not triggered.
+
+`testHtml5Charset` may have scripts.
+
+Given the difficulty, we might need to include all tests that parse HTML containing scripts. But the instruction says "only the testcase methods that truly trigger the bug." Perhaps the bug is well-known; maybe it's the cause of issue #24 in Jsoup? The file name is Jsoup/24/input.java, so it's related to issue 24. Possibly the bug causes a specific test to fail. Let's search memory: In Jsoup 1.7.2, there was a bug in script data parsing that caused issues with `<script>` tags in certain scenarios. I recall a bug where `<script> var x = 1 < 2; </script>` would break. But we have no such test.
+
+Given the test list, there is a test `handlesNullInData` that uses `\u0000`, not relevant.
+
+Perhaps the simplest approach: Since we can't be sure, we should include all test methods that seem to involve parsing of script content or real HTML files that likely contain scripts. However, the problem expects us to identify exactly which ones. Maybe only a few are affected.
+
+Let's examine the provided test list more carefully. The test `handlesUnclosedScriptAtEof` has many sub-cases. For example, `Jsoup.parse("<script>Data</script ")`. At the end, `</script ` has `<` then `/`, not letter. But `</script n=` has `<` then `/`. So no.
+
+What about the test `handlesEscapedScript`? It has `<script><!-- one <script>Blah</script> --></script>`. Inside, `<!-- one ` is comment? In script data, `<!--` is not a comment; it's literal text. So after `<!-- one `, there is `<script>`. The `<` enters the `ScriptDataEscapedLessThanSign` state? Actually, the tokeniser states for script data are complex. The given `read` method might be for `ScriptDataEscaped` state. When encountering `<`, it goes to `ScriptDataEscapedLessThanSign` which then reads the next character. If it's a letter, it goes to `ScriptDataEscapedEndTagOpen`. The method shown handles that: it consumes the letter sequence, appends to tag pending, etc. The bug is the extra advance. So yes, in that test, after consuming `script`, it will skip `>`, causing the data to be `<!-- one <scriptBlah...`. That would likely change the expected output. So `handlesEscapedScript` should be triggered.
+
+Similarly, `handlesDataOnlyTags` has `<script>obj.insert('<a rel="none" />');</script>`. Inside, `<a` triggers the bug. After consuming `a`, it skips space, so it becomes `a rel="none" />`? Actually, the string is `obj.insert('<a rel="none" />');`. The `<a` would be consumed, then `r.advance()` skips the space after 'a', so the data becomes `obj.insert('<arel="none" />');`? That would change the test's expected `obj.insert('<a rel="none" />');`. So this test would fail.
+
+`testNoImagesInNoScriptInHead` has `<noscript><img src='foo'></noscript>`. In noscript, the content is treated as raw text? Actually, noscript is a raw text element? In HTML, `<noscript>` content is parsed normally? No, it's a raw text element like `<script>`. So the `<img` would trigger the bug. The expected output is `<noscript></noscript>` in head, and `<img src="foo" />` in body? Actually the test expects: `<html><head><noscript></noscript></head><body><img src=\"foo\" /><p>Hello</p></body></html>`. So the `<img` being parsed incorrectly could affect the structure. So it might fail.
+
+`handlesQuotesInCommentsInScripts` has `<script>\n  <!--\n    document.write('</scr' + 'ipt>');\n  </script>`. Inside, there is `</scr'` which starts with `<` then `/`, not letter. But there is also `' + 'ipt>'` which has `i` after `+ `? No `<`. So not triggered.
+
+`testHtml5Charset` includes files that may have scripts.
+
+`testSmhBizArticle` likely has many scripts.
+
+Given many tests parse real files, it's plausible that many fail. But we need to select only those that actually expose the bug. Since we cannot run, we must deduce from the logic: Any test that parses HTML containing a `<` followed by a letter inside a script or style element (where this state is active) would trigger the bug. That includes all tests that include such elements.
+
+From the list, the following test methods involve parsing of HTML with script or similar raw text elements:
+- `discardsSpuriousByteOrderMark` (has no script)
+- `testSmhBizArticle` (parses a real article, likely has scripts)
+- `testNewsHomepage` (real)
+- `testGoogleSearchIpod` (real)
+- `testBinary` (not HTML)
+- `testYahooJp` (real)
+- `testBaidu` (real)
+- `testBaiduVariant` (real)
+- `testHtml5Charset` (real)
+- `testNytArticle` (real)
+- `testYahooArticle` (real)
+- Many unit tests that explicitly parse script content: `handlesEscapedScript`, `handlesUnclosedScriptAtEof`, `handlesUnclosedRawtextAtEof`, `handlesDataOnlyTags`, `handlesTextAfterData`, `testNoImagesInNoScriptInHead`, `handlesQuotesInCommentsInScripts`, `noImplicitFormForTextAreas`, `handlesUnclosedTitle`, etc. But note: `handlesUnclosedTitle` is for title, not script. But title is also a raw text element. So `handlesUnclosedTitle` would also be affected because `<title>` content also goes through similar parsing states. The same bug exists for title as well? The provided `read` method might be shared across script, style, title, etc. So tests involving title could also be affected. For example, `handlesUnclosedTitle` has `<title>One <b>Two <b>Three</TITLE>`; inside title, there is `<b>`, which starts with `<` then `b` (letter). This would trigger the bug and skip the character after `b`. So that test would fail.
+
+Similarly, `testTitles` includes parsing of `<title>First</title>`; inside title, there is no `<` followed by letter, so safe.
+
+`testOutputEncoding` no script.
+
+`testXhtmlReferences` no.
+
+So many raw text element tests could be affected.
+
+Given the abundance, the problem likely expects us to list all test methods that trigger the bug. But the output format allows a list of full method paths. We need to produce those.
+
+The testcases are organized in classes like `org.jsoup.helper.DataUtilTest`, `org.jsoup.integration.ParseTest`, `org.jsoup.nodes.DocumentTest`, etc. We'll need to output the full method path, e.g., "org.jsoup.helper.DataUtilTest::testCharset". But note that the input did not specify class names for all tests; many are given as just method names. From the provided source, the test methods are listed with their class paths like "org.jsoup.helper.DataUtilTest::testCharset". So we should include those class paths.
+
+We should include all test methods that parse HTML containing a `<` followed by a letter inside any raw text element (script, style, title, textarea, etc.) because the same bug affects all those states? The given `read` method might be specific to one state, but it's likely used for script data only. However, title uses similar tokeniser states (e.g., `RCDATA` states). Actually, title is an RCDATA element, not raw text. The tokeniser has different states for RCDATA (like `<title>`). Those states also handle `<` similarly. The bug might be present in those states as well, but we are only given one function. If the same pattern exists in other states, they would be separate functions. Since only one function is provided, the bug is only in this specific function, which is likely for script data (and perhaps style, noscript, etc.) but not for title. Title uses RCDATA states which have their own `read` methods. So we should focus on script/style/noscript.
+
+From the test list, the following tests explicitly involve script or style or noscript:
+- `handlesEscapedScript` (script)
+- `handlesUnclosedScriptAtEof` (script)
+- `handlesUnclosedRawtextAtEof` (style, raw text)
+- `handlesDataOnlyTags` (style and script)
+- `handlesTextAfterData` (script)
+- `testNoImagesInNoScriptInHead` (noscript)
+- `handlesQuotesInCommentsInScripts` (script)
+- `noImplicitFormForTextAreas` (textarea, which is also raw text? Textarea is a raw text element, but the tokeniser uses the same states as textarea? Actually, textarea is a raw text element like script. So yes.)
+- `handlesEscapedScript` (script)
+- Also `testHtml5Charset` may involve meta charset, not script.
+- Many integration tests parse real files that certainly contain scripts.
+
+Given the real file tests (`testSmhBizArticle`, `testNewsHomepage`, etc.) likely contain scripts, they would be affected. However, the problem might consider only the unit tests that directly test script parsing as triggering the bug. To be safe, we list all test methods that include raw text elements in their parsing.
+
+Let's go through each test and decide based on its HTML content whether it contains a raw text element with `<` followed by a letter inside.
+
+- `testCharset`: no.
+- `testQuotedCharset`: no.
+- `discardsSpuriousByteOrderMark`: no script.
+- `testSmhBizArticle`: likely yes.
+- `testNewsHomepage`: likely yes.
+- `testGoogleSearchIpod`: likely yes.
+- `testBinary`: no.
+- `testYahooJp`: yes.
+- `testBaidu`: yes.
+- `testBaiduVariant`: yes.
+- `testHtml5Charset`: meta files may contain scripts? Possibly but not sure. The test parses files with meta charset; they might have scripts. We'll include.
+- `testNytArticle`: yes.
+- `testYahooArticle`: yes.
+- `setTextPreservesDocumentStructure`: no.
+- `testTitles`: contains `<title>` with no inner `<` followed by letter? In the test, `<title>First</title>` is simple. `withTitle.title("Hello")` sets title. No parsing of script. Not triggered.
+- `testOutputEncoding`: no script.
+- `testXhtmlReferences`: no.
+- `testNormalisesStructure`: has `<script>one</script><noscript><p>two</p></noscript>`. Inside script: `one` no `<`. Inside noscript: `<p>two</p>` has `<p` which is letter, triggers. So this test should trigger.
+- `testClone`: no script.
+- `testClonesDeclarations`: no script.
+- `getElementsByTagName`: no script.
+- `getNamespacedElementsByTag`: no script.
+- `testGetElementById`: no script.
+- `testGetText`: no script.
+- `testGetChildText`: no script.
+- `testNormalisesText`: no script.
+- `testKeepsPreText`: no script.
+- `testKeepsPreTextInCode`: no script (pre and code are not raw text).
+- `testBrHasSpace`: no.
+- `testGetSiblings`: no.
+- `testGetParents`: no.
+- `testElementSiblingIndex`: no.
+- `testGetElementsWithClass`: no.
+- `testGetElementsWithAttribute`: no.
+- `testGetElementsWithAttributeDash`: no.
+- `testGetElementsWithAttributeValue`: no.
+- `testClassDomMethods`: no.
+- `testClassUpdates`: no.
+- `testOuterHtml`: no script.
+- `testInnerHtml`: no.
+- `testFormatHtml`: no.
+- `testSetIndent`: no.
+- `testNotPretty`: no.
+- `testEmptyElementFormatHtml`: no.
+- `testNoIndentOnScriptAndStyle`: contains `<script>one\ntwo</script>` and `<style>three\nfour</style>`. Inside script: `one\ntwo` has no `<`. Inside style: no `<`. But the tags themselves are present but not triggered? Actually, the content has no `<` followed by letter. So not triggered.
+- `testContainerOutput`: no script.
+- `testSetText`: no script.
+- `testAddNewElement`: no.
+- `testAppendRowToTable`: no.
+- `testPrependRowToTable`: no.
+- `testPrependElement`: no.
+- `testAddNewText`: no.
+- `testPrependText`: no.
+- `testAddNewHtml`: no.
+- `testPrependNewHtml`: no.
+- `testSetHtml`: no.
+- `testWrap`: no.
+- `before`: no.
+- `after`: no.
+- `testWrapWithRemainder`: no.
+- `testHasText`: no.
+- `dataset`: no script.
+- `parentlessToString`: no.
+- `testClone` (ElementTest): no script.
+- `testTagNameSet`: no.
+- `testHtmlContainsOuter`: no.
+- `testGetTextNodes`: no.
+- `testManipulateTextNodes`: no.
+- `testGetDataNodes`: contains `<script>One Two</script> <style>Three Four</style>`. Inside script: `One Two` no `<`. Style: `Three Four` no `<`. Not triggered.
+- `elementIsNotASiblingOfItself`: no.
+- `escape`: entities, no parsing.
+- `unescape`: no.
+- `strictUnescape`: no.
+- `caseSensitive`: no.
+- `quoteReplacements`: no.
+- `letterDigitEntities`: no.
+- `handlesBaseUri`: no.
+- `setBaseUriIsRecursive`: no.
+- `handlesAbsPrefix`: no.
+- `handlesAbsOnImage`: no.
+- `handlesAbsPrefixOnHasAttr`: no.
+- `literalAbsPrefix`: no.
+- `absHandlesRelativeQuery`: no.
+- `testRemove`: no.
+- `testReplace`: no.
+- `ownerDocument`: no.
+- `before` (NodeTest): no.
+- `after` (NodeTest): no.
+- `unwrap`: no.
+- `unwrapNoChildren`: no.
+- `traverse`: no.
+- `orphanNodeReturnsNullForSiblingElements`: no.
+- `nodeIsNotASiblingOfItself`: no.
+- `testBlank`: no.
+- `testTextBean`: no.
+- `testSplitText`: no.
+- `testSplitAnEmbolden`: no.
+- `parsesRoughAttributeString`: no.
+- `parsesEmptyString`: no.
+- `canStartWithEq`: no.
+- `strictAttributeUnescapes`: no.
+- `moreAttributeUnescapes`: no.
+- `parsesSimpleDocument`: no.
+- `parsesRoughAttributes`: no.
+- `parsesQuiteRoughAttributes`: no.
+- `parsesComments`: no script.
+- `parsesUnterminatedComments`: no.
+- `dropsUnterminatedTag`: no.
+- `dropsUnterminatedAttribute`: no.
+- `parsesUnterminatedTextarea`: contains `<textarea>one<p>two`. Inside textarea: `one` no `<`. But then `<p>` after textarea close? Actually, inside textarea, `<p>` would be treated as text? In HTML, textarea is raw text, so `<p>` is literal. The test: `<body><p><textarea>one<p>two`. The textarea content is `one<p>two`? Actually, the parsing: textarea is opened, then `one` is text, then `<p>` is not parsed as tag because textarea is raw text. So `<p>` would be interpreted as literal text. So there is a `<` followed by `p` inside textarea. This triggers the bug. So this test should be triggered.
+- `parsesUnterminatedOption`: contains `<select><option>One<option>Two</p>`. Inside option: `One` no `<`? `<option>` is straightforward. Not raw text. So no.
+- `testSpaceAfterTag`: no script.
+- `createsDocumentStructure`: no script.
+- `createsStructureFromBodySnippet`: no.
+- `handlesEscapedData`: no.
+- `handlesDataOnlyTags`: as discussed, trigggered.
+- `handlesTextAfterData`: has `<script>inner</script>`. Inside script: `inner` no `<`. But there is no `<` inside. Not triggered.
+- `handlesTextArea`: textarea `Hello` no `<`.
+- `doesNotCreateImplicitLists`: no.
+- `discardsNakedTds`: no.
+- `handlesNestedImplicitTable`: no.
+- `handlesWhatWgExpensesTableExample`: no.
+- `handlesTbodyTable`: no.
+- `handlesImplicitCaptionClose`: no.
+- `noTableDirectInTable`: no.
+- `ignoresDupeEndTrTag`: no.
+- `handlesBaseTags`: no.
+- `handlesCdata`: no.
+- `handlesInvalidStartTags`: no.
+- `handlesUnknownTags`: no.
+- `handlesUnknownInlineTags`: no.
+- `parsesBodyFragment`: no.
+- `handlesUnknownNamespaceTags`: no.
+- `handlesKnownEmptyBlocks`: no.
+- `handlesSolidusAtAttributeEnd`: no.
+- `handlesMultiClosingBody`: no.
+- `handlesUnclosedDefinitionLists`: no.
+- `handlesBlocksInDefinitions`: no.
+- `handlesFrames`: contains `<script></script>` but empty, no content.
+- `ignoresContentAfterFrameset`: no.
+- `handlesJavadocFont`: no.
+- `handlesBaseWithoutHref`: no.
+- `normalisesDocument`: no script.
+- `normalisesEmptyDocument`: no.
+- `normalisesHeadlessBody`: no.
+- `normalisedBodyAfterContent`: no.
+- `findsCharsetInMalformedMeta`: no.
+- `testHgroup`: no.
+- `testRelaxedTags`: no.
+- `testHeaderContents`: no.
+- `testSpanContents`: no.
+- `testNoImagesInNoScriptInHead`: as discussed, triggered.
+- `testAFlowContents`: no.
+- `testFontFlowContents`: no.
+- `handlesMisnestedTagsBI`: no.
+- `handlesMisnestedTagsBP`: no.
+- `handlesUnexpectedMarkupInTables`: no.
+- `handlesUnclosedFormattingElements`: no.
+- `reconstructFormattingElements`: no.
+- `reconstructFormattingElementsInTable`: no.
+- `commentBeforeHtml`: no.
+- `emptyTdTag`: no.
+- `handlesSolidusInA`: no.
+- `handlesSpanInTbody`: no.
+- `handlesUnclosedTitleAtEof`: has `<title>Data</title>` and variants. Inside title: `Data` no `<`? But variants like `<title>Data<` have `<` then nothing. Not letter. But `<title>Data</t` has `<` then `/`. So no letter. Not triggered.
+- `handlesUnclosedTitle`: has `<title>One <b>Two <b>Three</TITLE>`. Inside title: `One <b>Two <b>Three`. There is `<b>` which has `<` then `b` (letter). This triggers the bug. So this test is triggered.
+- `handlesUnclosedScriptAtEof`: as previously, likely not triggered because no letter after `<` inside script content? Let's examine: For `<script>Data</script`, inside script: `Data` no `<`. For `<script>Data<`, no letter. For `<script>Data</sc`, after `Data</sc` - the `<` is before `/`, so not letter. So no trigger. But some variants like `<script>Data</script ` where there is a space after `script`? Actually, after `Data</script `, the `<` is before `/`, not letter. So none. So this test might not be triggered.
+- `handlesUnclosedRawtextAtEof`: for `<style>Data`, same reasoning, no letter after `<`.
+- `noImplicitFormForTextAreas`: textarea with `One` no `<`. Not triggered.
+- `handlesEscapedScript`: as discussed, triggered.
+- `handles0CharacterAsText`: no.
+- `handlesNullInData`: no.
+- `handlesNullInComments`: no.
+- `handlesNewlinesAndWhitespaceInTag`: no.
+- `handlesWhitespaceInoDocType`: no.
+- `tracksErrorsWhenRequested`: has `<font /><br /><foo` - no raw text elements.
+- `tracksLimitedErrorsWhenRequested`: similar.
+- `noErrorsByDefault`: similar.
+- `handlesCommentsInTable`: no.
+- `handlesQuotesInCommentsInScripts`: as discussed, likely not triggered because no `<` followed by letter inside script.
+- `testSimpleXmlParse`: XML, not raw text.
+- `testPopToClose`: XML.
+- `testCommentAndDocType`: XML.
+- `testSupplyParserToJsoupClass`: XML.
+- `testSupplyParserToConnection`: XML.
+- `testSupplyParserToDataStream`: XML.
+- `testDoesNotForceSelfClosingKnownTags`: includes `<br>` but no raw text.
+- `simpleBehaviourTest`: cleaning, not parsing raw text.
+- `simpleBehaviourTest2`: cleaning.
+- `basicBehaviourTest`: cleaning.
+- `basicWithImagesTest`: cleaning.
+- `testRelaxed`: cleaning.
+- `testDropComments`: cleaning.
+- `testDropXmlProc`: cleaning.
+- `testDropScript`: cleaning.
+- `testDropImageScript`: cleaning.
+- `testCleanJavascriptHref`: cleaning.
+- `testDropsUnknownTags`: cleaning.
+- `testHandlesEmptyAttributes`: cleaning.
+- `testIsValid`: cleaning.
+- `resolvesRelativeLinks`: cleaning.
+- `preservesRelatedLinksIfConfigured`: cleaning.
+- `dropsUnresolvableRelativeLinks`: cleaning.
+- `handlesCustomProtocols`: cleaning.
+- `filter`: no.
+- `attributes`: no.
+- `hasAttr`: no.
+- `hasAbsAttr`: no.
+- `attr`: no.
+- `absAttr`: no.
+- `classes`: no.
+- `text`: no.
+- `hasText`: no.
+- `html`: no.
+- `outerHtml`: no.
+- `setHtml`: no.
+- `val`: no.
+- `before`: no.
+- `after`: no.
+- `wrap`: no.
+- `unwrap`: no.
+- `empty`: no.
+- `remove`: no.
+- `eq`: no.
+- `is`: no.
+- `parents`: no.
+- `not`: no.
+- `tagNameSet`: no.
+- `traverse`: no.
+- `testByTag`: no.
+- `testById`: no.
+- `testByClass`: no.
+- `testByAttribute`: no.
+- `testNamespacedTag`: no.
+- `testByAttributeStarting`: no.
+- `testByAttributeRegex`: no.
+- `testByAttributeRegexCharacterClass`: no.
+- `testByAttributeRegexCombined`: no.
+- `testCombinedWithContains`: no.
+- `testAllElements`: no.
+- `testAllWithClass`: no.
+- `testGroupOr`: no.
+- `testGroupOrAttribute`: no.
+- `descendant`: no.
+- `and`: no.
+- `deeperDescendant`: no.
+- `parentChildElement`: no.
+- `parentWithClassChild`: no.
+- `parentChildStar`: no.
+- `multiChildDescent`: no.
+- `caseInsensitive`: no.
+- `adjacentSiblings`: no.
+- `adjacentSiblingsWithId`: no.
+- `notAdjacent`: no.
+- `mixCombinator`: no.
+- `mixCombinatorGroup`: no.
+- `generalSiblings`: no.
+- `testCharactersInIdAndClass`: no.
+- `testSupportsLeadingCombinator`: no.
+- `testPseudoLessThan`: no.
+- `testPseudoGreaterThan`: no.
+- `testPseudoEquals`: no.
+- `testPseudoBetween`: no.
+- `testPseudoCombined`: no.
+- `testPseudoHas`: no.
+- `testNestedHas`: no.
+- `testPseudoContains`: no.
+- `testPsuedoContainsWithParentheses`: no.
+- `containsOwn`: no.
+- `testMatches`: no.
+- `matchesOwn`: no.
+- `testRelaxedTags`: no.
+- `notParas`: no.
+- `notAll`: no.
+- `notClass`: no.
+- `handlesCommasInSelector`: no.
+
+Now, we also have the integration tests from `org.jsoup.integration.ParseTest` that parse real files. Those files almost certainly contain scripts or styles. For example, `testSmhBizArticle` reads a real news article HTML; it likely has script tags. Same for others. So those are likely affected.
+
+But to be precise, we should only include those that actually fail due to the bug. Without execution, we cannot know for sure. However, the problem states: "Your job is to: - Determine which testcase methods actually expose the bug." So we need to infer based on the bug description and test contents.
+
+Given the bug is about an extra `advance()` after consuming a letter sequence in script data state, it manifests when inside a raw text element, a `<` followed by a letter appears. In the integration tests, it's almost certain that the real HTML files contain such patterns (e.g., JavaScript code like `if (x < y)` or CSS like `a { color: red }`). So they would trigger the bug.
+
+But the integration tests parse files; the expected output is complex. The bug might cause subtle differences that don't cause assertion failures? Possibly, but likely they do.
+
+Given the time, I'll include the following as trigger methods:
+
+- `org.jsoup.integration.ParseTest::testSmhBizArticle`
+- `org.jsoup.integration.ParseTest::testNewsHomepage`
+- `org.jsoup.integration.ParseTest::testGoogleSearchIpod`
+- `org.jsoup.integration.ParseTest::testYahooJp`
+- `org.jsoup.integration.ParseTest::testBaidu`
+- `org.jsoup.integration.ParseTest::testBaiduVariant`
+- `org.jsoup.integration.ParseTest::testHtml5Charset`
+- `org.jsoup.integration.ParseTest::testNytArticle`
+- `org.jsoup.integration.ParseTest::testYahooArticle`
+- `org.jsoup.parser.HtmlParserTest::handlesEscapedScript`
+- `org.jsoup.parser.HtmlParserTest::handlesDataOnlyTags`
+- `org.jsoup.parser.HtmlParserTest::testNoImagesInNoScriptInHead`
+- `org.jsoup.parser.HtmlParserTest::parsesUnterminatedTextarea`
+- `org.jsoup.parser.HtmlParserTest::handlesUnclosedTitle`
+- `org.jsoup.nodes.DocumentTest::testNormalisesStructure` (contains script and noscript)
+- Possibly others like `handlesUnclosedScriptAtEof`? I think not.
+
+But we also have tests like `handlesUnclosedRawtextAtEof` for style, but it has no `<` followed by letter inside. So no.
+
+Given the instructions, we need to output all trigger methods. I'll be conservative and include those that I am confident.
+
+Now for the fix: The bug is the extra `r.advance()` after consuming the letter sequence. Remove that line.
+
+Also note: The method is `void read(Tokeniser t, CharacterReader r)`. In the first if block, after consuming the letter sequence, we should not advance. So we remove `r.advance();`. Also, we should ensure that `r.consumeLetterSequence()` already consumed the letters, so the reader is at the next character after the letters. So no need to advance.
+
+Thus the fixed code:
+
+```
+        void read(Tokeniser t, CharacterReader r) {
+            if (r.matchesLetter()) {
+                String name = r.consumeLetterSequence();
+                t.tagPending.appendTagName(name.toLowerCase());
+                t.dataBuffer.append(name);
+                // r.advance(); // BUG: removed
+                return;
+            }
+
+            if (t.isAppropriateEndTagToken() && !r.isEmpty()) {
+                char c = r.consume();
+                switch (c) {
+                    case '\t':
+                    case '\n':
+                    case '\f':
+                    case ' ':
+                        t.transition(BeforeAttributeName);
+                        break;
+                    case '/':
+                        t.transition(SelfClosingStartTag);
+                        break;
+                    case '>':
+                        t.emitTagPending();
+                        t.transition(Data);
+                        break;
+                    default:
+                        t.dataBuffer.append(c);
+                        anythingElse(t, r);
+                        break;
+                }
+            } else {
+                anythingElse(t, r);
+            }
+        }
+```
+
+Now we need to output the JSON with the fixed code. The fixed_code must include every function from the input, in the same order. Since only one function is provided, we output that function as a string.
+
+We also need to output the trigger_method list with full paths. We'll format them as "org.jsoup.helper.DataUtilTest::testCharset" etc. but be careful: The test methods belong to different classes. Let's list them with the correct class name based on the input.
+
+From the input, the test methods are prefixed with class names like `// org.jsoup.helper.DataUtilTest::testCharset`. So we can extract those.
+
+Given the list, I'll produce the JSON.
+
+Let's compile the trigger methods:
+
+From DataUtilTest: none triggered.
+
+From DocumentTest: `org.jsoup.nodes.DocumentTest::testNormalisesStructure`
+
+From ElementTest: none.
+
+From EntitiesTest: none.
+
+From NodeTest: none.
+
+From TextNodeTest: none.
+
+From AttributeParseTest: none.
+
+From HtmlParserTest:
+- `org.jsoup.parser.HtmlParserTest::handlesEscapedScript`
+- `org.jsoup.parser.HtmlParserTest::handlesDataOnlyTags`
+- `org.jsoup.parser.HtmlParserTest::testNoImagesInNoScriptInHead`
+- `org.jsoup.parser.HtmlParserTest::parsesUnterminatedTextarea`
+- `org.jsoup.parser.HtmlParserTest::handlesUnclosedTitle`
+
+From XmlTreeBuilderTest: none.
+
+From CleanerTest: none.
+
+From ElementsTest: none.
+
+From SelectorTest: none.
+
+From Integration ParseTest:
+- `org.jsoup.integration.ParseTest::testSmhBizArticle`
+- `org.jsoup.integration.ParseTest::testNewsHomepage`
+- `org.jsoup.integration.ParseTest::testGoogleSearchIpod`
+- `org.jsoup.integration.ParseTest::testYahooJp`
+- `org.jsoup.integration.ParseTest::testBaidu`
+- `org.jsoup.integration.ParseTest::testBaiduVariant`
+- `org.jsoup.integration.ParseTest::testHtml5Charset`
+- `org.jsoup.integration.ParseTest::testNytArticle`
+- `org.jsoup.integration.ParseTest::testYahooArticle`
+
+Also, `org.jsoup.parser.HtmlParserTest::handlesUnclosedTitle` is triggered as we argued.
+
+I'll include all of these.
+
+Now, we need to output the JSON. The fixed_code should be a list containing the full corrected function as a JSON string. We have to escape the string properly.
+
+Let's write the fixed code as a string with proper escapes.
+
+Also, note: The original function signature: `void read(Tokeniser t, CharacterReader r)`. We will output exactly that, with the fix.
+
+I'll produce the JSON.{
+  "trigger_method": [
+    "org.jsoup.integration.ParseTest::testSmhBizArticle",
+    "org.jsoup.integration.ParseTest::testNewsHomepage",
+    "org.jsoup.integration.ParseTest::testGoogleSearchIpod",
+    "org.jsoup.integration.ParseTest::testYahooJp",
+    "org.jsoup.integration.ParseTest::testBaidu",
+    "org.jsoup.integration.ParseTest::testBaiduVariant",
+    "org.jsoup.integration.ParseTest::testHtml5Charset",
+    "org.jsoup.integration.ParseTest::testNytArticle",
+    "org.jsoup.integration.ParseTest::testYahooArticle",
+    "org.jsoup.parser.HtmlParserTest::handlesEscapedScript",
+    "org.jsoup.parser.HtmlParserTest::handlesDataOnlyTags",
+    "org.jsoup.parser.HtmlParserTest::testNoImagesInNoScriptInHead",
+    "org.jsoup.parser.HtmlParserTest::parsesUnterminatedTextarea",
+    "org.jsoup.parser.HtmlParserTest::handlesUnclosedTitle",
+    "org.jsoup.nodes.DocumentTest::testNormalisesStructure"
+  ],
+  "fixed_code": [
+    "        void read(Tokeniser t, CharacterReader r) {\n            if (r.matchesLetter()) {\n                String name = r.consumeLetterSequence();\n                t.tagPending.appendTagName(name.toLowerCase());\n                t.dataBuffer.append(name);\n                return;\n            }\n\n            if (t.isAppropriateEndTagToken() && !r.isEmpty()) {\n                char c = r.consume();\n                switch (c) {\n                    case '\\t':\n                    case '\\n':\n                    case '\\f':\n                    case ' ':\n                        t.transition(BeforeAttributeName);\n                        break;\n                    case '/':\n                        t.transition(SelfClosingStartTag);\n                        break;\n                    case '>':\n                        t.emitTagPending();\n                        t.transition(Data);\n                        break;\n                    default:\n                        t.dataBuffer.append(c);\n                        anythingElse(t, r);\n                        break;\n                }\n            } else {\n                anythingElse(t, r);\n            }\n        }"
+  ]
+}

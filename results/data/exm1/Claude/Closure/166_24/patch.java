@@ -1,0 +1,24 @@
+public void matchConstraint(JSType constraint) {
+  // We only want to match constraints on anonymous types.
+  if (hasReferenceName()) {
+    return;
+  }
+
+  // Don't match constraints on unresolved types
+  if (!isResolved()) {
+    return;
+  }
+
+  // Handle the case where the constraint object is a record type.
+  //
+  // param constraint {{prop: (number|undefined)}}
+  // function f(constraint) {}
+  // f({});
+  //
+  // We want to modify the object literal to match the constraint, by
+  // taking any each property on the record and trying to match
+  // properties on this object.
+  if (constraint.isRecordType()) {
+    matchRecordTypeConstraint(constraint.toObjectType());
+  }
+}

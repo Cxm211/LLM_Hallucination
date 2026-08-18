@@ -1,0 +1,14 @@
+private void findDeclaredNames(Node n, Node parent, Renamer renamer) {
+    if (NodeUtil.isFunctionDeclaration(n)) {
+      Node nameNode = n.getFirstChild();
+      renamer.addDeclaredName(nameNode.getString());
+      return;
+    } else {
+      if (NodeUtil.isVarDeclaration(n)) {
+        renamer.addDeclaredName(n.getString());
+      }
+      for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
+        findDeclaredNames(c, n, renamer);
+      }
+    }
+  }

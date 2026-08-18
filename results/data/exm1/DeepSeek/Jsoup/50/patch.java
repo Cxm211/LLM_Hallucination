@@ -1,0 +1,74 @@
+static Document parseByteData(ByteBuffer byteData, String charsetName, String baseUri, Parser parser) {
+        String docData;
+        Document doc = null;
+
+        // look for BOM - overrides any other header or input
+        if (charsetName == null) { // determine from meta. safe parse as UTF-8
+            // Detect BOM from bytes
+            byte[] bom = new byte[4];
+            byteData.mark();
+            byteData.get(bom, 0, 4);
+            byteData.reset();
+            if (bom[0] == (byte)0x00 && bom[1] == (byte)0x00 && bom[2] == (byte)0xFE && bom[3] == (byte)0xFF) {
+                charsetName = "UTF-32BE";
+                byteData.position(4);
+            } else if (bom[0] == (byte)0xFF && bom[1] == (byte)0xFE && bom[2] == (byte)0x00 && bom[3] == (byte)0x00) {
+                charsetName = "UTF-32LE";
+                byteData.position(4);
+            } else if (bom[0] == (byte)0xFE && bom[1] == (byte)0xFF) {
+                charsetName = "UTF-16BE";
+                byteData.position(2);
+            } else if (bom[0] == (byte)0xFF && bom[1] == (byte)0xFE) {
+                charsetName = "UTF-16LE";
+                byteData.position(2);
+            } else if (bom[0] == (byte)0xEF && bom[1] == (byte)0xBB && bom[2] == (byte)0xBF) {
+                charsetName = "UTF-8";
+                byteData.position(3);
+            } else {
+                byteData.position(0);
+            }
+        }
+        if (charsetName == null) { // no BOM, so use meta detection
+            docData = Charset.forName(defaultCharset).decode(byteData).toString();
+            doc = parser.parseInput(docData, baseUri);
+            Element meta = doc.select("meta[http-equiv=content-type], meta[charset]").first();
+            if (meta != null) { // if not found, will keep utf-8 as best attempt
+                String foundCharset = null;
+                if (meta.hasAttr("http-equiv")) {
+                    foundCharset = getCharsetFromContentType(meta.attr("content"));
+                }
+                if (foundCharset == null && meta.hasAttr("charset")) {
+                    try {
+                        if (Charset.isSupported(meta.attr("charset"))) {
+                            foundCharset = meta.attr("charset");
+                        }
+                    } catch (IllegalCharsetNameException e) {
+                        foundCharset = null;
+                    }
+                }
+
+                if (foundCharset != null && foundCharset.length() != 0 && !foundCharset.equals(defaultCharset)) { // need to re-decode
+                    foundCharset = foundCharset.trim().replaceAll("[\"']", "");
+                    charsetName = foundCharset;
+                    byteData.rewind();
+                    docData = Charset.forName(foundCharset).decode(byteData).toString();
+                    doc = null;
+                }
+            }
+        } else { // specified by content type header (or by user on file load) or detected from BOM
+            Validate.notEmpty(charsetName, "Must set charset arg to character set of file to parse. Set to null to attempt to detect from HTML");
+            docData = Charset.forName(charsetName).decode(byteData).toString();
+        }
+        if (docData.length() > 0 && docData.charAt(0) == UNICODE_BOM) {
+            byteData.rewind();
+            docData = Charset.forName(defaultCharset).decode(byteData).toString();
+            docData = docData.substring(1);
+            charsetName = defaultCharset;
+            doc = null;
+        }
+        if (doc == null) {
+            doc = parser.parseInput(docData, baseUri);
+            doc.outputSettings().charset(charsetName);
+        }
+        return doc;
+    }

@@ -1,0 +1,10 @@
+    public void writeRawValue(String text, int offset, int len) throws IOException {
+        if (text == null) {
+            writeNull();
+        } else {
+            if (offset > 0 || len != text.length()) {
+                text = text.substring(offset, offset+len);
+            }
+            _append(JsonToken.VALUE_EMBEDDED_OBJECT, new RawValue(text));
+        }
+    }

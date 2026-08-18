@@ -1,0 +1,99 @@
+    public static long parseOctal(final byte[] buffer, final int offset, final int length) {
+        long    result = 0;
+        int     end = offset + length;
+        int     start = offset;
+
+        if (length < 2){
+            throw new IllegalArgumentException("Length "+length+" must be at least 2");
+        }
+
+        if (buffer[start] == 0) {
+            return 0L;
+        }
+
+        // Skip leading spaces
+        while (start < end){
+            if (buffer[start] == ' '){
+                start++;
+            } else {
+                break;
+            }
+        }
+
+        // Trim all trailing NULs and spaces.
+        // The ustar and POSIX tar specs require a trailing NUL or
+        // space but some implementations use the extra digit for big
+        // sizes/uids/gids ...
+        byte trailer = buffer[end - 1];
+        while (start < end && (trailer == 0 || trailer == ' ')) {
+            end--;
+            trailer = buffer[end - 1];
+        }
+
+        for ( ;start < end; start++) {
+            final byte currentByte = buffer[start];
+            if (currentByte == 0) {
+                break;
+            }
+            // CheckStyle:MagicNumber OFF
+            if (currentByte < '0' || currentByte > '7'){
+                throw new IllegalArgumentException(
+                        exceptionMessage(buffer, offset, length, start, currentByte));
+            }
+            result = (result << 3) + (currentByte - '0'); // convert from ASCII
+            // CheckStyle:MagicNumber ON
+        }
+
+        return result;
+    }
+
+// trigger testcase
+@Test
+    public void testCOMPRESS178() throws Exception {
+        final File input = getFile("COMPRESS-178.tar");
+        final InputStream is = new FileInputStream(input);
+        final ArchiveInputStream in = new ArchiveStreamFactory().createArchiveInputStream("tar", is);
+        try {
+            in.getNextEntry();
+            fail("Expected IOException");
+        } catch (IOException e) {
+            Throwable t = e.getCause();
+            assertTrue("Expected cause = IllegalArgumentException", t instanceof IllegalArgumentException);
+        }
+        in.close();
+    }
+
+@Test
+    public void testParseOctalInvalid() throws Exception{
+        byte [] buffer;
+        buffer=new byte[0]; // empty byte array
+        try {
+            TarUtils.parseOctal(buffer,0, buffer.length);
+            fail("Expected IllegalArgumentException - should be at least 2 bytes long");
+        } catch (IllegalArgumentException expected) {
+        }
+        buffer=new byte[]{0}; // 1-byte array
+        try {
+            TarUtils.parseOctal(buffer,0, buffer.length);
+            fail("Expected IllegalArgumentException - should be at least 2 bytes long");
+        } catch (IllegalArgumentException expected) {
+        }
+        buffer = "abcdef ".getBytes(CharsetNames.UTF_8); // Invalid input
+        try {
+            TarUtils.parseOctal(buffer,0, buffer.length);
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+        }
+        buffer = " 0 07 ".getBytes(CharsetNames.UTF_8); // Invalid - embedded space
+        try {
+            TarUtils.parseOctal(buffer,0, buffer.length);
+            fail("Expected IllegalArgumentException - embedded space");
+        } catch (IllegalArgumentException expected) {
+        }
+        buffer = " 0\00007 ".getBytes(CharsetNames.UTF_8); // Invalid - embedded NUL
+        try {
+            TarUtils.parseOctal(buffer,0, buffer.length);
+            fail("Expected IllegalArgumentException - embedded NUL");
+        } catch (IllegalArgumentException expected) {
+        }
+    }

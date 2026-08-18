@@ -1,0 +1,1 @@
+public double doubleValue() { BigInteger num = numerator; BigInteger den = denominator; BigInteger gcd = num.gcd(den); num = num.divide(gcd); den = den.divide(gcd); double result = num.doubleValue() / den.doubleValue(); return result; }

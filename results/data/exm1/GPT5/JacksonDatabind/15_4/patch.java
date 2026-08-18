@@ -1,0 +1,1 @@
+public boolean isMapLikeType() { return (this instanceof MapLikeType); }
