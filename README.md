@@ -99,7 +99,7 @@ results/
 └── evaluation/<setting>/<Model>/<Project>.csv  what running the tests produced
 ```
 
-`data/` holds the `input.java` given to each model, its parsed `output.json`, the `patch*.java` extracted from it, the setting's intermediate artifact (`trigger.json`, `expn.json`, or `add_test*.java`), and the developer-written `fixed.java` as ground truth. `evaluation/` holds the patch outcomes, coverage precision/recall/F1, and generated-testcase validity tables reported in the paper.
+`data/` holds the `input.java` given to each model, its parsed `output.json`, the `patch*.java` extracted from it, the setting's intermediate artifact (`trigger.json`, `expn.json`, or `add_test*.java`), and the developer-written `groundtruth.java`. `evaluation/` holds the patch outcomes, coverage precision/recall/F1, and generated-testcase validity tables reported in the paper.
 
 Every setting covers the same 832 Defects4J bugs; `exm1` additionally splits a bug into several slices when its relevant test suite exceeds the 300-method limit, giving 3586 instances. [results/README.md](results/README.md) documents every column.
 

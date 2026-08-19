@@ -5,8 +5,8 @@ Build the API request payloads for every (setting, model) combination in the stu
 
 This merges the eight per-setting `get_batch.py` scripts into one. It reads the
 system prompt from <repo>/prompt/ and the task inputs from <repo>/results/data/, and
-writes the generated payloads to a separate output root so the archived
-`results/data/<setting>/<model>/z_requests/` directories are never overwritten.
+writes the generated payloads to a separate output root so nothing under results/ is
+overwritten.
 
     <repo>/
     ├── prompt/<task>.txt                              system instruction
