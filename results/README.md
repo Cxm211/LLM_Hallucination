@@ -137,8 +137,7 @@ The final outputs are published.
 | `output.json` | all | The model's parsed JSON response |
 | `patch.java`, `patch1.java`, … | all | Model-generated fixed function(s), extracted from `fixed_code` in the same order as the buggy functions appear in `input.java` |
 | `groundtruth.java` | exm1, exm2, exm3 | The developer-written fixed function(s) — the ground truth the patch is compared against |
-| `trigger.json` | exm1 | Model-predicted set of bug-triggering test methods |
-| `expn.json` | exm2 | Model-predicted executed lines per function, buggy and fixed |
+| `prediction.json` | exm1, exm2 | The setting's intermediate artifact: the predicted bug-triggering test methods for `exm1`, the predicted executed lines per function on the buggy and fixed versions for `exm2` |
 | `add_test.java`, `add_test1.java`, … | exm3 | Generated additional testcase; line 1 is `// <target test file path>` |
 
 Bug directories are named by Defects4J bug id. In `exm1`, a bug whose relevant test suite

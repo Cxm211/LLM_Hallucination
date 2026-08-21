@@ -31,8 +31,8 @@ MODEL = "deepseek-reasoner"
 TEMPERATURE = 0.0
 MAX_TOKENS = 60000
 # ---- merged from the four per-setting submit.py scripts ------------------
-# This script lives at <repo>/scripts/submit_DeepSeek.py
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# This script lives at <repo>/scripts/generation/submit_DeepSeek.py
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SETTINGS = ["baseline", "exm1", "exm2", "exm3"]
 PROMPT_FILE = {
     "baseline": "baseline.txt",

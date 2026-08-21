@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ---- merged from the four per-setting submit.sh scripts ------------------
-# This script lives at <repo>/scripts/submit_GPT5.sh
+# This script lives at <repo>/scripts/generation/submit_GPT5.sh
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$_SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$_SCRIPT_DIR/../.." && pwd)"
 SETTING=""          # baseline | exm1 | exm2 | exm3, required via --setting
 # -------------------------------------------------------------------------
 

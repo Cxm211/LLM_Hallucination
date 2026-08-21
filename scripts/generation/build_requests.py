@@ -14,16 +14,16 @@ overwritten.
     └── generated_requests/<setting>/<model>/<Project>/         output (default)
 
 Usage
-    python scripts/build_requests.py --setting exm3 --model Claude
-    python scripts/build_requests.py --setting exm3 --model Claude --project Lang
-    python scripts/build_requests.py --all
-    python scripts/build_requests.py --all --out-root /tmp/req
+    python scripts/generation/build_requests.py --setting exm3 --model Claude
+    python scripts/generation/build_requests.py --setting exm3 --model Claude --project Lang
+    python scripts/generation/build_requests.py --all
+    python scripts/generation/build_requests.py --all --out-root /tmp/req
 
 Providers
     Claude    Anthropic Message Batches  -> <Project>/batch.json, batch1.json, ...
     GPT5      OpenAI Batch (/v1/responses) -> <Project>/requests.jsonl, requests1.jsonl, ...
 
-DeepSeek has no batch endpoint, so it has no payload stage at all: scripts/submit_DeepSeek.py
+DeepSeek has no batch endpoint, so it has no payload stage at all: scripts/generation/submit_DeepSeek.py
 builds each request in memory and calls the synchronous API directly.
 
 Submitting
@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Tuple
 
 # --- repository-anchored paths -------------------------------------------
 _HERE = Path(__file__).resolve()
-REPO_ROOT = _HERE.parents[1]
+REPO_ROOT = _HERE.parents[2]
 PROMPT_DIR = REPO_ROOT / "prompt"
 DATA_ROOT = REPO_ROOT / "results" / "data"
 DEFAULT_OUT_ROOT = REPO_ROOT / "generated_requests"
